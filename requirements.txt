@@ -1,0 +1,23 @@
+# Core
+typer[all]>=0.12
+rich>=13.7
+
+# HTTP client
+httpx>=0.27
+
+# LLM backends
+anthropic>=0.28        # only needed when LLM_BACKEND=anthropic
+ollama>=0.2            # optional convenience wrapper (client.py uses httpx directly)
+
+# Data validation
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# News / search
+tavily-python>=0.3
+
+# Environment
+python-dotenv>=1.0
+
+# Phase 2 (not needed for MVP — listed for reference)
+# aiosqlite>=0.20
