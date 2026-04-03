@@ -7,15 +7,15 @@ Identifies mispriced odds in Polymarket event-driven prediction markets using a
 
 ```
 Polymarket Gamma API
-  → Synthesizer (3 Tavily searches → BriefingDocument)
-    → Council of Seven (7 parallel LLM calls, confidence-weighted)
-      → Edge calculation vs. market price
+  → Synthesizer (5 Tavily searches → BriefingDocument)
+    → Council of Seven (7 parallel LLM calls, two-sided confidence-weighted)
+      → Edge calculation vs. market price (YES-side and NO-side independently)
         → CLI recommendation: BUY YES / BUY NO / PASS
 ```
 
-The council's final score is a confidence-weighted average of all 7 agents' probability
-estimates. An opportunity is flagged only when `|edge| > 7%` **and** mean agent confidence
-is HIGH (≥ 70%). Everything else is a PASS.
+The council computes two independent scores: a YES-side and NO-side weighted average,
+each using per-agent directional confidence. An opportunity is flagged when either
+side's edge exceeds the threshold **and** that side's mean confidence is HIGH.
 
 ---
 
@@ -51,12 +51,12 @@ TAVILY_API_KEY=tvly-...
 # Dev (local Ollama)
 LLM_BACKEND=ollama
 OLLAMA_MODEL=llama3.1:8b
-OLLAMA_CONCURRENCY=2       # keep low on consumer GPUs (RTX 2070 etc.) to prevent OOM
+LOCAL_LLM_CONCURRENCY=1    # keep low on consumer GPUs (RTX 2070 etc.) to prevent OOM
 
-# Prod (Anthropic API)
+# Prod (Anthropic API) — runs all 7 agents fully in parallel
 # LLM_BACKEND=anthropic
 # ANTHROPIC_API_KEY=sk-ant-...
-# OLLAMA_CONCURRENCY=7     # Anthropic handles full parallelism fine
+# ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 ```
 
 **4. (Dev only) Start Ollama and pull the model**
@@ -73,17 +73,25 @@ ollama pull llama3.1:8b
 Run from the **parent directory** of `pqi/`:
 
 ```bash
-python3 -m pqi.main [OPTIONS]
+python3 -m pqi.main [COMMAND] [OPTIONS]
 ```
 
-### Flags
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `analyze` (default) | Fetch markets, run the council, print recommendations |
+| `categories` | List available tags and series slugs for `--category` |
+
+### Flags (analyze command)
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--top-n` | `-n` | `INT` | `10` | Number of markets to show in the selection list |
-| `--category` | `-c` | `TEXT` | _(all)_ | Filter markets by category before listing |
+| `--category` | `-c` | `TEXT` | _(all)_ | Filter by broad tag (e.g. `esports`) or specific series slug (e.g. `counter-strike`) |
 | `--top` | `-t` | flag | off | Skip the selection prompt — auto-pick the highest-volume market |
-| `--resolve-within` | `-r` | `INT` | _(all)_ | Only show markets that resolve within this many hours |
+| `--resolve-within` | `-r` | `INT` | _(all)_ | Only show markets resolving within this many hours |
+| `--min-volume` | `-v` | `FLOAT` | _(config)_ | Override minimum volume floor in USD (use `-v 0` to see all) |
 
 All flags can be freely combined.
 
@@ -93,125 +101,82 @@ All flags can be freely combined.
 # Interactive — show 10 markets sorted by volume, pick one
 python3 -m pqi.main
 
-# Interactive — show only 5 markets
-python3 -m pqi.main --top-n 5
+# Top 10 esports markets resolving within 4 hours
+python3 -m pqi.main -c esports -r 4 -n 10
 
-# Non-interactive — immediately analyse the #1 market by volume
+# Counter-Strike only, next 2 hours, show all regardless of volume
+python3 -m pqi.main -c counter-strike -r 2 -v 0
+
+# Non-interactive — top market by volume, any category
 python3 -m pqi.main --top
-
-# Non-interactive — top market in the "politics" category
-python3 -m pqi.main --top --category politics
-
-# Short form of the above
-python3 -m pqi.main -t -c politics
-
-# Today's events (NCAA, football, esports), pick interactively
-python3 -m pqi.main --resolve-within 24
 
 # Today's events, auto-select the highest-volume one
 python3 -m pqi.main --resolve-within 24 --top
 
-# Top 5 sports league markets resolving within ~3 months, interactive
-python3 -m pqi.main --resolve-within 2000 --top-n 5
-
-# Live/near-live events only — esports/crypto markets resolving in under 2h
-python3 -m pqi.main --resolve-within 2 --top-n 10
+# List available categories
+python3 -m pqi.main categories
 ```
 
 ### What the output looks like
 
 ```
-Active Polymarket Markets
-╭───┬─────────────────────────────────────────────┬───────────┬────────────┬────────────────╮
-│ # │ Question                                    │  Resolves │  Yes Price │   Volume (USD) │
-├───┼─────────────────────────────────────────────┼───────────┼────────────┼────────────────┤
-│ 1 │ Will X win the 2026 Stanley Cup?            │      ~3mo │      19.2% │    $13,346,053 │
-│ 2 │ GTA VI released before June 2026?           │      ~1mo │       1.1% │    $13,076,439 │
-│ 3 │ Will Harvey Weinstein be sentenced to no…   │   expired │      30.4% │       $296,877 │
-╰───┴─────────────────────────────────────────────┴───────────┴────────────┴────────────────╯
-
-Select a market [1–3, Enter for #1]:
-```
-
-After selection, the council runs and prints:
-
-```
 Council of Seven — Verdicts
-  Agent                          Prob %   Conf %   Key Factor
- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  The Rules Lawyer                  75%      80%   Resolution ambiguity risk
-  The Bull                          85%      95%   Recent team dominance
-  The Bear                          55%      42%   Inconsistent big-game performance
-  The Base-Rate Statistician        42%      75%   ~10% historical base rate per team
-  The Sentiment Analyst             75%      90%   Crowd under-pricing momentum
-  The Domain Specialist             72%      90%   Playoff seeding advantage
-  The Contrarian                    10%      60%   Key player injury risk
+  Agent                          Prob %  Conf Y%  Conf N%   Key Factor
+ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  The Rules Lawyer                  71%      78%      62%   ...
+  The Bull                          84%      85%      72%   ...
+  The Bear                          71%      78%      42%   ...
+  ...
 
-╭─── Recommendation ───╮
-│ Final Score:  62.7%  │
-│ Market Price: 19.2%  │
-│ Edge:         +43.5% │
-│ Confidence:   HIGH   │
-│                      │
-│ >>> BUY YES <<<      │  ← green = BUY YES, red = BUY NO, yellow = PASS
-╰──────────────────────╯
+╭─────────────── Recommendation ───────────────╮
+│ Council YES:    75.2%  |  Council NO:  24.3% │
+│ Market Prices:  YES = 66.0%  |  NO = 34.0%   │
+│ YES Edge:       +9.2%  |  NO Edge:  -9.7%    │
+│ Confidence:     HIGH                         │
+│                                              │
+│ >>> BUY YES @ $0.66/share <<<                │
+╰──────────────────────────────────────────────╯
 ```
 
 ---
 
-## Filtering notes
+## Category filter (`--category`)
 
-### Category filter (`--category`)
+Two-tier resolution:
+1. **Specific series** — exact or partial slug match (e.g. `counter-strike`, `valorant`, `atp`). Server-side filter via Gamma API `series_id`.
+2. **Broad tag** — matches event tags across all series (e.g. `esports`, `sports`, `crypto`, `politics`). Server-side filter via Gamma API `tag_id`.
 
-The Gamma API supports category as a query parameter, but **very few markets have
-a category set** — most return as `"general"`. Useful values seen in practice:
+Run `pqi categories` to see available tags and series slugs. If the category doesn't match anything, the command fails loudly with a suggestion.
 
-| Value | Notes |
-|-------|-------|
-| `politics` | Political events and elections |
-| `crypto` | Crypto price / protocol markets |
-| `sports` | Sports outcomes |
+## Resolve-within filter (`--resolve-within`)
 
-If `--category` returns too few (or zero) results, drop the flag and browse all markets.
+Filters to markets resolving within the next N hours. Uses the Gamma API's
+`end_date_min`/`end_date_max` params. The volume floor is automatically relaxed
+for short windows (< 4h) to show live matches with low volume.
 
-### Resolve-within filter (`--resolve-within`)
+The `Resolves` column shows time-to-resolution: `45m`, `11h`, `7d`, `~2mo`.
 
-Filters to markets whose real-world event ends within the next N hours —
-e.g. a football match in 11h, an NCAA game in 21h, an esports bracket match in 2h.
-Filtering is done **server-side** via the Gamma API's `end_date_min`/`end_date_max`
-params, so `--top-n 20 --resolve-within 24` gives you the genuine top-20 by volume
-within that window, not the top-20 overall filtered down.
+## Volume floor (`--min-volume`)
 
-Expired markets (event already ended, oracle not yet settled) are excluded — the
-filter window is strictly in the future.
-
-The `Resolves` column in the market list shows time-to-resolution at a glance:
-`45m`, `11h`, `7d`, `~2mo`. Sub-hour precision is shown in minutes.
-
-```bash
-python3 -m pqi.main --resolve-within 2        # next 2 hours (live/near-live events)
-python3 -m pqi.main --resolve-within 24       # today's events
-python3 -m pqi.main --resolve-within 168      # this week
-python3 -m pqi.main --resolve-within 720      # this month
-```
-
-If no markets fall within the window, PQI exits with a descriptive error suggesting
-a larger value.
+By default, markets below `MIN_VOLUME_USD` ($10K) are excluded. For short time
+windows (< 4h), the floor drops to `MIN_VOLUME_SHORT_WINDOW_USD` ($500).
+Use `-v 0` to see all markets regardless of volume.
 
 ---
 
 ## Tuning
 
-All thresholds are set in `.env` (or `config.py` defaults):
+All thresholds are set in `.env` (see `.env.example` for full documentation):
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `EDGE_THRESHOLD` | `0.07` | Minimum \|edge\| to issue a BUY (raise to be more selective) |
-| `CONFIDENCE_HIGH_THRESHOLD` | `0.70` | Mean agent confidence required for HIGH rating |
-| `CONFIDENCE_MEDIUM_THRESHOLD` | `0.40` | Floor for MEDIUM (below = LOW, always PASS) |
-| `MIN_VOLUME_USD` | `10000` | Markets below this volume are excluded |
-| `MAX_MARKETS_TO_FETCH` | `20` | Raw fetch limit sent to the Gamma API |
-| `OLLAMA_CONCURRENCY` | `2` | Max parallel LLM calls (keep low on consumer GPUs) |
+| `EDGE_THRESHOLD` | `0.07` | Minimum edge to issue a BUY |
+| `CONFIDENCE_HIGH_THRESHOLD` | `0.70` | Mean confidence required for HIGH |
+| `MIN_VOLUME_USD` | `10000` | Volume floor for general queries |
+| `MIN_VOLUME_SHORT_WINDOW_USD` | `500` | Volume floor for short time-window queries |
+| `LOCAL_LLM_CONCURRENCY` | `1` | Max parallel Ollama calls (no effect on Anthropic) |
+| `TAVILY_SEARCHES_PER_MARKET` | `5` | Tavily queries per analysis (3-5) |
+| `MIN_TRADEABLE_PRICE` | `0.05` | Minimum per-share price to issue a BUY |
 
 ---
 
@@ -219,19 +184,19 @@ All thresholds are set in `.env` (or `config.py` defaults):
 
 ```
 pqi/
-├── main.py              # CLI (typer + rich)
+├── main.py              # CLI (typer + rich) — analyze + categories commands
 ├── config.py            # env var loading and defaults
-├── models.py            # Pydantic contracts between modules
-├── scoring.py           # confidence-weighted scoring + edge + recommendation
+├── models.py            # Pydantic contracts (MarketData, BriefingDocument, AgentVerdict, CouncilResult)
+├── scoring.py           # two-sided confidence-weighted scoring + edge + recommendation
 ├── agents/
 │   ├── personas.py      # all 7 system prompts (AGENT_PERSONAS dict)
-│   └── council.py       # parallel agent runner + 3-pass JSON verdict parser
+│   └── council.py       # parallel agent runner + JSON parser + EVENT TIMING
 ├── llm/
 │   └── client.py        # Ollama / Anthropic abstraction (single chat() entrypoint)
 ├── market/
-│   └── polymarket.py    # Gamma API client — fetch_markets(), fetch_market_detail()
+│   └── polymarket.py    # Gamma API client — two-tier category resolution, tag filtering
 └── ingestion/
-    └── synthesizer.py   # Tavily search → BriefingDocument
+    └── synthesizer.py   # Tavily search (5 queries) → BriefingDocument
 ```
 
 ---
@@ -240,7 +205,7 @@ pqi/
 
 | Agent | Bias |
 |-------|------|
-| **The Rules Lawyer** | Resolution criteria only — ignores real-world outcome if oracle condition unmet |
+| **The Rules Lawyer** | Resolution condition analysis — focuses on whether the outcome will occur |
 | **The Bull** | Strongest possible YES case from the briefing |
 | **The Bear** | Strongest possible NO case, Murphy's Law applied |
 | **The Base-Rate Statistician** | Historical base rate, ignores current hype |
@@ -248,9 +213,13 @@ pqi/
 | **The Domain Specialist** | Field-specific technical nuance |
 | **The Contrarian** | Black swan — what single event flips the board |
 
-Agents deliberate **in parallel**, not sequentially. Each agent sees only the
-briefing document (the Rules Lawyer additionally gets the resolution criteria
-injected first as the explicit source of truth).
+Each agent outputs a probability (P(YES), 0-100) with **two separate confidence scores**:
+`confidence_yes` (how sure about the YES estimate) and `confidence_no` (how sure about
+the NO estimate). These can differ when data quality is asymmetric — e.g. strong data
+on the favorite but insufficient data on the underdog.
+
+Agents deliberate **in parallel**, not sequentially. Each sees the briefing document
+with an EVENT TIMING block indicating urgency (LIVE/IMMINENT, TODAY, THIS WEEK, FUTURE).
 
 ---
 
@@ -261,5 +230,5 @@ injected first as the explicit source of truth).
 | `ollama` (default) | Local dev, RTX 2070+ | Free |
 | `anthropic` | Production / accuracy | ~$0.015/council run |
 
-Switch by setting `LLM_BACKEND=anthropic` in `.env`. When switching to Anthropic,
-also set `OLLAMA_CONCURRENCY=7` to restore full parallel council execution.
+Switch by setting `LLM_BACKEND=anthropic` in `.env`. Anthropic runs all 7 agents
+fully in parallel (no concurrency throttle needed).

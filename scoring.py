@@ -11,35 +11,35 @@ from pqi import config
 logger = logging.getLogger(__name__)
 
 
-def confidence_weighted_score(verdicts: list[AgentVerdict]) -> float:
-    """Σ(prob × conf) / Σ(conf). Returns 0.5 if total confidence is zero."""
-    numerator = sum(v.probability * v.confidence for v in verdicts)
-    denominator = sum(v.confidence for v in verdicts)
+def confidence_weighted_score_yes(verdicts: list[AgentVerdict]) -> float:
+    """YES-side: Σ(prob_yes × conf_yes) / Σ(conf_yes). Returns 0.5 if total is zero."""
+    numerator = sum(v.probability * v.confidence_yes for v in verdicts)
+    denominator = sum(v.confidence_yes for v in verdicts)
     return numerator / denominator if denominator > 0 else 0.5
 
 
-def compute_edge(final_score: float, market_yes_price: float) -> float:
-    """Positive = council thinks YES is underpriced; negative = overpriced."""
-    return final_score - market_yes_price
+def confidence_weighted_score_no(verdicts: list[AgentVerdict]) -> float:
+    """NO-side: Σ(prob_no × conf_no) / Σ(conf_no). Returns 0.5 if total is zero."""
+    numerator = sum((1.0 - v.probability) * v.confidence_no for v in verdicts)
+    denominator = sum(v.confidence_no for v in verdicts)
+    return numerator / denominator if denominator > 0 else 0.5
+
+
+def compute_edge(final_score: float, market_price: float) -> float:
+    """Positive = council thinks this side is underpriced."""
+    return final_score - market_price
 
 
 def determine_confidence_level(verdicts: list[AgentVerdict]) -> str:
-    """Map mean agent confidence to HIGH / MEDIUM / LOW label."""
-    mean_conf = sum(v.confidence for v in verdicts) / len(verdicts)
-    if mean_conf >= config.CONFIDENCE_HIGH_THRESHOLD:
+    """Map best per-side mean confidence to HIGH / MEDIUM / LOW label."""
+    mean_yes = sum(v.confidence_yes for v in verdicts) / len(verdicts)
+    mean_no = sum(v.confidence_no for v in verdicts) / len(verdicts)
+    best = max(mean_yes, mean_no)
+    if best >= config.CONFIDENCE_HIGH_THRESHOLD:
         return "HIGH"
-    if mean_conf >= config.CONFIDENCE_MEDIUM_THRESHOLD:
+    if best >= config.CONFIDENCE_MEDIUM_THRESHOLD:
         return "MEDIUM"
     return "LOW"
-
-
-def make_recommendation(edge: float, confidence_level: str) -> str:
-    """Apply edge + confidence threshold rules to produce a recommendation."""
-    if edge > config.EDGE_THRESHOLD and confidence_level == "HIGH":
-        return "BUY YES"
-    if edge < -config.EDGE_THRESHOLD and confidence_level == "HIGH":
-        return "BUY NO"
-    return "PASS"
 
 
 def build_council_result(

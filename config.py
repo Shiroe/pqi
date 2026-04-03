@@ -36,19 +36,21 @@ VALID_BACKENDS = {"ollama", "anthropic"}
 
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_CONCURRENCY: int = int(os.getenv("OLLAMA_CONCURRENCY", "2"))
+LOCAL_LLM_CONCURRENCY: int = int(os.getenv("LOCAL_LLM_CONCURRENCY", "2"))
 
 # Accept ANTHROPIC_API_KEY or the alias CLAUDE_API_KEY used in some .env setups.
 ANTHROPIC_API_KEY: str = (
     os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY") or ""
 )
-ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-3-5")
+ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 # ---------------------------------------------------------------------------
 # Tavily (news search)
 # ---------------------------------------------------------------------------
 
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+TAVILY_SEARCHES_PER_MARKET: int = int(os.getenv("TAVILY_SEARCHES_PER_MARKET", "5"))
+TAVILY_SNIPPET_CAP: int = int(os.getenv("TAVILY_SNIPPET_CAP", "5000"))
 
 # ---------------------------------------------------------------------------
 # Polymarket Gamma API
@@ -67,7 +69,7 @@ MAX_MARKETS_TO_FETCH: int = int(os.getenv("MAX_MARKETS_TO_FETCH", "20"))
 MIN_VOLUME_USD: float = float(os.getenv("MIN_VOLUME_USD", "10000"))
 SHORT_WINDOW_HOURS: int = int(os.getenv("SHORT_WINDOW_HOURS", "4"))
 MIN_VOLUME_SHORT_WINDOW_USD: float = float(
-    os.getenv("MIN_VOLUME_SHORT_WINDOW_USD", "10000")
+    os.getenv("MIN_VOLUME_SHORT_WINDOW_USD", "500")
 )
 
 # ---------------------------------------------------------------------------
@@ -149,7 +151,7 @@ if __name__ == "__main__":
         ("LLM_BACKEND",                LLM_BACKEND),
         ("OLLAMA_MODEL",               OLLAMA_MODEL),
         ("OLLAMA_BASE_URL",            OLLAMA_BASE_URL),
-        ("OLLAMA_CONCURRENCY",         str(OLLAMA_CONCURRENCY)),
+        ("LOCAL_LLM_CONCURRENCY",      str(LOCAL_LLM_CONCURRENCY)),
         ("ANTHROPIC_API_KEY",          _mask(ANTHROPIC_API_KEY)),
         ("ANTHROPIC_MODEL",            ANTHROPIC_MODEL),
         ("TAVILY_API_KEY",             _mask(TAVILY_API_KEY)),
@@ -172,7 +174,7 @@ if __name__ == "__main__":
 
     print("\n--- Type checks ---")
     assert isinstance(LLM_BACKEND, str)
-    assert isinstance(OLLAMA_CONCURRENCY, int)
+    assert isinstance(LOCAL_LLM_CONCURRENCY, int)
     assert isinstance(ANTHROPIC_API_KEY, str)
     assert isinstance(TAVILY_API_KEY, str)
     assert isinstance(GAMMA_RATE_LIMIT_DELAY, float)

@@ -58,8 +58,10 @@ class AgentVerdict(BaseModel):
     """Human-readable display name, e.g. 'The Rules Lawyer'."""
     probability: float = Field(..., ge=0.0, le=1.0)
     """Agent's estimate of the YES probability."""
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    """Agent's confidence in its own estimate (used as weight in scoring)."""
+    confidence_yes: float = Field(..., ge=0.0, le=1.0)
+    """Agent's confidence in its YES-side estimate."""
+    confidence_no: float = Field(..., ge=0.0, le=1.0)
+    """Agent's confidence in its NO-side estimate."""
     rationale: str
     """2–4 sentence explanation of the verdict."""
     key_factor: str
@@ -75,9 +77,13 @@ class CouncilResult(BaseModel):
     market: MarketData
     verdicts: list[AgentVerdict]
     final_score: float = Field(..., ge=0.0, le=1.0)
-    """Confidence-weighted probability of YES across all agents."""
+    """Confidence-weighted probability of YES across all agents (YES-side)."""
+    no_score: float = Field(..., ge=0.0, le=1.0)
+    """Confidence-weighted probability of NO across all agents (NO-side)."""
     edge: float
-    """final_score − yes_price.  Positive = underpriced YES; negative = overpriced YES."""
+    """final_score − yes_price.  Positive = underpriced YES."""
+    no_edge: float
+    """no_score − no_price.  Positive = underpriced NO."""
     recommendation: Literal["BUY YES", "BUY NO", "PASS"]
     confidence_level: Literal["HIGH", "MEDIUM", "LOW"]
 
@@ -101,39 +107,19 @@ class CouncilResult(BaseModel):
         """
         Compute all derived fields from raw verdicts and assemble a CouncilResult.
 
-        Args:
-            market:               The market being evaluated.
-            verdicts:             List of AgentVerdict objects (probability & confidence
-                                  already normalised to 0.0–1.0 by council.py).
-            edge_threshold:       Minimum |edge| to issue a BUY signal (default 0.07).
-            confidence_high:      Mean confidence floor for HIGH label (default 0.60).
-            confidence_medium:    Mean confidence floor for MEDIUM label (default 0.40).
-            consensus_yes_floor:  Median probability must exceed this for BUY YES.
-                                  Blocks signals driven by one or two outlier agents.
-            consensus_no_ceiling: Median probability must be below this for BUY NO.
-            min_tradeable_price:  Minimum per-share price of the recommended side to
-                                  issue a BUY. BUY YES requires yes_price ≥ threshold;
-                                  BUY NO requires (1 - yes_price) ≥ threshold.
-                                  Near-zero-priced sides are near-impossible reversals —
-                                  downgrade to PASS to avoid hallucination-driven signals.
-
-        Returns:
-            A fully validated CouncilResult.
-
-        Raises:
-            ValueError: If verdicts is empty (cannot compute a meaningful score).
+        Two-sided scoring: YES and NO sides are scored independently using
+        their respective confidence weights. An agent can be highly confident
+        about one side but uncertain about the other.
 
         Scoring pipeline:
-          1. final_score = Σ(prob × conf) / Σ(conf)   [confidence-weighted mean]
-          2. edge        = final_score − market.yes_price
-          3. confidence_level = HIGH / MEDIUM / LOW from mean confidence
-          4. median_prob = median of agent probabilities  [outlier-resistant]
-          5. recommendation = BUY YES / BUY NO / PASS
-               BUY YES: edge > threshold AND confidence HIGH AND median > yes_floor
-                        AND yes_price ≥ min_tradeable_price
-               BUY NO:  edge < -threshold AND confidence HIGH AND median < no_ceiling
-                        AND (1 - yes_price) ≥ min_tradeable_price
-               else: PASS
+          1. yes_score = Σ(prob_yes × conf_yes) / Σ(conf_yes)
+             no_score  = Σ(prob_no  × conf_no)  / Σ(conf_no)
+          2. yes_edge = yes_score − market.yes_price
+             no_edge  = no_score  − (1 − market.yes_price)
+          3. yes_confidence_level / no_confidence_level from mean per-side confidence
+          4. median_prob = median of agent probabilities (consensus gate)
+          5. BUY YES evaluated from yes_edge + yes_confidence
+             BUY NO  evaluated from no_edge  + no_confidence (independent)
         """
         if not verdicts:
             raise ValueError(
@@ -141,22 +127,36 @@ class CouncilResult(BaseModel):
                 "At least one AgentVerdict is required."
             )
 
-        # Step 1 — confidence-weighted probability
-        numerator = sum(v.probability * v.confidence for v in verdicts)
-        denominator = sum(v.confidence for v in verdicts)
-        final_score = numerator / denominator if denominator > 0 else 0.5
+        # Step 1 — two-sided confidence-weighted probabilities
+        yes_num = sum(v.probability * v.confidence_yes for v in verdicts)
+        yes_den = sum(v.confidence_yes for v in verdicts)
+        final_score = yes_num / yes_den if yes_den > 0 else 0.5
 
-        # Step 2 — edge
+        no_num = sum((1.0 - v.probability) * v.confidence_no for v in verdicts)
+        no_den = sum(v.confidence_no for v in verdicts)
+        no_score = no_num / no_den if no_den > 0 else 0.5
+
+        # Step 2 — two-sided edges
+        no_price = 1.0 - market.yes_price
         edge = final_score - market.yes_price
+        no_edge = no_score - no_price
 
-        # Step 3 — confidence level label
-        mean_confidence = sum(v.confidence for v in verdicts) / len(verdicts)
-        if mean_confidence >= confidence_high:
+        # Step 3 — per-side confidence levels
+        mean_conf_yes = sum(v.confidence_yes for v in verdicts) / len(verdicts)
+        mean_conf_no = sum(v.confidence_no for v in verdicts) / len(verdicts)
+
+        # Overall confidence label uses the higher of the two sides
+        best_mean_conf = max(mean_conf_yes, mean_conf_no)
+        if best_mean_conf >= confidence_high:
             confidence_level: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
-        elif mean_confidence >= confidence_medium:
+        elif best_mean_conf >= confidence_medium:
             confidence_level = "MEDIUM"
         else:
             confidence_level = "LOW"
+
+        # Per-side HIGH checks for gate logic
+        yes_conf_high = mean_conf_yes >= confidence_high
+        no_conf_high = mean_conf_no >= confidence_high
 
         # Step 4 — median probability (consensus gate, outlier-resistant)
         sorted_probs = sorted(v.probability for v in verdicts)
@@ -166,20 +166,14 @@ class CouncilResult(BaseModel):
         else:
             median_prob = (sorted_probs[n // 2 - 1] + sorted_probs[n // 2]) / 2
 
-        # Step 5 — recommendation
-        # All gates must pass for a BUY: edge, confidence, council consensus,
-        # AND the recommended side must cost enough to be realistically tradeable.
-        # A near-zero price means the market prices that side as near-impossible;
-        # even with apparent edge, the reversal is likely unrealistic within the
-        # remaining time horizon.
-        no_price = 1.0 - market.yes_price
+        # Step 5 — recommendation (each side evaluated independently)
         if (edge > edge_threshold
-                and confidence_level == "HIGH"
+                and yes_conf_high
                 and median_prob > consensus_yes_floor
                 and market.yes_price >= min_tradeable_price):
             recommendation: Literal["BUY YES", "BUY NO", "PASS"] = "BUY YES"
-        elif (edge < -edge_threshold
-                and confidence_level == "HIGH"
+        elif (no_edge > edge_threshold
+                and no_conf_high
                 and median_prob < consensus_no_ceiling
                 and no_price >= min_tradeable_price):
             recommendation = "BUY NO"
@@ -190,7 +184,9 @@ class CouncilResult(BaseModel):
             market=market,
             verdicts=verdicts,
             final_score=final_score,
+            no_score=no_score,
             edge=edge,
+            no_edge=no_edge,
             recommendation=recommendation,
             confidence_level=confidence_level,
         )
@@ -246,20 +242,20 @@ if __name__ == "__main__":
     # ---- AgentVerdict -------------------------------------------------------
     print("\n--- AgentVerdict ---")
     verdicts = [
-        AgentVerdict(agent_name="The Bull",        probability=0.80, confidence=0.75, rationale="Strong momentum.", key_factor="IFT-4 success"),
-        AgentVerdict(agent_name="The Bear",        probability=0.40, confidence=0.70, rationale="FAA delays likely.", key_factor="Regulatory risk"),
-        AgentVerdict(agent_name="The Rules Lawyer",probability=0.65, confidence=0.80, rationale="Criteria clear.", key_factor="Criteria specificity"),
-        AgentVerdict(agent_name="The Contrarian",  probability=0.30, confidence=0.50, rationale="Black swan possible.", key_factor="Unexpected failure"),
-        AgentVerdict(agent_name="The Statistician",probability=0.55, confidence=0.65, rationale="Base rate ~50%.", key_factor="Historical orbital rates"),
-        AgentVerdict(agent_name="The Sentiment Analyst", probability=0.70, confidence=0.60, rationale="Market under-pricing.", key_factor="Crowd apathy"),
-        AgentVerdict(agent_name="The Domain Specialist",  probability=0.72, confidence=0.70, rationale="Engineering on track.", key_factor="Raptor engine reliability"),
+        AgentVerdict(agent_name="The Bull",        probability=0.80, confidence_yes=0.75, confidence_no=0.50, rationale="Strong momentum.", key_factor="IFT-4 success"),
+        AgentVerdict(agent_name="The Bear",        probability=0.40, confidence_yes=0.60, confidence_no=0.70, rationale="FAA delays likely.", key_factor="Regulatory risk"),
+        AgentVerdict(agent_name="The Rules Lawyer",probability=0.65, confidence_yes=0.80, confidence_no=0.75, rationale="Criteria clear.", key_factor="Criteria specificity"),
+        AgentVerdict(agent_name="The Contrarian",  probability=0.30, confidence_yes=0.40, confidence_no=0.50, rationale="Black swan possible.", key_factor="Unexpected failure"),
+        AgentVerdict(agent_name="The Statistician",probability=0.55, confidence_yes=0.65, confidence_no=0.55, rationale="Base rate ~50%.", key_factor="Historical orbital rates"),
+        AgentVerdict(agent_name="The Sentiment Analyst", probability=0.70, confidence_yes=0.60, confidence_no=0.45, rationale="Market under-pricing.", key_factor="Crowd apathy"),
+        AgentVerdict(agent_name="The Domain Specialist",  probability=0.72, confidence_yes=0.70, confidence_no=0.60, rationale="Engineering on track.", key_factor="Raptor engine reliability"),
     ]
     for v in verdicts:
-        print(f"  {v.agent_name:<28}  p={v.probability:.2f}  c={v.confidence:.2f}")
+        print(f"  {v.agent_name:<28}  p={v.probability:.2f}  cy={v.confidence_yes:.2f}  cn={v.confidence_no:.2f}")
 
     # Boundary: probability outside [0,1]
     try:
-        AgentVerdict(agent_name="X", probability=1.1, confidence=0.5, rationale="...", key_factor="x")
+        AgentVerdict(agent_name="X", probability=1.1, confidence_yes=0.5, confidence_no=0.5, rationale="...", key_factor="x")
         raise AssertionError("Should have raised ValidationError for probability > 1.0")
     except Exception as e:
         print(f"  ✓ probability > 1.0 rejected: {type(e).__name__}")
@@ -273,8 +269,8 @@ if __name__ == "__main__":
     print(f"  recommendation  = {result.recommendation}")
 
     # Verify computed values manually
-    num = sum(v.probability * v.confidence for v in verdicts)
-    den = sum(v.confidence for v in verdicts)
+    num = sum(v.probability * v.confidence_yes for v in verdicts)
+    den = sum(v.confidence_yes for v in verdicts)
     expected_score = num / den
     assert abs(result.final_score - expected_score) < 1e-9, "final_score mismatch"
     assert abs(result.edge - (expected_score - market.yes_price)) < 1e-9, "edge mismatch"

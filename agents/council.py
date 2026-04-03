@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 
 from pqi.agents.personas import AGENT_NAMES, AGENT_PERSONAS
 from pqi import config
@@ -49,6 +50,46 @@ _KEY_FACTOR_FIELDS: dict[str, list[str]] = {
 # Message builders
 # ---------------------------------------------------------------------------
 
+def _compute_event_timing(end_date: datetime) -> str:
+    """
+    Compute a human-readable timing block from the market end date.
+    Returns a multi-line string with timing category and context note.
+    """
+    now = datetime.now(timezone.utc)
+    delta_seconds = (end_date - now).total_seconds()
+    hours = delta_seconds / 3600
+
+    if delta_seconds <= 0:
+        category = "EXPIRED"
+        time_str = "already past end date"
+    elif hours < 3:
+        category = "LIVE/IMMINENT"
+        if hours < 1:
+            time_str = f"resolves in ~{int(delta_seconds // 60)} minutes"
+        else:
+            time_str = f"resolves in ~{hours:.1f} hours"
+    elif hours < 24:
+        category = "TODAY"
+        time_str = f"resolves in ~{hours:.0f} hours"
+    elif hours < 168:
+        days = hours / 24
+        category = "THIS WEEK"
+        time_str = f"resolves in ~{days:.1f} days"
+    else:
+        days = hours / 24
+        category = "FUTURE"
+        time_str = f"resolves in ~{int(days)} days"
+
+    block = f"EVENT TIMING: {category} ({time_str})"
+    if category == "LIVE/IMMINENT":
+        block += (
+            "\nNOTE: This event is happening NOW or very soon. Price action after "
+            "the outcome becomes clear will push shares to ~$0.01/$0.99 before "
+            "official resolution."
+        )
+    return block
+
+
 def _format_briefing(briefing: BriefingDocument) -> str:
     """
     Serialise a BriefingDocument to a labelled, human-readable string.
@@ -60,12 +101,14 @@ def _format_briefing(briefing: BriefingDocument) -> str:
     red_block   = "\n".join(f"- {f}" for f in briefing.red_flags) or "- (none)"
 
     no_price = 1.0 - m.yes_price
+    timing_block = _compute_event_timing(m.end_date)
     return (
         f"MARKET QUESTION: {m.question}\n"
         f"CURRENT MARKET PRICES: YES = {m.yes_price:.0%}  |  NO = {no_price:.0%}"
         f"  (buying YES costs ${m.yes_price:.2f}/share; buying NO costs ${no_price:.2f}/share)\n"
         f"CATEGORY: {m.category}\n"
         f"END DATE: {m.end_date.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"{timing_block}\n"
         f"VOLUME (USD): ${m.volume_usd:,.0f}\n"
         f"\nRESOLUTION CRITERIA:\n{m.resolution_criteria}\n"
         f"\nKEY FACTS:\n{facts_block}\n"
@@ -128,10 +171,23 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
             return None
 
     try:
-        prob_raw  = int(data["probability_score"])
-        conf_raw  = int(data["confidence_level"])
+        prob_raw = int(data["probability_score"])
         probability = max(0.0, min(1.0, prob_raw / 100))
-        confidence  = max(0.0, min(1.0, conf_raw / 100))
+
+        # Two-sided confidence: confidence_yes and confidence_no.
+        # Fallback: if agent only provided legacy "confidence_level", use it for both.
+        if "confidence_yes" in data and "confidence_no" in data:
+            conf_yes_raw = int(data["confidence_yes"])
+            conf_no_raw = int(data["confidence_no"])
+        elif "confidence_level" in data:
+            conf_yes_raw = int(data["confidence_level"])
+            conf_no_raw = conf_yes_raw
+            logger.debug("[%s] Legacy confidence_level fallback → both sides = %d", agent_key, conf_yes_raw)
+        else:
+            raise KeyError("Neither confidence_yes/confidence_no nor confidence_level found")
+
+        confidence_yes = max(0.0, min(1.0, conf_yes_raw / 100))
+        confidence_no = max(0.0, min(1.0, conf_no_raw / 100))
     except (KeyError, TypeError, ValueError) as exc:
         logger.warning("[%s] Missing/invalid score fields: %s", agent_key, exc)
         return None
@@ -163,7 +219,8 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
     return AgentVerdict(
         agent_name=AGENT_DISPLAY_NAMES.get(agent_key, agent_key),
         probability=probability,
-        confidence=confidence,
+        confidence_yes=confidence_yes,
+        confidence_no=confidence_no,
         rationale=rationale,
         key_factor=key_factor,
     )
@@ -173,9 +230,9 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
 # Single-agent runner
 # ---------------------------------------------------------------------------
 
-# Semaphore limiting concurrent LLM calls — critical for local Ollama to avoid OOM.
-# OLLAMA_CONCURRENCY defaults to 2 for consumer GPUs; Anthropic backend can use 7.
-_llm_semaphore = asyncio.Semaphore(config.OLLAMA_CONCURRENCY)
+# Semaphore limiting concurrent LLM calls — only active for local Ollama to avoid OOM.
+# API backends (Anthropic) run all 7 agents fully in parallel.
+_llm_semaphore = asyncio.Semaphore(config.LOCAL_LLM_CONCURRENCY)
 
 
 async def _run_single_agent(
@@ -184,15 +241,20 @@ async def _run_single_agent(
 ) -> AgentVerdict | None:
     """
     Run one agent: build its message, call chat(), parse the response.
-    Acquires _llm_semaphore before calling the LLM to cap concurrent requests.
+    For Ollama, acquires _llm_semaphore to cap concurrent calls and avoid OOM.
+    For API backends (Anthropic), runs without the semaphore — fully parallel.
     Returns None if the LLM call or parse step raises — council continues.
     """
     system_prompt = AGENT_PERSONAS[agent_key]
     user_msg      = _build_user_message(briefing, agent_key)
 
     try:
-        async with _llm_semaphore:
-            logger.debug("[%s] semaphore acquired — calling LLM", agent_key)
+        if config.LLM_BACKEND == "ollama":
+            async with _llm_semaphore:
+                logger.debug("[%s] semaphore acquired — calling LLM", agent_key)
+                raw = await chat(system=system_prompt, user=user_msg, json_mode=True)
+        else:
+            logger.debug("[%s] calling LLM (no semaphore — API backend)", agent_key)
             raw = await chat(system=system_prompt, user=user_msg, json_mode=True)
         logger.debug("[%s] raw response length=%d", agent_key, len(raw))
     except Exception as exc:
@@ -204,8 +266,8 @@ async def _run_single_agent(
         logger.warning("[%s] Verdict parse failed — agent skipped", agent_key)
     else:
         logger.debug(
-            "[%s] verdict: p=%.2f c=%.2f",
-            agent_key, verdict.probability, verdict.confidence,
+            "[%s] verdict: p=%.2f cy=%.2f cn=%.2f",
+            agent_key, verdict.probability, verdict.confidence_yes, verdict.confidence_no,
         )
     return verdict
 
@@ -311,12 +373,12 @@ if __name__ == "__main__":
         verdicts = await run_council(briefing)
 
         print(f"Verdicts received: {len(verdicts)}/7\n")
-        print(f"{'Agent':<30} {'Prob':>6} {'Conf':>6}  Key Factor")
-        print("-" * 80)
+        print(f"{'Agent':<30} {'Prob':>6} {'CfY':>6} {'CfN':>6}  Key Factor")
+        print("-" * 85)
         for v in verdicts:
             print(
-                f"{v.agent_name:<30} {v.probability:>5.0%} {v.confidence:>5.0%}"
-                f"  {v.key_factor[:45]}"
+                f"{v.agent_name:<30} {v.probability:>5.0%} {v.confidence_yes:>5.0%}"
+                f" {v.confidence_no:>5.0%}  {v.key_factor[:40]}"
             )
 
         assert len(verdicts) >= 5, (
@@ -324,7 +386,8 @@ if __name__ == "__main__":
         )
         for v in verdicts:
             assert 0.0 <= v.probability <= 1.0, f"probability out of range: {v}"
-            assert 0.0 <= v.confidence  <= 1.0, f"confidence out of range: {v}"
+            assert 0.0 <= v.confidence_yes  <= 1.0, f"confidence_yes out of range: {v}"
+            assert 0.0 <= v.confidence_no   <= 1.0, f"confidence_no out of range: {v}"
             assert v.agent_name, "agent_name is empty"
             assert v.rationale,  "rationale is empty"
             assert v.key_factor, "key_factor is empty"

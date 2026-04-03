@@ -136,22 +136,42 @@ def _category_from_event(event: dict) -> str:
     return "general"
 
 
-async def resolve_series_id(query: str) -> str | None:
+class CategoryMatch:
+    """Result of resolve_category(): either a series_id or a tag_id for server-side filtering."""
+
+    def __init__(self, match_type: str, value: str):
+        self.match_type = match_type  # "series" or "tag"
+        self.value = value            # series_id (str) or tag_id (str)
+
+    @property
+    def is_series(self) -> bool:
+        return self.match_type == "series"
+
+    @property
+    def is_tag(self) -> bool:
+        return self.match_type == "tag"
+
+    def __repr__(self) -> str:
+        return f"CategoryMatch({self.match_type!r}, {self.value!r})"
+
+
+async def resolve_category(query: str) -> CategoryMatch | None:
     """
-    Resolve a user-supplied category string to a Gamma API series_id.
+    Resolve a user-supplied category string to either a series_id or a tag_id.
 
-    Strategy:
-      1. Exact slug match via GET /series?slug=<query>  (fast, single result)
-      2. Partial substring match: fetch /series?limit=200 and search slug/title
-         (handles "btc", "bitcoin", "counter strike" → "counter-strike", etc.)
+    Strategy (three passes):
+      1. Exact series slug match via GET /series?slug=<query>
+      2. Partial series slug/title match via GET /series?limit=200
+      3. Tag match via GET /tags (paginated) — exact then partial slug/label match.
+         Returns tag_id for server-side filtering via /events?tag_id=<id>.
 
-    Returns the series id as a string, or None if no match found.
-    Used by fetch_markets() when --category is supplied.
+    Returns CategoryMatch or None if nothing matches.
     """
     query_clean = query.strip().lower()
+    query_norm = query_clean.replace(" ", "-")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Pass 1: exact slug match
+        # Pass 1: exact series slug match
         r = await client.get(
             f"{config.GAMMA_BASE_URL}/series",
             params={"slug": query_clean, "limit": "1"},
@@ -160,35 +180,86 @@ async def resolve_series_id(query: str) -> str | None:
             results = r.json()
             if results and results[0].get("slug", "").lower() == query_clean:
                 series_id = str(results[0]["id"])
-                logger.debug(
-                    "resolve_series_id(%r): exact slug match → id=%s", query, series_id
-                )
-                return series_id
+                logger.debug("resolve_category(%r): exact series match → id=%s", query, series_id)
+                return CategoryMatch("series", series_id)
 
-        # Pass 2: partial substring match across a wider set
-        r2 = await client.get(
-            f"{config.GAMMA_BASE_URL}/series",
-            params={"limit": "200"},
-        )
-        if r2.status_code != 200:
-            logger.warning("resolve_series_id: /series fetch failed (%d)", r2.status_code)
+        await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+
+        # Pass 2 + 3a: run in parallel — partial series match vs exact tag slug.
+        # Series match takes priority if both hit.
+        async def _try_partial_series() -> CategoryMatch | None:
+            r2 = await client.get(
+                f"{config.GAMMA_BASE_URL}/series",
+                params={"limit": "200"},
+            )
+            if r2.status_code == 200:
+                for s in r2.json():
+                    slug = s.get("slug", "").lower()
+                    title = s.get("title", "").lower()
+                    if query_norm in slug or query_clean in title:
+                        sid = str(s["id"])
+                        logger.debug("resolve_category(%r): partial series %r → id=%s",
+                                     query, s.get("slug"), sid)
+                        return CategoryMatch("series", sid)
             return None
 
-        series_list = r2.json()
-        # Normalise query for substring matching (spaces → hyphens covers "counter strike")
-        query_norm = query_clean.replace(" ", "-")
-        for s in series_list:
-            slug = s.get("slug", "").lower()
-            title = s.get("title", "").lower()
-            if query_norm in slug or query_clean in title:
-                series_id = str(s["id"])
-                logger.debug(
-                    "resolve_series_id(%r): partial match %r → id=%s",
-                    query, s.get("slug"), series_id,
+        async def _try_exact_tag() -> CategoryMatch | None:
+            for slug_variant in (query_clean, query_norm):
+                r3 = await client.get(
+                    f"{config.GAMMA_BASE_URL}/tags/slug/{slug_variant}",
                 )
-                return series_id
+                if r3.status_code == 200:
+                    tag_data = r3.json()
+                    if tag_data and tag_data.get("id"):
+                        tid = str(tag_data["id"])
+                        logger.debug("resolve_category(%r): exact tag slug → id=%s",
+                                     query, tid)
+                        return CategoryMatch("tag", tid)
+            return None
 
-    logger.warning("resolve_series_id(%r): no match found", query)
+        series_result, tag_result = await asyncio.gather(
+            _try_partial_series(), _try_exact_tag(),
+        )
+        # Series takes priority over tag
+        if series_result:
+            return series_result
+        if tag_result:
+            return tag_result
+
+        await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+
+        # Pass 3b: partial tag match via paginated /tags (slower fallback).
+        # Caps at 600 tags (3 pages) to keep latency reasonable.
+        partial_tag_match: dict | None = None
+        for offset in range(0, 600, 200):
+            r3b = await client.get(
+                f"{config.GAMMA_BASE_URL}/tags",
+                params={"limit": "200", "offset": str(offset)},
+            )
+            if r3b.status_code != 200:
+                break
+            batch = r3b.json()
+            if not batch:
+                break
+            for tag in batch:
+                tag_slug = (tag.get("slug") or "").lower()
+                tag_label = (tag.get("label") or "").lower()
+                if query_clean in tag_slug or query_clean in tag_label:
+                    partial_tag_match = tag
+                    break
+            if partial_tag_match:
+                break
+            await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+
+        if partial_tag_match:
+            tag_id = str(partial_tag_match["id"])
+            logger.debug(
+                "resolve_category(%r): partial tag match %r (id=%s)",
+                query, partial_tag_match.get("slug"), tag_id,
+            )
+            return CategoryMatch("tag", tag_id)
+
+    logger.warning("resolve_category(%r): no match found", query)
     return None
 
 
@@ -227,66 +298,96 @@ async def fetch_categories(limit: int = 20) -> list[dict]:
     return results[:limit]
 
 
+async def fetch_tags() -> list[tuple[str, int]]:
+    """
+    Discover broad tag categories by scanning active events for tags with counts.
+
+    Uses the /events endpoint (with tags embedded) rather than /tags, because the
+    /tags endpoint returns 2000+ tags with no activity data. Scanning events gives
+    us only tags that appear on current active events, with usage counts.
+
+    Returns list of (tag_slug, event_count) sorted by count descending.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(
+            f"{config.GAMMA_BASE_URL}/events",
+            params={"active": "true", "closed": "false", "limit": "200",
+                    "order": "volume", "ascending": "false"},
+        )
+        r.raise_for_status()
+        raw_events = r.json()
+
+    await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+
+    tag_counts: dict[str, int] = {}
+    for event in raw_events:
+        for tag in event.get("tags") or []:
+            slug = (tag.get("slug") or "").lower()
+            if slug:
+                tag_counts[slug] = tag_counts.get(slug, 0) + 1
+
+    # Sort by count descending, return as list of tuples
+    return sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
+
+
+class CategoryNotFoundError(ValueError):
+    """Raised when --category matches no series or tag."""
+    pass
+
+
 async def fetch_markets(
     limit: int = config.MAX_MARKETS_TO_FETCH,
     category: str | None = None,
     resolve_within_hours: int | None = None,
+    volume_floor_override: float | None = None,
 ) -> list[MarketData]:
     """
     Fetch active markets from the Gamma API and return parsed, filtered results.
 
-    Endpoint strategy (confirmed against live API 2026-04):
-      - Time-filtered queries  (resolve_within_hours set):
-            GET /events?order=volume&end_date_min=...&end_date_max=...
-          The /events endpoint groups related markets per event; fresh windows
-          in recurring series (next BTC 15-min slot) appear naturally.
-          Volume floor is relaxed (MIN_VOLUME_SHORT_WINDOW_USD).
-          Results sorted by end_date ascending (soonest first).
-
-      - General queries (no time filter):
-            GET /markets?order=volume
-          Consistent server-side ordering. Results sorted by volume_usd desc.
-
-    Category filtering:
-      `category` is a series slug (e.g. "counter-strike", "league-of-legends",
-      "atp", "bitcoin-multi-strikes-weekly").  When provided, `resolve_series_id`
-      translates it to a numeric series_id via GET /series?slug=<slug>, then
-      passes series_id=<id> to the events endpoint.  Both exact and partial
-      slug/title matches are tried.  Use `pqi categories` to list available slugs.
-
-    NOTE: order=end_date and order=volume_24hr return 422 (docs are wrong).
-    Confirmed working: order=volume, order=liquidity.
+    Category filtering (two-tier):
+      1. Exact/partial series slug match → server-side filter via series_id on /events
+      2. Broad tag match (e.g. "esports") → client-side filter on event tags
+      Raises CategoryNotFoundError if --category is set but nothing matches.
 
     Args:
         limit:                 Max markets to return after filtering.
-        category:              Series slug filter (e.g. "counter-strike", "atp").
+        category:              Series slug or broad tag (e.g. "counter-strike", "esports").
         resolve_within_hours:  Only return markets resolving within this many hours.
+        volume_floor_override: If set, overrides the config-based volume floor (use 0 to see all).
 
     Returns:
         With resolve_within_hours: sorted by end_date asc. Otherwise by volume desc.
-        Both capped at `limit`.
     """
-    is_short_window = (
-        resolve_within_hours is not None
-        and resolve_within_hours <= config.SHORT_WINDOW_HOURS
-    )
-    volume_floor = (
-        config.MIN_VOLUME_SHORT_WINDOW_USD if is_short_window else config.MIN_VOLUME_USD
-    )
+    # Volume floor: override > config
+    if volume_floor_override is not None:
+        volume_floor = volume_floor_override
+    else:
+        is_short_window = (
+            resolve_within_hours is not None
+            and resolve_within_hours <= config.SHORT_WINDOW_HOURS
+        )
+        volume_floor = (
+            config.MIN_VOLUME_SHORT_WINDOW_USD if is_short_window else config.MIN_VOLUME_USD
+        )
 
-    # Resolve category slug → series_id once, shared by both sub-functions
-    series_id: str | None = None
+    # Resolve category → series_id or tag slug
+    cat_match: CategoryMatch | None = None
     if category:
-        series_id = await resolve_series_id(category)
-        if series_id is None:
-            logger.warning(
-                "fetch_markets: no series found for category %r — ignoring filter", category
+        cat_match = await resolve_category(category)
+        if cat_match is None:
+            raise CategoryNotFoundError(
+                f"No category matching '{category}'. Run 'pqi categories' to see options."
             )
+        logger.info("Category resolved: %s", cat_match)
+
+    series_id = cat_match.value if (cat_match and cat_match.is_series) else None
+    tag_id = cat_match.value if (cat_match and cat_match.is_tag) else None
 
     if resolve_within_hours is not None:
         return await _fetch_markets_by_time_window(
             limit=limit,
             series_id=series_id,
+            tag_id=tag_id,
             resolve_within_hours=resolve_within_hours,
             volume_floor=volume_floor,
         )
@@ -294,6 +395,7 @@ async def fetch_markets(
         return await _fetch_markets_general(
             limit=limit,
             series_id=series_id,
+            tag_id=tag_id,
             volume_floor=volume_floor,
         )
 
@@ -301,34 +403,35 @@ async def fetch_markets(
 async def _fetch_markets_general(
     limit: int,
     series_id: str | None,
+    tag_id: str | None,
     volume_floor: float,
 ) -> list[MarketData]:
     """
     Fetch markets without a time filter, sorted by volume descending.
 
-    Without series filter: GET /markets?order=volume (fastest, returns all markets)
-    With series filter:    GET /events?series_id=<id>&order=volume (only way to filter
-                          by series — /markets has no series_id param)
-
-    Returns results sorted by volume_usd descending.
+    Three modes:
+      - series_id set:  GET /events?series_id=<id>&order=volume (server-side filter)
+      - tag_id set:     GET /events?tag_id=<id>&order=volume (server-side tag filter)
+      - neither:        GET /markets?order=volume (fastest, all markets)
     """
-    # Fetch 3× more than needed: the API sorts by the "volume" text field
-    # while we filter by "volumeNum" (float).  These can diverge, so top-N
-    # by API volume is not guaranteed to be top-N by volumeNum.
     fetch_limit = max(limit * 3, 30)
 
     markets: list[MarketData] = []
 
-    if series_id:
-        # /events?series_id=<id> is the only supported series filter
+    if series_id or tag_id:
+        # Both paths use /events with server-side filtering
         params: dict[str, str | int] = {
             "active": "true",
             "closed": "false",
             "order": "volume",
             "ascending": "false",
             "limit": fetch_limit,
-            "series_id": series_id,
         }
+        if series_id:
+            params["series_id"] = series_id
+        if tag_id:
+            params["tag_id"] = tag_id
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(f"{config.GAMMA_BASE_URL}/events", params=params)
             response.raise_for_status()
@@ -336,8 +439,8 @@ async def _fetch_markets_general(
 
         await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
         logger.debug(
-            "_fetch_markets_general (series_id=%s): API returned %d events",
-            series_id, len(raw_events),
+            "_fetch_markets_general (series_id=%s, tag_id=%s): API returned %d events",
+            series_id, tag_id, len(raw_events),
         )
 
         seen_ids: set[str] = set()
@@ -385,28 +488,19 @@ async def _fetch_markets_general(
 async def _fetch_markets_by_time_window(
     limit: int,
     series_id: str | None,
+    tag_id: str | None,
     resolve_within_hours: int,
     volume_floor: float,
 ) -> list[MarketData]:
     """
-    Fetch markets within a time window via /events?order=volume&ascending=false.
-
-    Uses the events endpoint because:
-    - It returns ALL markets for an event (e.g. all questions for a football match,
-      all BTC 15-min windows in the range) in one response.
-    - Fresh windows in recurring series (next BTC 5/15-min slot) appear alongside
-      the current window, whereas /markets sorted by all-time volume buries them.
-
-    The volume_floor is intentionally relaxed (MIN_VOLUME_SHORT_WINDOW_USD) so
-    newly-opened recurring-market windows aren't silently dropped.
+    Fetch markets within a time window via /events endpoint.
 
     Returns markets sorted by end_date ascending (soonest resolving first).
+    Applies series_id and tag_id server-side via API params.
     """
     now = datetime.now(timezone.utc)
     end_max = now + timedelta(hours=resolve_within_hours)
 
-    # Fetch more events than needed to ensure we have enough after market-level
-    # volume filtering.  2× limit is sufficient now that the volume floor is low.
     fetch_limit = max(limit * 2, 40)
 
     params: dict[str, str | int] = {
@@ -420,12 +514,15 @@ async def _fetch_markets_by_time_window(
     }
     if series_id:
         params["series_id"] = series_id
+    if tag_id:
+        params["tag_id"] = tag_id
 
     logger.debug(
-        "_fetch_markets_by_time_window: end_date window %s → %s (volume_floor=%.0f)",
+        "_fetch_markets_by_time_window: end_date window %s → %s (volume_floor=%.0f, tag_id=%s)",
         params["end_date_min"],
         params["end_date_max"],
         volume_floor,
+        tag_id,
     )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -456,13 +553,10 @@ async def _fetch_markets_by_time_window(
             )
             if parsed is None:
                 continue
-            # Secondary time guard: ensure market end_date is within the requested window
-            # (event end_date may differ from individual market end_date)
             if parsed.end_date < now or parsed.end_date > end_max:
                 continue
             markets.append(parsed)
 
-    # Sort soonest-resolving first — most actionable for time-bounded queries
     markets.sort(key=lambda m: m.end_date)
     markets = markets[:limit]
     logger.info(

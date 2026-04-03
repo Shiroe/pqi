@@ -2,11 +2,9 @@
 """
 Tavily-powered research synthesizer.
 
-Given a MarketData object, runs 3 targeted Tavily searches and condenses
-the results into a BriefingDocument for the Council of Seven.
-
-Search budget: exactly 3 queries per market to stay within Tavily's free tier
-(1,000 searches/month).
+Given a MarketData object, runs targeted Tavily searches (configurable via
+TAVILY_SEARCHES_PER_MARKET, default 5) and condenses the results into a
+BriefingDocument for the Council of Seven.
 """
 
 import asyncio
@@ -137,32 +135,36 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
 
     tavily = TavilyClient(api_key=config.TAVILY_API_KEY)
 
-    queries = [
-        f"{market.question} latest news",
-        f"{market.question} prediction analysis",
-        f"{market.question} resolution outcome",
+    # Query templates — first N are used based on TAVILY_SEARCHES_PER_MARKET config.
+    all_query_templates = [
+        (f"{market.question} latest news",       "advanced", 7),
+        (f"{market.question} prediction analysis","advanced", 7),
+        (f"{market.question} odds betting",       "basic",   5),
+        (f"{market.question} stats form results", "basic",   5),
+        (f"{market.question} expert preview",     "basic",   5),
     ]
+    queries = all_query_templates[:config.TAVILY_SEARCHES_PER_MARKET]
 
     all_results: list[dict] = []
-    for query in queries:
+    for query_text, depth, max_res in queries:
         try:
             response = await asyncio.to_thread(
-                lambda q=query: tavily.search(
-                    q, max_results=5, search_depth="basic"
+                lambda q=query_text, d=depth, m=max_res: tavily.search(
+                    q, max_results=m, search_depth=d
                 )
             )
             results: list[dict] = response.get("results", [])
             if results:
                 all_results.extend(results)
-                logger.debug("Query '%s' → %d results", query, len(results))
+                logger.debug("Query '%s' [%s] → %d results", query_text, depth, len(results))
             else:
-                logger.warning("Tavily returned no results for query: %s", query)
+                logger.warning("Tavily returned no results for query: %s", query_text)
         except Exception as exc:
-            logger.warning("Tavily query failed ('%s'): %s", query, exc)
+            logger.warning("Tavily query failed ('%s'): %s", query_text, exc)
 
     if not all_results:
         raise RuntimeError(
-            f"All 3 Tavily searches returned no results for: {market.question!r}"
+            f"All {len(queries)} Tavily searches returned no results for: {market.question!r}"
         )
 
     logger.info(
@@ -178,7 +180,7 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
         f"[{r.get('title', 'No title')}]\n{r.get('content', '')}"
         for r in all_results
     )
-    raw_snippets = raw_snippets[:3000]
+    raw_snippets = raw_snippets[:config.TAVILY_SNIPPET_CAP]
 
     user_msg = _SYNTHESIZER_USER_TMPL.format(
         question=market.question,
