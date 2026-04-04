@@ -78,6 +78,7 @@ class MarketData(BaseModel):
     question: str
     resolution_criteria: str
     end_date: datetime
+    event_start_time: datetime | None  # when the real-world event starts
     yes_price: float          # 0.0–1.0 (current market implied prob)
     volume_usd: float
     category: str
@@ -86,8 +87,9 @@ class BriefingDocument(BaseModel):
     market: MarketData
     key_facts: list[str]      # bullet facts from Tavily search
     news_summary: str         # synthesized narrative
-    red_flags: list[str]
-    green_flags: list[str]
+    side_yes_case: list[str]  # evidence/arguments favoring YES outcome
+    side_no_case: list[str]   # evidence/arguments favoring NO outcome
+    key_context: list[str]    # format, stakes, head-to-head, venue, etc.
     data_freshness: datetime
 
 class AgentVerdict(BaseModel):
@@ -103,10 +105,12 @@ class CouncilResult(BaseModel):
     verdicts: list[AgentVerdict]
     final_score: float        # YES-side confidence-weighted score
     no_score: float           # NO-side confidence-weighted score
-    edge: float               # final_score - yes_price (positive = underpriced YES)
-    no_edge: float            # no_score - no_price (positive = underpriced NO)
+    edge: float               # final_score - yes_price (informational)
+    no_edge: float            # no_score - no_price (informational)
     recommendation: str       # "BUY YES" | "BUY NO" | "PASS"
     confidence_level: str     # "HIGH" | "MEDIUM" | "LOW"
+    signal_type: str | None   # "STRONG" | "CONFIRMED" | "CAUTIOUS" | "CONTRARIAN" | None
+    pass_reason: str          # why PASS (empty for BUY)
 ```
 
 ---
@@ -124,12 +128,13 @@ The shared preamble enforces across ALL agents:
 - Uncertainty floor: confidence ≤ 25 if data is insufficient
 - Output format: raw JSON only, no markdown fences
 - Scale: all scores are integers 0–100
+- Dual-perspective: must reason about BOTH sides before setting probability
 
 | Key            | Agent                      | Core Bias                                                                       |
 | -------------- | -------------------------- | ------------------------------------------------------------------------------- |
 | `rules_lawyer` | The Rules Lawyer           | Resolution criteria only — ignores real-world outcome if oracle condition unmet |
-| `bull`         | The Bull                   | Strongest possible YES case from briefing data                                  |
-| `bear`         | The Bear                   | Strongest possible NO case, Murphy's Law applied                                |
+| `bull`         | The Bull (Favorite's Advocate) | Strongest case for the FAVORED side (price-aware, dynamic)                  |
+| `bear`         | The Bear (Underdog's Advocate) | Strongest case for the UNDERDOG side (price-aware, dynamic)                 |
 | `statistician` | The Base-Rate Statistician | Historical base rate, ignores current hype                                      |
 | `sentiment`    | The Sentiment Analyst      | Crowd psychology vs current price                                               |
 | `specialist`   | The Domain Specialist      | Field-specific technical nuance                                                 |
@@ -172,12 +177,22 @@ no_score  = Σ(prob_no × conf_no) / Σ(conf_no)     # prob_no = 1 − prob_yes
 no_edge   = no_score − (1 − market.yes_price)
 ```
 
-Recommendation logic (each side evaluated independently):
+Recommendation logic (probability-first, session 15):
 
-- `yes_edge > +0.07` and YES-side mean confidence HIGH and consensus gate → `BUY YES`
-- `no_edge > +0.07` and NO-side mean confidence HIGH and consensus gate → `BUY NO`
-- Otherwise → `PASS`
+1. Identify council's favored side (the side with >50% council probability)
+2. Check if council agrees with market (market-aligned) or disagrees (contrarian)
+3. **Market-aligned**: council prob >= `MIN_COUNCIL_PROBABILITY` (0.60) + confidence HIGH → BUY
+4. **Contrarian**: council prob >= `MIN_CONTRARIAN_PROBABILITY` (0.70) + confidence
+   >= `MIN_CONTRARIAN_CONFIDENCE` (0.80) → BUY with CONTRARIAN label
+5. Otherwise → PASS
 
+Signal type (conviction label on BUY recommendations):
+- `STRONG` — positive edge on recommended side (council > market)
+- `CONFIRMED` — edge near zero (council ≈ market)
+- `CAUTIOUS` — negative edge (council < market but still favors same side)
+- `CONTRARIAN` — council goes against market, strict criteria met
+
+Edge is informational (affects signal type label), NOT a gate for recommendations.
 Overall `confidence_level` label uses the higher of the two per-side means.
 
 ---
@@ -186,12 +201,20 @@ Overall `confidence_level` label uses the higher of the two per-side means.
 
 Base URL: `https://gamma-api.polymarket.com`
 
+**Official docs:** `https://docs.polymarket.com/llms.txt` (index of all pages).
+Full OpenAPI spec at: `https://docs.polymarket.com/api-reference/search/search-markets-events-and-profiles`
+Always check docs before exploring API behavior. Detailed field/param reference in
+auto-memory `reference_gamma_api.md`.
+
 Key endpoints:
 
 - `GET /markets?order=volume&active=true&closed=false&limit=N` — unfiltered market list
 - `GET /events?order=volume&series_id=ID` — markets filtered by series (server-side)
 - `GET /events?order=volume&tag_id=ID` — markets filtered by tag (server-side)
-- `GET /events?order=volume&end_date_min=X&end_date_max=Y` — time-windowed queries
+- `GET /events?order=volume&tag_slug=SLUG` — markets filtered by tag slug (server-side, no ID resolution needed)
+- `GET /events?order=volume&end_date_min=X&end_date_max=Y` — time-windowed by resolution
+- `GET /events?volume_min=N` — server-side volume floor on events
+- `GET /markets?volume_num_min=N` — server-side volume floor on markets
 - `GET /series?slug=X` — resolve series slug → series_id
 - `GET /series?limit=200` — list all series (for discovery)
 - `GET /tags/slug/<slug>` — resolve tag slug → tag object with id
@@ -209,7 +232,14 @@ No auth required. Use `httpx.AsyncClient`. Respect rate limits — 0.5s delay.
   3. Partial tag match via paginated `/tags` (fallback, caps at 600 tags)
 - Series match → `series_id` param on `/events` (server-side filter)
 - Tag match → `tag_id` param on `/events` (server-side filter)
-- `/markets` endpoint has NO series_id or tag_id params — always use `/events` for filtering
+- `/markets` endpoint has `tag_id` but NOT `series_id`. `/events` has both.
+
+**Event-level live/ended fields:**
+- `live: bool`, `ended: bool`, `gameStatus`, `score`, `elapsed`, `period`
+- These are populated on `/public-search` and direct `/events/{id}` fetches
+- They are always `None` on the `/events` list endpoint (not populated in list responses)
+- `acceptingOrders` on markets: set to `False` on some decided markets (inconsistent)
+- Our code filters out `ended=True` events and `acceptingOrders=False` markets
 
 **Event tags:** Events have a `tags` array with `slug`, `label`, and `id` fields.
 Example: `[{"id": "64", "slug": "esports"}, {"id": "101672", "slug": "valorant"}]`
@@ -264,15 +294,15 @@ MIN_VOLUME_SHORT_WINDOW_USD=500 # volume floor for short-window queries
 
 ### Phase 2 (Post-MVP)
 
-- [ ] SQLite cache — skip re-running council if price moved < 2%
+- [x] SQLite cache — skip re-running council if price moved < 2%
 - [x] `--category` filter flag (series slug → series_id lookup; `pqi categories` command)
 - [x] Two-sided confidence scoring (confidence_yes / confidence_no per agent)
 - [x] Rules Lawyer refocus (outcome condition, not oracle timing)
 - [x] Richer briefing data (5 Tavily queries, smarter templates, 5000-char cap)
 - [x] Explicit time awareness (EVENT TIMING block in briefing)
 - [x] Anthropic backend fix (`claude-haiku-4-5-20251001`) + concurrency bypass
-- [ ] Rules Lawyer veto weight (2x multiplier config)
-- [ ] Historical accuracy tracking per agent
+- [x] Rules Lawyer veto weight (2x multiplier config)
+- [x] Historical accuracy tracking
 
 ---
 
@@ -332,66 +362,105 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 13 — API refactor: server-side tag filtering, ghost event investigation]
+**Last updated:** [session 15 — Dynamic Bull/Bear, dual-perspective prompts, enriched briefing]
 
 ### Implemented & tested ✓
 
 - `agents/personas.py` — all 7 system prompts, AGENT_PERSONAS dict, build_prompt().
-  SHARED_PREAMBLE rules: TWO-SIDED MARKET, TWO-SIDED CONFIDENCE (confidence_yes /
-  confidence_no guidance), TIME-TO-REVERSAL (references EVENT TIMING field).
-  Rules Lawyer rewritten (session 11): focuses on outcome CONDITION, not oracle timing.
+  SHARED_PREAMBLE rules: TWO-SIDED MARKET, TWO-SIDED CONFIDENCE, DUAL-PERSPECTIVE
+  ANALYSIS (session 15), TIME-TO-REVERSAL.
+  Bull rewritten (session 15): "Favorite's Advocate" — dynamically advocates for
+  the side currently priced higher. Receives SIDE CONTEXT block identifying
+  favored/underdog. Must analyze both sides but builds case for favorite.
+  Bear rewritten (session 15): "Underdog's Advocate" — dynamically advocates for
+  the side currently priced lower. Receives SIDE CONTEXT block. Must analyze
+  both sides but builds case for underdog.
+  Rules Lawyer (session 11): focuses on outcome CONDITION, not oracle timing.
+  Contrarian rewritten (session 14): prioritizes competitively plausible disruptions
+  (roster changes, meta shifts, form trajectories, morale factors) over infrastructure
+  failures. Infrastructure failures demoted to tertiary mention.
   All 7 output formats use `confidence_yes` + `confidence_no` (not `confidence_level`).
+  Bear output key changed: `primary_blocker` → `primary_upset_factor`.
 - `config.py` — reads ALL tunables via `os.getenv(KEY, default)`. True code constants
   only: `GAMMA_BASE_URL`, `VALID_BACKENDS`. `.env.example` is canonical reference.
-  Session 11 additions: `TAVILY_SEARCHES_PER_MARKET`, `TAVILY_SNIPPET_CAP`,
-  `LOCAL_LLM_CONCURRENCY` (renamed from `OLLAMA_CONCURRENCY`).
-  `ANTHROPIC_MODEL` default updated to `claude-haiku-4-5-20251001`.
-  `MIN_VOLUME_SHORT_WINDOW_USD` default lowered to 500 (was 10000).
+  Session 14 additions: `RULES_LAWYER_WEIGHT` (default 2), `CACHE_DB_PATH`
+  (default `~/.pqi/cache.db`), `CACHE_PRICE_DELTA` (default 0.02).
+  `ANTHROPIC_MODEL` default: `claude-haiku-4-5-20251001`.
+  Session 15 additions: `MIN_COUNCIL_PROBABILITY` (default 0.60),
+  `MIN_CONTRARIAN_PROBABILITY` (default 0.70), `MIN_CONTRARIAN_CONFIDENCE`
+  (default 0.80).
 - `models.py` — all four Pydantic v2 models.
+  `BriefingDocument` (session 15): `green_flags`/`red_flags` replaced with
+  `side_yes_case`/`side_no_case` + new `key_context` field.
   `AgentVerdict`: `confidence` split into `confidence_yes` + `confidence_no`.
-  `CouncilResult`: added `no_score` and `no_edge` fields. `from_council_verdicts()`
-  computes two-sided scoring: YES-side and NO-side weighted independently.
-  Gates: edge threshold, per-side HIGH confidence, median consensus, min_tradeable_price.
+  `CouncilResult`: `from_council_verdicts()` accepts `agent_weights: dict[str, float] | None`.
+  When provided, multiplies agent confidence by weight in the weighted sum (e.g.
+  Rules Lawyer at 2× counts double). Two-sided scoring: YES-side and NO-side
+  weighted independently. Gates: edge threshold, per-side HIGH confidence,
+  median consensus, min_tradeable_price.
+  `pass_reason: str` field (session 14): when recommendation is PASS, explains
+  which gate(s) blocked the signal. Empty string for BUY YES/BUY NO.
+  `signal_type` field (session 15): conviction label for BUY recommendations:
+  STRONG (positive edge), CONFIRMED (edge ~0), CAUTIOUS (negative edge),
+  CONTRARIAN (council goes against market). None when PASS.
+  Recommendation logic rewritten (session 15): probability-first instead of
+  edge-gated. Council probability gates the recommendation; edge determines
+  signal type. Market-aligned bets use standard thresholds; contrarian bets
+  use stricter probability + confidence requirements.
 - `llm/client.py` — Ollama + Anthropic backends, `async def chat()` public interface.
-  Anthropic model fixed to `claude-haiku-4-5-20251001`.
 - `ingestion/synthesizer.py` — `build_briefing()`: configurable Tavily searches
-  (default 5 queries with smarter templates: news, analysis, odds, stats, expert).
-  First 2 queries use `search_depth="advanced"` with 7 results. Snippet cap configurable
-  (default 5000 chars). Query count controlled by `TAVILY_SEARCHES_PER_MARKET`.
+  (default 5 queries with smarter templates). Snippet cap configurable (default 5000).
+  Session 15: entity-specific Tavily queries for competitive markets (splits on
+  "vs", "beat", "win against", "defeat" patterns via `_extract_entities()`).
+  LLM synthesis now extracts `side_yes_case`, `side_no_case`, `key_context`
+  (replaces `green_flags`/`red_flags`).
 - `agents/council.py` — `run_council()`: 7 agents via `asyncio.gather()`.
-  Semaphore only active for Ollama backend (LOCAL_LLM_CONCURRENCY); Anthropic runs
-  all 7 fully parallel. Parser extracts `confidence_yes`/`confidence_no` with fallback
-  to legacy `confidence_level`. `_format_briefing()` includes EVENT TIMING block
-  (LIVE/IMMINENT <3h, TODAY <24h, THIS WEEK <168h, FUTURE) with contextual notes.
-  Rules Lawyer resolution_criteria injection still in place.
-- `scoring.py` — `build_council_result` wires all config thresholds.
-  `confidence_weighted_score_yes()` and `confidence_weighted_score_no()` for two-sided.
-  `determine_confidence_level()` uses best per-side mean.
-- `main.py` — Typer CLI: `analyze` + `categories` commands.
-  Flags: `--category/-c`, `--top-n/-n`, `--top/-t`, `--resolve-within/-r`, `--min-volume/-v`.
-  All flags compose freely. Verdict table shows Conf Y% / Conf N% columns.
-  Recommendation panel shows both YES and NO edges (Council YES / Council NO scores).
-  Filter summary line shows active filters. `CategoryNotFoundError` caught with
-  helpful error message. Empty results message suggests `-v 0`.
-  `categories` command shows broad tags table + specific series table.
-- `market/polymarket.py` — **Major CLI overhaul (session 11) + API refactor (session 13):**
-  - `resolve_category()`: three-pass with parallel optimization:
-    Pass 1: exact series slug via `/series?slug=<query>`.
-    Pass 2+3a (parallel): partial series match via `/series?limit=200`
-    + exact tag slug via `/tags/slug/<query>` (fast single-request lookup).
-    Pass 3b: partial tag match via paginated `/tags` (caps at 600, fallback).
-    Returns `CategoryMatch(type, value)` — `"series"` (series_id) or `"tag"` (tag_id).
-  - **Server-side tag filtering** via `tag_id` param on `/events` endpoint.
-    Replaced client-side `_event_matches_tag()` approach (removed).
-  - `CategoryNotFoundError`: raised when `-c` matches nothing (loud failure).
-  - `fetch_markets()` gains `volume_floor_override` param (wired to `--min-volume/-v`).
-  - `fetch_tags()`: scans top 200 events for unique tag slugs with counts.
-  - Both `_fetch_markets_general()` and `_fetch_markets_by_time_window()` accept
-    `tag_id` param for server-side filtering via `/events?tag_id=<id>`.
+  Semaphore only active for Ollama backend; Anthropic runs all 7 fully parallel.
+  Parser extracts `confidence_yes`/`confidence_no` with fallback to legacy
+  `confidence_level`. Rules Lawyer resolution_criteria injection in place.
+  Session 15: `_build_side_context()` injects SIDE CONTEXT block for bull/bear
+  identifying favored/underdog sides. `_format_briefing()` now renders
+  CASE FOR YES / CASE FOR NO / KEY CONTEXT sections (replaces GREEN FLAGS / RED FLAGS).
+- `scoring.py` — `build_council_result` wires all config thresholds + agent_weights
+  (`{"The Rules Lawyer": RULES_LAWYER_WEIGHT}`). Two-sided scoring functions.
+  Session 15: now passes `MIN_COUNCIL_PROBABILITY`, `MIN_CONTRARIAN_PROBABILITY`,
+  `MIN_CONTRARIAN_CONFIDENCE` to `from_council_verdicts()`.
+- `history.py` — **NEW (session 14).** `append_result()` writes one JSON line to
+  `~/.pqi/history.jsonl` per analyze run. `load_history()` reads all entries.
+  Fields: market_id, question, yes_price_at_run, final_score, no_score, edge,
+  no_edge, recommendation, confidence_level, timestamp.
+- `cache.py` — **NEW (session 14).** SQLite cache via `aiosqlite`. Table:
+  `council_cache(market_id PK, yes_price, result_json, created_at)`.
+  `get_cached(market_id, current_yes_price)` returns cached CouncilResult if price
+  delta < `CACHE_PRICE_DELTA` (default 2%). `store_result()` upserts.
+  DB at `~/.pqi/cache.db` (configurable via `CACHE_DB_PATH`).
+- `main.py` — Typer CLI: `analyze` + `categories` + `history` commands.
+  Flags: `--category/-c`, `--top-n/-n`, `--top/-t`, `--starts-within/-s`,
+  `--resolve-within/-r`, `--min-volume/-v`, `--no-cache`.
+  `analyze` checks cache before running council; stores result after.
+  `--no-cache` forces a fresh council run. Result appended to history after every run.
+  PASS recommendation now shows reason line (e.g. "Edge too small...").
+  Sibling market discovery (session 14): after market selection, fetches parent
+  event via `fetch_event_markets()`, shows all sibling markets, offers to analyze
+  them too. Useful for BO3 events with map 1/map 2/moneyline sub-markets.
+  `history` command shows past runs in a Rich table.
+- `market/polymarket.py` — three-pass `resolve_category()` with parallel optimization.
+  Server-side tag filtering via `tag_id` on `/events`. `CategoryNotFoundError`.
+  `fetch_tags()` scans top 200 events for unique tag slugs.
+  `fetch_event_markets(market_id)` (session 14): fetches parent event to discover
+  all sibling markets. Returns `(event_title, list[MarketData])`. Uses
+  `/markets/{id}` → event ID → `/events/{event_id}` to get all markets.
+  Session 15: `--starts-within/-s` flag filters by event start time (client-side,
+  API ignores event_start_time params). `--live/-l` flag filters to events already
+  started but not resolved. Both composable with each other and `--resolve-within`.
+  `MarketData.event_start_time` parsed from `eventStartTime` field.
+  Market list table shows "Starts" column when event_start_time is available.
+  Session 16: filters out `acceptingOrders=False` markets and `ended=True` events
+  (event-level field; populated on direct fetch/search but usually None on list endpoint).
 
 ### Not started ✗
 
-- Phase 2 remaining: SQLite cache, Rules Lawyer veto weight, historical accuracy tracking
+- /public-search integration (optional — catch ghost events in category queries)
 
 ### Known issues / assumptions
 
@@ -408,8 +477,20 @@ as a literal.
   `order=liquidity` work. `order=end_date` and `order=volume_24hr` return 422.
 - **Events vs markets endpoint:** `/events` for time-window and category queries
   (groups related markets, has tags); `/markets` for unfiltered general queries.
+  `/markets` has `tag_id` param but NOT `series_id`. `/events` has both `tag_id`
+  and `tag_slug` (direct slug filtering, no ID resolution needed). Both endpoints
+  have server-side volume filtering (`volume_min` on events, `volume_num_min` on markets).
   Embedded markets in events lack nested `events` key — category from parent event's
   `tags` via `_category_from_event()`.
+- **Event live/ended fields:** Events have `live`, `ended`, `gameStatus`, `score`,
+  `elapsed`, `period` fields (from OpenAPI spec). These are populated on
+  `/public-search` and direct `/events/{id}` but always `None` on `/events` list
+  endpoint. Code checks `ended=True` when available but cannot rely on it from lists.
+- **Market acceptingOrders:** Set to `False` on some decided markets but inconsistent.
+  Markets can show `YES=0.00, acceptingOrders=True` when parent event is `ended=True`.
+  Code filters out `acceptingOrders=False` as a first-pass filter.
+- **event_start_time query params:** NOT supported on any endpoint. Silently ignored
+  (returns 200 but doesn't filter). All event start time filtering is client-side.
 - **Two-tier category resolution:** Specific series slugs (e.g. "counter-strike")
   use server-side `series_id` filter on `/events`. Broad tags (e.g. "esports") use
   server-side `tag_id` filter on `/events`. Tag resolution uses `/tags/slug/<slug>`
@@ -449,53 +530,66 @@ as a literal.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 
-Session 13 refactored polymarket.py to use proper Gamma API endpoints discovered
-from official docs (https://docs.polymarket.com/market-data/fetching-markets.md):
+Session 15 was a major agent + scoring overhaul in three areas:
 
-- `tag_id` param on `/events` for server-side tag filtering (replaces client-side
-  `_event_matches_tag()` which is now removed)
-- `/tags/slug/<slug>` for fast exact tag lookup (single request vs paginating 2000 tags)
-- Parallel Pass 2+3a in resolve_category() — series listing + tag slug run concurrently
-- Documented `/public-search?q=TEXT` as the only endpoint that finds ghost events
+### A. Agent perspective fixes
+1. Dynamic Bull/Bear — Bull = "Favorite's Advocate" (higher-priced side),
+   Bear = "Underdog's Advocate" (lower-priced side). SIDE CONTEXT block
+   injected in council.py. Both still output probability_score as P(YES).
+2. Dual-perspective analysis — SHARED_PREAMBLE rule forcing all agents
+   to reason about BOTH sides.
+3. Probability direction fix — OUTCOME LABELS block in every briefing
+   explicitly states what YES/NO mean. Anti-inversion warning in preamble.
+   Fixes bug where agents confused P(favored entity) with P(YES).
 
-Ghost event investigation confirmed: event 273395 invisible to ALL list endpoints
-(`/events`, `/markets`, with any filter combination) but findable via `/public-search`
-and direct `/events/{id}`. No workaround for broad category browsing.
+### B. Enriched briefing
+4. BriefingDocument: green_flags/red_flags → side_yes_case/side_no_case
+   + new key_context field. Synthesizer detects entities for competitive
+   markets (_extract_entities()) and runs per-entity Tavily queries.
+5. Briefing formatter: CASE FOR YES / CASE FOR NO / KEY CONTEXT sections.
 
-Additional API endpoints documented but not yet used:
-- `GET /tags` — full paginated tag list (2000+ tags, used as fallback for partial match)
-- `GET /sports` — sports metadata with tag IDs, images, resolution sources
-- `GET /public-search?q=TEXT` — full-text search across events/markets/profiles
+### C. Probability-first scoring (biggest change)
+6. Recommendation logic rewritten: probability gates, not edge gates.
+   - Council favored side (>50%) with prob >= MIN_COUNCIL_PROBABILITY
+     (0.60) + HIGH confidence → BUY (market-aligned)
+   - Contrarian: prob >= MIN_CONTRARIAN_PROBABILITY (0.70) + confidence
+     >= MIN_CONTRARIAN_CONFIDENCE (0.80) → BUY CONTRARIAN
+   - Signal type: STRONG / CONFIRMED / CAUTIOUS / CONTRARIAN
+   - Edge is informational (sets signal type), not a gate
+7. New config: MIN_COUNCIL_PROBABILITY, MIN_CONTRARIAN_PROBABILITY,
+   MIN_CONTRARIAN_CONFIDENCE.
 
-## Phase 2 remaining priorities
+## Remaining ideas / future work
 
-### 1. SQLite cache (`pqi/cache.py`)
-Skip re-running the full council if yes_price moved < 2% since last run.
-- Use `aiosqlite` with a `council_results` table (market_id, yes_price_at_run,
-  result_json, created_at).
-- On `analyze`, query cache first. If hit and price delta < 0.02, load from cache.
-- Otherwise run council and write result back to cache.
-- Add `--no-cache` flag to `main.py` to force a fresh run.
+### 1. Cache TTL / expiry
+Add time-based expiry to cached results (e.g. 24h max age). Currently cache
+only invalidates on price movement > 2%.
 
-### 2. Rules Lawyer veto weight (2× multiplier)
-In `scoring.py`, give the Rules Lawyer's confidence_yes/confidence_no double
-weight in the weighted formula. Add `RULES_LAWYER_WEIGHT=2` to config.py.
-Update scoring to accept per-agent weights.
+### 2. History: resolution tracking
+Extend `pqi history` to check if markets resolved and show whether the
+recommendation was correct (win/loss). Fetch market outcome from Gamma API.
 
-### 3. Historical accuracy tracking
-After each run, append to a JSONL file (`~/.pqi/history.jsonl`):
-  {market_id, question, yes_price_at_run, final_score, no_score,
-   recommendation, timestamp}
-Add a `pqi history` CLI command that prints a table of past runs and
-(where markets are resolved) shows whether the recommendation was correct.
+### 3. /public-search integration
+Use `/public-search?q=TEXT` as supplementary fetch for ghost events.
 
-### 4. /public-search integration (optional)
-Use `/public-search?q=TEXT` as a supplementary fetch when a category query
-returns fewer results than expected, to catch ghost events. Only useful if the
-user's category query provides searchable text.
+### 4. Multi-market batch analysis
+Allow `pqi analyze --top 3` to analyze top N markets sequentially.
+
+### 5. Shared briefing for sibling markets
+When analyzing siblings from the same event, share the Tavily briefing
+(same event = same news) but still run separate councils (different
+resolution criteria per market).
+
+### 6. Market type detection (explicit)
+If the implicit approach (session 15) proves insufficient, add explicit
+market_type detection (head_to_head vs binary_event) for different briefing
+templates and prompt wording.
 
 ## Instructions
-- Decide which items to tackle based on complexity vs. value
+- Do an end-to-end test run to verify all session 15 changes work
+- Test on esports (competitive) + binary (crypto/politics) markets
+- Verify: probability direction correct, signal_type labels appear,
+  Bull/Bear reference correct sides, briefing sections correct
 - Read the relevant existing files before writing any new code
 - Update ## Current State and ## Next Session Prompt at end of session
 ```

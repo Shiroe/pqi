@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pqi.agents.personas import AGENT_NAMES, AGENT_PERSONAS
 from pqi import config
 from pqi.llm.client import chat
-from pqi.models import AgentVerdict, BriefingDocument
+from pqi.models import AgentVerdict, BriefingDocument, MarketData
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
 _KEY_FACTOR_FIELDS: dict[str, list[str]] = {
     "rules_lawyer": ["key_technical_risk"],
     "bull":         ["primary_catalyst"],
-    "bear":         ["primary_blocker"],
+    "bear":         ["primary_upset_factor"],
     "statistician": ["historical_baseline"],
     "sentiment":    ["market_vibe"],
     "specialist":   ["technical_nuance", "domain_identified"],
@@ -90,20 +90,71 @@ def _compute_event_timing(end_date: datetime) -> str:
     return block
 
 
+def _extract_outcome_labels(question: str, resolution_criteria: str) -> str:
+    """
+    Build explicit OUTCOME LABELS block so agents know exactly what YES and NO mean.
+
+    Tries to extract from resolution criteria first (e.g. "Resolves YES if Wolves wins").
+    Falls back to a generic label derived from the market question.
+    """
+    # Try to extract "Resolves YES if <condition>" from resolution criteria
+    yes_match = re.search(
+        r"[Rr]esolves?\s+YES\s+if\s+(.+?)(?:\.|$)", resolution_criteria
+    )
+    if yes_match:
+        yes_label = yes_match.group(1).strip().rstrip(".")
+        return (
+            f"OUTCOME LABELS (read carefully — your probability_score = P(YES)):\n"
+            f"  YES = {yes_label}\n"
+            f"  NO  = the opposite / this does NOT happen\n"
+        )
+
+    # Try to extract two entities from "A vs B" pattern in the question
+    vs_match = re.search(r"(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s*[\(\-]|$)", question)
+    if vs_match:
+        entity_a = vs_match.group(1).strip()
+        entity_b = vs_match.group(2).strip()
+        # Strip common prefixes like "Will", "Valorant:", etc.
+        for prefix in ["Will ", "Can ", "Does "]:
+            if entity_a.startswith(prefix):
+                entity_a = entity_a[len(prefix):]
+        # Strip category prefixes like "Valorant: "
+        if ": " in entity_a:
+            entity_a = entity_a.split(": ", 1)[1]
+        return (
+            f"OUTCOME LABELS (read carefully — your probability_score = P(YES)):\n"
+            f"  YES = {entity_a} wins → probability_score should be HIGH\n"
+            f"  NO  = {entity_b} wins → probability_score should be LOW\n"
+        )
+
+    # Fallback: generic labels
+    return (
+        f"OUTCOME LABELS (read carefully — your probability_score = P(YES)):\n"
+        f"  YES = the event described in the question happens\n"
+        f"  NO  = it does not happen\n"
+    )
+
+
 def _format_briefing(briefing: BriefingDocument) -> str:
     """
     Serialise a BriefingDocument to a labelled, human-readable string.
     Used as the body of the user message for every agent.
     """
     m = briefing.market
-    facts_block = "\n".join(f"- {f}" for f in briefing.key_facts) or "- (none)"
-    green_block = "\n".join(f"- {f}" for f in briefing.green_flags) or "- (none)"
-    red_block   = "\n".join(f"- {f}" for f in briefing.red_flags) or "- (none)"
+    facts_block   = "\n".join(f"- {f}" for f in briefing.key_facts) or "- (none)"
+    yes_block     = "\n".join(f"- {f}" for f in briefing.side_yes_case) or "- (none)"
+    no_block      = "\n".join(f"- {f}" for f in briefing.side_no_case) or "- (none)"
+    context_block = "\n".join(f"- {f}" for f in briefing.key_context) or "- (none)"
 
     no_price = 1.0 - m.yes_price
     timing_block = _compute_event_timing(m.end_date)
+
+    # Extract outcome labels from resolution criteria for explicit clarity
+    outcome_labels = _extract_outcome_labels(m.question, m.resolution_criteria)
+
     return (
         f"MARKET QUESTION: {m.question}\n"
+        f"{outcome_labels}"
         f"CURRENT MARKET PRICES: YES = {m.yes_price:.0%}  |  NO = {no_price:.0%}"
         f"  (buying YES costs ${m.yes_price:.2f}/share; buying NO costs ${no_price:.2f}/share)\n"
         f"CATEGORY: {m.category}\n"
@@ -113,10 +164,33 @@ def _format_briefing(briefing: BriefingDocument) -> str:
         f"\nRESOLUTION CRITERIA:\n{m.resolution_criteria}\n"
         f"\nKEY FACTS:\n{facts_block}\n"
         f"\nNEWS SUMMARY:\n{briefing.news_summary}\n"
-        f"\nGREEN FLAGS (signals for YES):\n{green_block}\n"
-        f"\nRED FLAGS (signals for NO):\n{red_block}\n"
+        f"\nCASE FOR YES:\n{yes_block}\n"
+        f"\nCASE FOR NO:\n{no_block}\n"
+        f"\nKEY CONTEXT:\n{context_block}\n"
         f"\nDATA FRESHNESS: {briefing.data_freshness.strftime('%Y-%m-%d %H:%M UTC')}\n"
     )
+
+
+def _build_side_context(market: MarketData) -> str:
+    """
+    Build a SIDE CONTEXT block identifying the favored and underdog sides
+    based on current market prices. Used by Bull and Bear agents.
+    """
+    yes_price = market.yes_price
+    no_price = 1.0 - yes_price
+
+    if yes_price >= no_price:
+        return (
+            "SIDE CONTEXT:\n"
+            f"FAVORED SIDE: YES (currently priced at {yes_price:.0%})\n"
+            f"UNDERDOG SIDE: NO (currently priced at {no_price:.0%})\n"
+        )
+    else:
+        return (
+            "SIDE CONTEXT:\n"
+            f"FAVORED SIDE: NO (currently priced at {no_price:.0%})\n"
+            f"UNDERDOG SIDE: YES (currently priced at {yes_price:.0%})\n"
+        )
 
 
 def _build_user_message(briefing: BriefingDocument, agent_key: str) -> str:
@@ -124,8 +198,9 @@ def _build_user_message(briefing: BriefingDocument, agent_key: str) -> str:
     Build the user message for the given agent.
 
     The Rules Lawyer receives the resolution_criteria in an explicit injection
-    block BEFORE the full briefing, per CLAUDE.md spec.  All others get the
-    standard briefing document only.
+    block BEFORE the full briefing, per CLAUDE.md spec.
+    Bull and Bear receive a SIDE CONTEXT block identifying favored/underdog.
+    All others get the standard briefing document only.
     """
     standard = _format_briefing(briefing)
 
@@ -134,6 +209,24 @@ def _build_user_message(briefing: BriefingDocument, agent_key: str) -> str:
             "RESOLUTION CRITERIA "
             "(SOURCE OF TRUTH — THIS OVERRIDES ALL OTHER CONTEXT):\n"
             f"{briefing.market.resolution_criteria}\n"
+            "--- FULL BRIEFING DOCUMENT BELOW ---\n"
+            f"{standard}"
+        )
+
+    if agent_key == "bull":
+        side_ctx = _build_side_context(briefing.market)
+        return (
+            f"{side_ctx}"
+            "You are advocating for the FAVORED side.\n"
+            "--- FULL BRIEFING DOCUMENT BELOW ---\n"
+            f"{standard}"
+        )
+
+    if agent_key == "bear":
+        side_ctx = _build_side_context(briefing.market)
+        return (
+            f"{side_ctx}"
+            "You are advocating for the UNDERDOG side.\n"
             "--- FULL BRIEFING DOCUMENT BELOW ---\n"
             f"{standard}"
         )
@@ -354,15 +447,19 @@ if __name__ == "__main__":
                 "Market consensus leans toward one or two cuts in 2025, contingent on "
                 "incoming inflation and employment data."
             ),
-            green_flags=[
+            side_yes_case=[
                 "Inflation trending downward toward 2% target.",
                 "Fed median dot plot projects cuts in 2025.",
                 "Slowing GDP growth supports easing bias.",
             ],
-            red_flags=[
+            side_no_case=[
                 "Core PCE still above target at 2.8%.",
                 "Strong labour market reduces urgency to cut.",
                 "Trump tariff policy may reignite inflation.",
+            ],
+            key_context=[
+                "Fed cut rates 3 times in 2024 (Sept, Nov, Dec).",
+                "Next FOMC meeting: January 2025.",
             ],
             data_freshness=datetime.now(timezone.utc),
         )

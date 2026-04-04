@@ -21,6 +21,8 @@ class MarketData(BaseModel):
     question: str
     resolution_criteria: str
     end_date: datetime
+    event_start_time: datetime | None = None
+    """When the real-world event starts (match kickoff, hearing date, etc). None if not set."""
     yes_price: float = Field(..., ge=0.0, le=1.0)
     """Current market-implied probability of YES (0.0–1.0)."""
     volume_usd: float = Field(..., ge=0.0)
@@ -38,10 +40,12 @@ class BriefingDocument(BaseModel):
     """Concise bullet facts extracted from Tavily search results."""
     news_summary: str
     """3–5 sentence narrative synthesised from recent coverage."""
-    red_flags: list[str]
-    """Signals that argue against a YES resolution."""
-    green_flags: list[str]
-    """Signals that argue for a YES resolution."""
+    side_yes_case: list[str]
+    """Evidence and arguments favoring the YES outcome."""
+    side_no_case: list[str]
+    """Evidence and arguments favoring the NO outcome."""
+    key_context: list[str]
+    """Contextual factors: format, stakes, head-to-head, venue, tournament stage."""
     data_freshness: datetime
     """UTC timestamp of when the briefing was assembled."""
 
@@ -86,6 +90,10 @@ class CouncilResult(BaseModel):
     """no_score − no_price.  Positive = underpriced NO."""
     recommendation: Literal["BUY YES", "BUY NO", "PASS"]
     confidence_level: Literal["HIGH", "MEDIUM", "LOW"]
+    signal_type: Literal["STRONG", "CONFIRMED", "CAUTIOUS", "CONTRARIAN"] | None = None
+    """Conviction label for BUY recommendations. None when PASS."""
+    pass_reason: str = ""
+    """Why the recommendation is PASS (empty for BUY YES / BUY NO)."""
 
     # ------------------------------------------------------------------
     # Classmethod factory — keeps scoring logic co-located with the model
@@ -100,26 +108,25 @@ class CouncilResult(BaseModel):
         edge_threshold: float = 0.07,
         confidence_high: float = 0.60,
         confidence_medium: float = 0.40,
+        min_tradeable_price: float = 0.05,
+        min_council_probability: float = 0.60,
+        min_contrarian_probability: float = 0.70,
+        min_contrarian_confidence: float = 0.80,
+        agent_weights: dict[str, float] | None = None,
+        # Legacy params kept for backward compat but no longer used as gates
         consensus_yes_floor: float = 0.40,
         consensus_no_ceiling: float = 0.60,
-        min_tradeable_price: float = 0.05,
     ) -> CouncilResult:
         """
         Compute all derived fields from raw verdicts and assemble a CouncilResult.
 
-        Two-sided scoring: YES and NO sides are scored independently using
-        their respective confidence weights. An agent can be highly confident
-        about one side but uncertain about the other.
-
-        Scoring pipeline:
-          1. yes_score = Σ(prob_yes × conf_yes) / Σ(conf_yes)
-             no_score  = Σ(prob_no  × conf_no)  / Σ(conf_no)
-          2. yes_edge = yes_score − market.yes_price
-             no_edge  = no_score  − (1 − market.yes_price)
-          3. yes_confidence_level / no_confidence_level from mean per-side confidence
-          4. median_prob = median of agent probabilities (consensus gate)
-          5. BUY YES evaluated from yes_edge + yes_confidence
-             BUY NO  evaluated from no_edge  + no_confidence (independent)
+        Probability-first recommendation logic:
+          1. Compute two-sided confidence-weighted probabilities (unchanged)
+          2. Identify council's favored side (>50% probability)
+          3. Check if council agrees with market or goes contrarian
+          4. Market-aligned: council prob >= min_council_probability + confidence HIGH
+          5. Contrarian: council prob >= min_contrarian_probability + confidence >= min_contrarian_confidence
+          6. Signal type: STRONG (positive edge) / CONFIRMED (edge ~0) / CAUTIOUS (negative edge) / CONTRARIAN
         """
         if not verdicts:
             raise ValueError(
@@ -128,24 +135,27 @@ class CouncilResult(BaseModel):
             )
 
         # Step 1 — two-sided confidence-weighted probabilities
-        yes_num = sum(v.probability * v.confidence_yes for v in verdicts)
-        yes_den = sum(v.confidence_yes for v in verdicts)
+        weights = agent_weights or {}
+        def _w(v: AgentVerdict) -> float:
+            return weights.get(v.agent_name, 1.0)
+
+        yes_num = sum(v.probability * v.confidence_yes * _w(v) for v in verdicts)
+        yes_den = sum(v.confidence_yes * _w(v) for v in verdicts)
         final_score = yes_num / yes_den if yes_den > 0 else 0.5
 
-        no_num = sum((1.0 - v.probability) * v.confidence_no for v in verdicts)
-        no_den = sum(v.confidence_no for v in verdicts)
+        no_num = sum((1.0 - v.probability) * v.confidence_no * _w(v) for v in verdicts)
+        no_den = sum(v.confidence_no * _w(v) for v in verdicts)
         no_score = no_num / no_den if no_den > 0 else 0.5
 
-        # Step 2 — two-sided edges
+        # Step 2 — edges (informational, not gates)
         no_price = 1.0 - market.yes_price
         edge = final_score - market.yes_price
         no_edge = no_score - no_price
 
-        # Step 3 — per-side confidence levels
+        # Step 3 — confidence levels
         mean_conf_yes = sum(v.confidence_yes for v in verdicts) / len(verdicts)
         mean_conf_no = sum(v.confidence_no for v in verdicts) / len(verdicts)
 
-        # Overall confidence label uses the higher of the two sides
         best_mean_conf = max(mean_conf_yes, mean_conf_no)
         if best_mean_conf >= confidence_high:
             confidence_level: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
@@ -154,31 +164,86 @@ class CouncilResult(BaseModel):
         else:
             confidence_level = "LOW"
 
-        # Per-side HIGH checks for gate logic
-        yes_conf_high = mean_conf_yes >= confidence_high
-        no_conf_high = mean_conf_no >= confidence_high
+        # Step 4 — probability-first recommendation
+        # Identify council's favored side
+        council_favors_yes = final_score > 0.50
+        council_favored_prob = final_score if council_favors_yes else no_score
+        market_favors_yes = market.yes_price >= 0.50
 
-        # Step 4 — median probability (consensus gate, outlier-resistant)
-        sorted_probs = sorted(v.probability for v in verdicts)
-        n = len(sorted_probs)
-        if n % 2 == 1:
-            median_prob = sorted_probs[n // 2]
+        # Is this a contrarian call? (council disagrees with market on which side wins)
+        is_contrarian = council_favors_yes != market_favors_yes
+
+        # Determine which side to recommend and its confidence
+        if council_favors_yes:
+            rec_side = "YES"
+            rec_edge = edge
+            side_conf = mean_conf_yes
+            side_price = market.yes_price
         else:
-            median_prob = (sorted_probs[n // 2 - 1] + sorted_probs[n // 2]) / 2
+            rec_side = "NO"
+            rec_edge = no_edge
+            side_conf = mean_conf_no
+            side_price = no_price
 
-        # Step 5 — recommendation (each side evaluated independently)
-        if (edge > edge_threshold
-                and yes_conf_high
-                and median_prob > consensus_yes_floor
-                and market.yes_price >= min_tradeable_price):
-            recommendation: Literal["BUY YES", "BUY NO", "PASS"] = "BUY YES"
-        elif (no_edge > edge_threshold
-                and no_conf_high
-                and median_prob < consensus_no_ceiling
-                and no_price >= min_tradeable_price):
-            recommendation = "BUY NO"
+        # Apply gates
+        recommendation: Literal["BUY YES", "BUY NO", "PASS"]
+        signal_type: Literal["STRONG", "CONFIRMED", "CAUTIOUS", "CONTRARIAN"] | None
+        pass_reason = ""
+
+        if side_price < min_tradeable_price:
+            # Price floor: can't recommend a side trading at near-zero
+            recommendation = "PASS"
+            signal_type = None
+            pass_reason = (
+                f"{rec_side} price too low: ${side_price:.2f} "
+                f"(need ≥${min_tradeable_price:.2f})"
+            )
+        elif is_contrarian:
+            # Contrarian: stricter gates
+            if (council_favored_prob >= min_contrarian_probability
+                    and side_conf >= min_contrarian_confidence):
+                recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
+                signal_type = "CONTRARIAN"
+            else:
+                recommendation = "PASS"
+                signal_type = None
+                reasons = []
+                if council_favored_prob < min_contrarian_probability:
+                    reasons.append(
+                        f"Contrarian call: council prob {council_favored_prob:.0%} "
+                        f"< {min_contrarian_probability:.0%} threshold"
+                    )
+                if side_conf < min_contrarian_confidence:
+                    reasons.append(
+                        f"Contrarian call: {rec_side}-side confidence {side_conf:.0%} "
+                        f"< {min_contrarian_confidence:.0%} threshold"
+                    )
+                pass_reason = "; ".join(reasons)
+        elif council_favored_prob >= min_council_probability and side_conf >= confidence_high:
+            # Market-aligned: standard gates
+            recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
+            # Signal type based on edge direction
+            if rec_edge > edge_threshold:
+                signal_type = "STRONG"
+            elif rec_edge >= -edge_threshold:
+                signal_type = "CONFIRMED"
+            else:
+                signal_type = "CAUTIOUS"
         else:
             recommendation = "PASS"
+            signal_type = None
+            reasons = []
+            if council_favored_prob < min_council_probability:
+                reasons.append(
+                    f"Council prob too low: {council_favored_prob:.0%} "
+                    f"for {rec_side} (need ≥{min_council_probability:.0%})"
+                )
+            if side_conf < confidence_high:
+                reasons.append(
+                    f"{rec_side}-side confidence too low: {side_conf:.0%} "
+                    f"(need ≥{confidence_high:.0%})"
+                )
+            pass_reason = "; ".join(reasons) if reasons else "No side meets gates"
 
         return cls(
             market=market,
@@ -189,6 +254,8 @@ class CouncilResult(BaseModel):
             no_edge=no_edge,
             recommendation=recommendation,
             confidence_level=confidence_level,
+            signal_type=signal_type,
+            pass_reason=pass_reason,
         )
 
 
@@ -233,8 +300,9 @@ if __name__ == "__main__":
         market=market,
         key_facts=["Starship IFT-4 completed successfully in June 2024.", "FAA license pending for next flight."],
         news_summary="SpaceX is on track for an orbital attempt in Q1 2025 pending FAA clearance.",
-        red_flags=["FAA licensing delays common in 2024."],
-        green_flags=["IFT-4 demonstrated full ascent profile."],
+        side_yes_case=["IFT-4 demonstrated full ascent profile.", "SpaceX has accelerating launch cadence."],
+        side_no_case=["FAA licensing delays common in 2024.", "Orbital attempt requires new trajectory approval."],
+        key_context=["SpaceX targeting Q1 2025 window.", "FAA regulatory review in progress."],
         data_freshness=datetime.now(timezone.utc),
     )
     print(f"  market.id={briefing.market.id}  facts={len(briefing.key_facts)}  freshness={briefing.data_freshness.isoformat()[:10]}")
@@ -267,6 +335,9 @@ if __name__ == "__main__":
     print(f"  edge            = {result.edge:+.4f}  (yes_price={market.yes_price})")
     print(f"  confidence_level= {result.confidence_level}")
     print(f"  recommendation  = {result.recommendation}")
+    print(f"  signal_type     = {result.signal_type}")
+    if result.pass_reason:
+        print(f"  pass_reason     = {result.pass_reason}")
 
     # Verify computed values manually
     num = sum(v.probability * v.confidence_yes for v in verdicts)
@@ -275,6 +346,68 @@ if __name__ == "__main__":
     assert abs(result.final_score - expected_score) < 1e-9, "final_score mismatch"
     assert abs(result.edge - (expected_score - market.yes_price)) < 1e-9, "edge mismatch"
     print("  ✓ final_score and edge match manual calculation")
+
+    # ---- Scenario tests for probability-first logic ----------------------
+    print("\n--- Probability-first recommendation scenarios ---")
+
+    def _make_verdicts(prob: float, cy: float, cn: float) -> list[AgentVerdict]:
+        """Helper: create 7 uniform verdicts for scenario testing."""
+        return [
+            AgentVerdict(
+                agent_name=f"Agent {i}", probability=prob,
+                confidence_yes=cy, confidence_no=cn,
+                rationale="Test.", key_factor="Test",
+            )
+            for i in range(7)
+        ]
+
+    # Scenario 1: Market-aligned STRONG — council confirms + positive edge
+    # Market: YES=62%, Council: YES≈75%, edge≈+13%
+    m1 = MarketData(**{**market.model_dump(), "yes_price": 0.62})
+    r1 = CouncilResult.from_council_verdicts(market=m1, verdicts=_make_verdicts(0.75, 0.80, 0.60))
+    print(f"  S1 (STRONG):      rec={r1.recommendation:<10} signal={r1.signal_type:<12} "
+          f"council_yes={r1.final_score:.0%} market_yes={m1.yes_price:.0%} edge={r1.edge:+.0%}")
+    assert r1.recommendation == "BUY YES" and r1.signal_type == "STRONG"
+
+    # Scenario 2: Market-aligned CONFIRMED — council agrees, edge ≈ 0
+    # Market: NO=80% (yes=20%), Council: NO≈80%
+    m2 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
+    r2 = CouncilResult.from_council_verdicts(market=m2, verdicts=_make_verdicts(0.20, 0.60, 0.80))
+    print(f"  S2 (CONFIRMED):   rec={r2.recommendation:<10} signal={r2.signal_type:<12} "
+          f"council_no={r2.no_score:.0%} market_no={1-m2.yes_price:.0%} no_edge={r2.no_edge:+.0%}")
+    assert r2.recommendation == "BUY NO" and r2.signal_type == "CONFIRMED"
+
+    # Scenario 3: Market-aligned CAUTIOUS — council favors same side but less
+    # Market: NO=80% (yes=20%), Council: NO≈70%
+    m3 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
+    r3 = CouncilResult.from_council_verdicts(market=m3, verdicts=_make_verdicts(0.30, 0.60, 0.75))
+    print(f"  S3 (CAUTIOUS):    rec={r3.recommendation:<10} signal={r3.signal_type:<12} "
+          f"council_no={r3.no_score:.0%} market_no={1-m3.yes_price:.0%} no_edge={r3.no_edge:+.0%}")
+    assert r3.recommendation == "BUY NO" and r3.signal_type == "CAUTIOUS"
+
+    # Scenario 4: Contrarian — council goes against market, strict criteria met
+    # Market: NO=80% (yes=20%), Council: YES≈72% with high confidence
+    m4 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
+    r4 = CouncilResult.from_council_verdicts(market=m4, verdicts=_make_verdicts(0.72, 0.85, 0.50))
+    print(f"  S4 (CONTRARIAN):  rec={r4.recommendation:<10} signal={r4.signal_type:<12} "
+          f"council_yes={r4.final_score:.0%} market_yes={m4.yes_price:.0%}")
+    assert r4.recommendation == "BUY YES" and r4.signal_type == "CONTRARIAN"
+
+    # Scenario 5: PASS — council near 50/50
+    m5 = MarketData(**{**market.model_dump(), "yes_price": 0.60})
+    r5 = CouncilResult.from_council_verdicts(market=m5, verdicts=_make_verdicts(0.52, 0.70, 0.70))
+    print(f"  S5 (PASS 50/50):  rec={r5.recommendation:<10} signal={str(r5.signal_type):<12} "
+          f"council_yes={r5.final_score:.0%} reason={r5.pass_reason[:50]}")
+    assert r5.recommendation == "PASS"
+
+    # Scenario 6: PASS — contrarian but doesn't meet strict criteria
+    m6 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
+    r6 = CouncilResult.from_council_verdicts(market=m6, verdicts=_make_verdicts(0.62, 0.65, 0.50))
+    print(f"  S6 (PASS contra): rec={r6.recommendation:<10} signal={str(r6.signal_type):<12} "
+          f"council_yes={r6.final_score:.0%} reason={r6.pass_reason[:60]}")
+    assert r6.recommendation == "PASS"
+
+    print("  ✓ All 6 scenarios passed")
 
     # Empty verdicts must raise
     try:

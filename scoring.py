@@ -50,15 +50,19 @@ def build_council_result(
     Orchestrate the full scoring pipeline and return a CouncilResult.
     Delegates to CouncilResult.from_council_verdicts() which owns the logic.
     """
+    agent_weights = {"The Rules Lawyer": config.RULES_LAWYER_WEIGHT}
+
     return CouncilResult.from_council_verdicts(
         market=market,
         verdicts=verdicts,
         edge_threshold=config.EDGE_THRESHOLD,
         confidence_high=config.CONFIDENCE_HIGH_THRESHOLD,
         confidence_medium=config.CONFIDENCE_MEDIUM_THRESHOLD,
-        consensus_yes_floor=config.CONSENSUS_YES_FLOOR,
-        consensus_no_ceiling=config.CONSENSUS_NO_CEILING,
         min_tradeable_price=config.MIN_TRADEABLE_PRICE,
+        min_council_probability=config.MIN_COUNCIL_PROBABILITY,
+        min_contrarian_probability=config.MIN_CONTRARIAN_PROBABILITY,
+        min_contrarian_confidence=config.MIN_CONTRARIAN_CONFIDENCE,
+        agent_weights=agent_weights,
     )
 
 

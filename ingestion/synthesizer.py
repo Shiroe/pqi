@@ -38,15 +38,26 @@ Raw search results:
 {snippets}
 
 From the above, extract:
-1. news_summary: 3-5 sentence neutral summary of the current situation.
-2. green_flags: up to 5 short strings — signals suggesting YES resolution.
-3. red_flags: up to 5 short strings — signals suggesting NO resolution.
+1. news_summary: 3-5 sentence neutral summary of the current situation. \
+For competitive markets (e.g. Team A vs Team B), summarize both sides' \
+positions, not just one.
+2. side_yes_case: up to 5 short strings — evidence and arguments favoring \
+the YES outcome. For competitive markets, include BOTH the YES-side's \
+strengths AND the NO-side's weaknesses.
+3. side_no_case: up to 5 short strings — evidence and arguments favoring \
+the NO outcome. For competitive markets, include BOTH the NO-side's \
+strengths AND the YES-side's weaknesses.
+4. key_context: up to 5 short strings — contextual factors that affect the \
+outcome but aren't arguments for either side (e.g. tournament format, \
+match stakes, venue, head-to-head record, recent form trajectory, \
+game version/patch, regulatory timeline).
 
 Return exactly this JSON (no markdown fences):
 {{
   "news_summary": "...",
-  "green_flags": ["...", "..."],
-  "red_flags": ["...", "..."]
+  "side_yes_case": ["...", "..."],
+  "side_no_case": ["...", "..."],
+  "key_context": ["...", "..."]
 }}"""
 
 
@@ -85,9 +96,12 @@ def _extract_key_facts(search_results: list[dict]) -> list[str]:
     return facts
 
 
-def _parse_llm_response(response: str) -> tuple[str, list[str], list[str]]:
+def _parse_llm_response(
+    response: str,
+) -> tuple[str, list[str], list[str], list[str]]:
     """
-    Parse the LLM JSON response into (news_summary, green_flags, red_flags).
+    Parse the LLM JSON response into
+    (news_summary, side_yes_case, side_no_case, key_context).
 
     Strips markdown fences for Ollama compatibility. Falls back gracefully
     if JSON parsing fails.
@@ -98,16 +112,49 @@ def _parse_llm_response(response: str) -> tuple[str, list[str], list[str]]:
     try:
         data = json.loads(text)
         news_summary = str(data.get("news_summary", "")).strip()
-        green_flags = [
-            s.strip() for s in data.get("green_flags", []) if str(s).strip()
+        side_yes_case = [
+            s.strip() for s in data.get("side_yes_case", []) if str(s).strip()
         ]
-        red_flags = [
-            s.strip() for s in data.get("red_flags", []) if str(s).strip()
+        side_no_case = [
+            s.strip() for s in data.get("side_no_case", []) if str(s).strip()
         ]
-        return news_summary, green_flags, red_flags
+        key_context = [
+            s.strip() for s in data.get("key_context", []) if str(s).strip()
+        ]
+        return news_summary, side_yes_case, side_no_case, key_context
     except (json.JSONDecodeError, AttributeError):
         logger.warning("Could not parse LLM JSON response; using raw text as summary")
-        return response[:500].strip(), [], []
+        return response[:500].strip(), [], [], []
+
+
+def _extract_entities(question: str) -> tuple[str, str] | None:
+    """
+    Attempt to extract two competing entities from a market question.
+
+    Looks for patterns like "Will X beat Y", "X vs Y", "X win against Y".
+    Returns (entity_a, entity_b) or None if no match.
+    """
+    # Strip common prefixes and game/category labels like "Valorant: ", "CS2: "
+    q = re.sub(r"^[A-Za-z0-9]+:\s+", "", question)
+    q = re.sub(r"^(Will|Do|Does|Can|Is)\s+", "", q, flags=re.IGNORECASE)
+
+    # Try splitting on competitive keywords
+    for pattern in [
+        r"\s+(?:vs\.?|versus)\s+",
+        r"\s+beat\s+",
+        r"\s+win\s+against\s+",
+        r"\s+defeat\s+",
+    ]:
+        parts = re.split(pattern, q, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            a = parts[0].strip().rstrip("?").strip()
+            b = parts[1].strip().rstrip("?").strip()
+            # Clean trailing qualifiers like "in Map 1" or "(BO3)"
+            b = re.split(r"\s+(?:in|at|\()", b, maxsplit=1)[0].strip()
+            if a and b:
+                return (a, b)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -136,13 +183,27 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
     tavily = TavilyClient(api_key=config.TAVILY_API_KEY)
 
     # Query templates — first N are used based on TAVILY_SEARCHES_PER_MARKET config.
+    # For competitive markets, try to detect entities and add targeted queries.
     all_query_templates = [
         (f"{market.question} latest news",       "advanced", 7),
         (f"{market.question} prediction analysis","advanced", 7),
         (f"{market.question} odds betting",       "basic",   5),
-        (f"{market.question} stats form results", "basic",   5),
-        (f"{market.question} expert preview",     "basic",   5),
     ]
+
+    # Entity detection: split on common competitive market patterns
+    entities = _extract_entities(market.question)
+    if entities:
+        e1, e2 = entities
+        all_query_templates.extend([
+            (f"{e1} recent form results stats 2026",  "basic", 5),
+            (f"{e2} recent form results stats 2026",  "basic", 5),
+        ])
+    else:
+        all_query_templates.extend([
+            (f"{market.question} stats form results", "basic", 5),
+            (f"{market.question} expert preview",     "basic", 5),
+        ])
+
     queries = all_query_templates[:config.TAVILY_SEARCHES_PER_MARKET]
 
     all_results: list[dict] = []
@@ -190,22 +251,27 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
     logger.debug("Calling LLM for synthesis (snippet_chars=%d)", len(raw_snippets))
     llm_response = await llm_chat(system=_SYNTHESIZER_SYSTEM, user=user_msg)
 
-    news_summary, green_flags, red_flags = _parse_llm_response(llm_response)
+    news_summary, side_yes_case, side_no_case, key_context = _parse_llm_response(
+        llm_response
+    )
 
     # Ensure non-empty fields — fallback if LLM returned empty
     if not news_summary:
         news_summary = " ".join(key_facts[:3]) if key_facts else "No summary available."
-    if not green_flags:
-        green_flags = ["Insufficient data to identify green flags."]
-    if not red_flags:
-        red_flags = ["Insufficient data to identify red flags."]
+    if not side_yes_case:
+        side_yes_case = ["Insufficient data to build YES case."]
+    if not side_no_case:
+        side_no_case = ["Insufficient data to build NO case."]
+    if not key_context:
+        key_context = ["No additional context available."]
 
     return BriefingDocument(
         market=market,
         key_facts=key_facts,
         news_summary=news_summary,
-        red_flags=red_flags,
-        green_flags=green_flags,
+        side_yes_case=side_yes_case,
+        side_no_case=side_no_case,
+        key_context=key_context,
         data_freshness=datetime.now(timezone.utc),
     )
 
@@ -251,13 +317,17 @@ if __name__ == "__main__":
         print("\n--- news_summary ---")
         print(f"  {briefing.news_summary}")
 
-        print("\n--- green_flags ---")
-        for flag in briefing.green_flags:
-            print(f"  + {flag}")
+        print("\n--- side_yes_case ---")
+        for item in briefing.side_yes_case:
+            print(f"  + {item}")
 
-        print("\n--- red_flags ---")
-        for flag in briefing.red_flags:
-            print(f"  - {flag}")
+        print("\n--- side_no_case ---")
+        for item in briefing.side_no_case:
+            print(f"  - {item}")
+
+        print("\n--- key_context ---")
+        for item in briefing.key_context:
+            print(f"  * {item}")
 
         print(f"\n--- data_freshness ---")
         print(f"  {briefing.data_freshness.isoformat()}")
@@ -266,8 +336,9 @@ if __name__ == "__main__":
         assert briefing.market.id == market.id, "market id mismatch"
         assert len(briefing.key_facts) > 0, "key_facts is empty"
         assert len(briefing.news_summary) > 0, "news_summary is empty"
-        assert len(briefing.green_flags) > 0, "green_flags is empty"
-        assert len(briefing.red_flags) > 0, "red_flags is empty"
+        assert len(briefing.side_yes_case) > 0, "side_yes_case is empty"
+        assert len(briefing.side_no_case) > 0, "side_no_case is empty"
+        assert len(briefing.key_context) > 0, "key_context is empty"
         assert briefing.data_freshness is not None, "data_freshness is None"
 
         print("\n✓ synthesizer.py smoke test complete.")

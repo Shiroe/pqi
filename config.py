@@ -19,6 +19,7 @@ Raises EnvironmentError at import time if required keys are absent.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env from the directory containing this file (the pqi package root)
@@ -82,6 +83,21 @@ CONFIDENCE_HIGH_THRESHOLD: float = float(os.getenv("CONFIDENCE_HIGH_THRESHOLD", 
 CONFIDENCE_MEDIUM_THRESHOLD: float = float(os.getenv("CONFIDENCE_MEDIUM_THRESHOLD", "0.40"))
 CONSENSUS_YES_FLOOR: float = float(os.getenv("CONSENSUS_YES_FLOOR", "0.40"))
 CONSENSUS_NO_CEILING: float = float(os.getenv("CONSENSUS_NO_CEILING", "0.60"))
+RULES_LAWYER_WEIGHT: float = float(os.getenv("RULES_LAWYER_WEIGHT", "2"))
+
+# Probability-first recommendation gates
+MIN_COUNCIL_PROBABILITY: float = float(os.getenv("MIN_COUNCIL_PROBABILITY", "0.60"))
+MIN_CONTRARIAN_PROBABILITY: float = float(os.getenv("MIN_CONTRARIAN_PROBABILITY", "0.70"))
+MIN_CONTRARIAN_CONFIDENCE: float = float(os.getenv("MIN_CONTRARIAN_CONFIDENCE", "0.80"))
+
+# ---------------------------------------------------------------------------
+# Cache
+# ---------------------------------------------------------------------------
+
+CACHE_DB_PATH: str = os.getenv(
+    "CACHE_DB_PATH", str(Path.home() / ".pqi" / "cache.db")
+)
+CACHE_PRICE_DELTA: float = float(os.getenv("CACHE_PRICE_DELTA", "0.02"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -166,6 +182,9 @@ if __name__ == "__main__":
         ("CONFIDENCE_MEDIUM_THRESHOLD",str(CONFIDENCE_MEDIUM_THRESHOLD)),
         ("CONSENSUS_YES_FLOOR",        str(CONSENSUS_YES_FLOOR)),
         ("CONSENSUS_NO_CEILING",       str(CONSENSUS_NO_CEILING)),
+        ("RULES_LAWYER_WEIGHT",        str(RULES_LAWYER_WEIGHT)),
+        ("CACHE_DB_PATH",             CACHE_DB_PATH),
+        ("CACHE_PRICE_DELTA",         str(CACHE_PRICE_DELTA)),
         ("LOG_LEVEL",                  LOG_LEVEL),
     ]
     col = max(len(k) for k, _ in rows) + 2
