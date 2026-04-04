@@ -362,7 +362,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 15 — Dynamic Bull/Bear, dual-perspective prompts, enriched briefing]
+**Last updated:** [session 16 — polymarket.py refactor, API live/ended fields, --live flag]
 
 ### Implemented & tested ✓
 
@@ -436,7 +436,7 @@ as a literal.
   DB at `~/.pqi/cache.db` (configurable via `CACHE_DB_PATH`).
 - `main.py` — Typer CLI: `analyze` + `categories` + `history` commands.
   Flags: `--category/-c`, `--top-n/-n`, `--top/-t`, `--starts-within/-s`,
-  `--resolve-within/-r`, `--min-volume/-v`, `--no-cache`.
+  `--resolve-within/-r`, `--live/-l`, `--min-volume/-v`, `--no-cache`.
   `analyze` checks cache before running council; stores result after.
   `--no-cache` forces a fresh council run. Result appended to history after every run.
   PASS recommendation now shows reason line (e.g. "Edge too small...").
@@ -444,19 +444,22 @@ as a literal.
   event via `fetch_event_markets()`, shows all sibling markets, offers to analyze
   them too. Useful for BO3 events with map 1/map 2/moneyline sub-markets.
   `history` command shows past runs in a Rich table.
-- `market/polymarket.py` — three-pass `resolve_category()` with parallel optimization.
-  Server-side tag filtering via `tag_id` on `/events`. `CategoryNotFoundError`.
-  `fetch_tags()` scans top 200 events for unique tag slugs.
-  `fetch_event_markets(market_id)` (session 14): fetches parent event to discover
-  all sibling markets. Returns `(event_title, list[MarketData])`. Uses
-  `/markets/{id}` → event ID → `/events/{event_id}` to get all markets.
-  Session 15: `--starts-within/-s` flag filters by event start time (client-side,
-  API ignores event_start_time params). `--live/-l` flag filters to events already
-  started but not resolved. Both composable with each other and `--resolve-within`.
+- `market/polymarket.py` — **Refactored session 16.** Architecture:
+  `fetch_markets()` → `_fetch_and_filter()` → `_build_api_params()` +
+  `_parse_events_to_markets()` + `_apply_client_filters()`.
+  Eliminated duplicated `_fetch_markets_general` / `_fetch_markets_by_time_window`
+  (were ~25 lines of shared code). Single fetch path for all query types.
+  `_ParsedMarket` dataclass carries event-level `live`/`ended` through pipeline.
+  **Server-side volume filtering**: `volume_min` on /events, `volume_num_min` on /markets.
+  **API live/ended fields**: uses `event.live` for `--live` flag (not `event_start_time < now`),
+  filters out `event.ended=True` events. Confirmed populated on list endpoint for sports/esports.
+  **Fetch limit scaling**: `limit * 5` when client-side filters active (was `limit * 2`,
+  missed low-volume live events at rank 47+).
+  `resolve_category()`: three-pass with parallel optimization (untouched).
+  `fetch_event_markets()`: reuses `_parse_events_to_markets()` for shared parsing.
+  `--live/-l`, `--starts-within/-s`, `--resolve-within/-r` all composable.
   `MarketData.event_start_time` parsed from `eventStartTime` field.
   Market list table shows "Starts" column when event_start_time is available.
-  Session 16: filters out `acceptingOrders=False` markets and `ended=True` events
-  (event-level field; populated on direct fetch/search but usually None on list endpoint).
 
 ### Not started ✗
 
@@ -530,66 +533,65 @@ as a literal.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 
-Session 15 was a major agent + scoring overhaul in three areas:
+Session 16 focused on two areas:
 
-### A. Agent perspective fixes
-1. Dynamic Bull/Bear — Bull = "Favorite's Advocate" (higher-priced side),
-   Bear = "Underdog's Advocate" (lower-priced side). SIDE CONTEXT block
-   injected in council.py. Both still output probability_score as P(YES).
-2. Dual-perspective analysis — SHARED_PREAMBLE rule forcing all agents
-   to reason about BOTH sides.
-3. Probability direction fix — OUTCOME LABELS block in every briefing
-   explicitly states what YES/NO mean. Anti-inversion warning in preamble.
-   Fixes bug where agents confused P(favored entity) with P(YES).
+### A. polymarket.py refactor
+Major architectural cleanup. Eliminated duplicated `_fetch_markets_general` and
+`_fetch_markets_by_time_window` (shared ~25 lines of code). New architecture:
+  fetch_markets() → _fetch_and_filter() → _build_api_params() +
+                    _parse_events_to_markets() + _apply_client_filters()
 
-### B. Enriched briefing
-4. BriefingDocument: green_flags/red_flags → side_yes_case/side_no_case
-   + new key_context field. Synthesizer detects entities for competitive
-   markets (_extract_entities()) and runs per-entity Tavily queries.
-5. Briefing formatter: CASE FOR YES / CASE FOR NO / KEY CONTEXT sections.
+Key improvements:
+- Uses API's `event.live` and `event.ended` fields (confirmed populated on
+  /events list endpoint for sports/esports)
+- Server-side volume filtering (volume_min on /events, volume_num_min on /markets)
+- Higher fetch_limit (limit*5 vs limit*2) when client-side filters active —
+  fixes missing low-volume live events
+- `_ParsedMarket` dataclass carries event-level metadata through pipeline
+- `_apply_client_filters()` centralizes live/starts_within/resolve_within logic
+- `--live` flag added to CLI, uses API's event.live field
 
-### C. Probability-first scoring (biggest change)
-6. Recommendation logic rewritten: probability gates, not edge gates.
-   - Council favored side (>50%) with prob >= MIN_COUNCIL_PROBABILITY
-     (0.60) + HIGH confidence → BUY (market-aligned)
-   - Contrarian: prob >= MIN_CONTRARIAN_PROBABILITY (0.70) + confidence
-     >= MIN_CONTRARIAN_CONFIDENCE (0.80) → BUY CONTRARIAN
-   - Signal type: STRONG / CONFIRMED / CAUTIOUS / CONTRARIAN
-   - Edge is informational (sets signal type), not a gate
-7. New config: MIN_COUNCIL_PROBABILITY, MIN_CONTRARIAN_PROBABILITY,
-   MIN_CONTRARIAN_CONFIDENCE.
+### B. API documentation
+- Created auto-memory `reference_gamma_api.md` with full endpoint params, schemas,
+  and known behaviors from the official OpenAPI spec
+- Corrected CLAUDE.md: /markets HAS tag_id param, /events HAS tag_slug param,
+  both have server-side volume filtering
+- Created `feedback_api_research.md` — always check docs before exploring
 
 ## Remaining ideas / future work
 
-### 1. Cache TTL / expiry
+### 1. End-to-end test run
+Session 15 changes (agent perspectives, probability-first scoring, enriched briefing)
+have NOT been tested end-to-end yet. Run `pqi analyze` on esports + binary markets.
+
+### 2. Cache TTL / expiry
 Add time-based expiry to cached results (e.g. 24h max age). Currently cache
 only invalidates on price movement > 2%.
 
-### 2. History: resolution tracking
+### 3. History: resolution tracking
 Extend `pqi history` to check if markets resolved and show whether the
 recommendation was correct (win/loss). Fetch market outcome from Gamma API.
 
-### 3. /public-search integration
+### 4. /public-search integration
 Use `/public-search?q=TEXT` as supplementary fetch for ghost events.
 
-### 4. Multi-market batch analysis
+### 5. Multi-market batch analysis
 Allow `pqi analyze --top 3` to analyze top N markets sequentially.
 
-### 5. Shared briefing for sibling markets
+### 6. Shared briefing for sibling markets
 When analyzing siblings from the same event, share the Tavily briefing
 (same event = same news) but still run separate councils (different
 resolution criteria per market).
 
-### 6. Market type detection (explicit)
-If the implicit approach (session 15) proves insufficient, add explicit
-market_type detection (head_to_head vs binary_event) for different briefing
-templates and prompt wording.
+### 7. Use tag_slug for simpler category resolution
+The /events endpoint accepts `tag_slug` directly — could simplify
+resolve_category() by skipping the tag_id lookup step for exact slug matches.
 
 ## Instructions
-- Do an end-to-end test run to verify all session 15 changes work
-- Test on esports (competitive) + binary (crypto/politics) markets
-- Verify: probability direction correct, signal_type labels appear,
-  Bull/Bear reference correct sides, briefing sections correct
+- Do an end-to-end test run (session 15 + 16 changes)
+- Test --live and --starts-within on esports markets
+- Verify ended events are filtered, live events show correctly
+- Test general queries still work (no category, no time filter)
 - Read the relevant existing files before writing any new code
 - Update ## Current State and ## Next Session Prompt at end of session
 ```

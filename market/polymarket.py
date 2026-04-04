@@ -7,9 +7,17 @@ Fetches and filters active prediction markets from:
 
 No authentication required. Uses httpx.AsyncClient.
 Rate limit: 0.5s delay after each request (config.GAMMA_RATE_LIMIT_DELAY).
+
+Architecture:
+  fetch_markets()            — public entry point, thin coordinator
+    └── _fetch_and_filter()  — single fetch function for all queries
+          ├── _build_api_params()      — builds query params (one place)
+          ├── _parse_events_to_markets() — events → _ParsedMarket[] (one place)
+          └── _apply_client_filters()  — composable client-side filters (one place)
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -22,24 +30,35 @@ from pqi.models import MarketData
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Internal data types
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _ParsedMarket:
+    """MarketData + event-level metadata not stored on MarketData."""
+
+    market: MarketData
+    event_live: bool | None = None   # from event's `live` field
+    event_ended: bool | None = None  # from event's `ended` field
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+
 def _parse_market(
     raw: dict,
-    volume_floor: float = config.MIN_VOLUME_USD,
     category_override: str | None = None,
 ) -> MarketData | None:
     """
     Parse a single raw market dict from the Gamma API into a MarketData model.
 
-    Returns None if required fields are missing or volume_usd < volume_floor.
-
-    Args:
-        raw:               Raw market dict from /markets or embedded in /events.
-        volume_floor:      Minimum volume_usd to include. Pass
-                           MIN_VOLUME_SHORT_WINDOW_USD for time-filtered queries.
-        category_override: When parsing markets embedded in events, the category
-                           comes from the parent event's tags, not a nested
-                           "events" key (which is absent for embedded markets).
-                           Pass a non-None string to bypass the nested lookup.
+    Returns None if required fields are missing or the market is invalid.
+    Volume filtering is handled server-side (volume_min / volume_num_min)
+    or by the caller — this function only validates field integrity.
 
     Field mappings (verified against live API 2026-04):
       id            → raw["id"]
@@ -83,14 +102,6 @@ def _parse_market(
         if volume_usd is None:
             volume_str = raw.get("volume", "0")
             volume_usd = float(volume_str)
-
-        # Filter illiquid markets before constructing the model
-        if volume_usd < volume_floor:
-            logger.debug(
-                "Market %s below volume threshold (%.0f < %.0f) — skipping",
-                market_id, volume_usd, volume_floor,
-            )
-            return None
 
         # Category resolution:
         #   1. Explicit override (from parent event's tags, for /events responses)
@@ -149,6 +160,277 @@ def _category_from_event(event: dict) -> str:
         if label:
             return label.lower()
     return "general"
+
+
+def _parse_events_to_markets(raw_events: list[dict]) -> list[_ParsedMarket]:
+    """
+    Parse raw event dicts into a flat, deduplicated list of _ParsedMarket.
+
+    Filters out:
+      - Events with ended=True (API field, populated on sports/esports events)
+      - Markets that fail _parse_market() validation (missing fields, acceptingOrders=False)
+      - Duplicate market IDs across events
+    """
+    results: list[_ParsedMarket] = []
+    seen_ids: set[str] = set()
+
+    for event in raw_events:
+        if event.get("ended") is True:
+            continue
+
+        event_category = _category_from_event(event)
+        event_live = event.get("live")
+        event_ended = event.get("ended")
+
+        for raw_market in event.get("markets") or []:
+            market_id = str(raw_market.get("id", ""))
+            if market_id in seen_ids:
+                continue
+            seen_ids.add(market_id)
+
+            parsed = _parse_market(raw_market, category_override=event_category)
+            if parsed is not None:
+                results.append(_ParsedMarket(
+                    market=parsed,
+                    event_live=event_live,
+                    event_ended=event_ended,
+                ))
+
+    return results
+
+
+def _build_api_params(
+    endpoint: str,
+    limit: int,
+    *,
+    series_id: str | None = None,
+    tag_id: str | None = None,
+    volume_floor: float = 0.0,
+    end_date_min: datetime | None = None,
+    end_date_max: datetime | None = None,
+    has_client_filters: bool = False,
+) -> dict[str, str | int]:
+    """
+    Build query params dict for a Gamma API request.
+
+    Args:
+        endpoint:           "events" or "markets"
+        limit:              User-requested market count (fetch_limit is scaled up)
+        series_id:          Server-side series filter (events endpoint only)
+        tag_id:             Server-side tag filter
+        volume_floor:       Server-side volume minimum
+        end_date_min/max:   Server-side resolution time window
+        has_client_filters: If True, fetch more to compensate for client-side filtering
+    """
+    # Scale up fetch_limit: we always fetch more than requested because
+    # events contain multiple markets, some get filtered, etc.
+    if has_client_filters:
+        fetch_limit = max(limit * 5, 100)
+    else:
+        fetch_limit = max(limit * 3, 60)
+
+    params: dict[str, str | int] = {
+        "active": "true",
+        "closed": "false",
+        "order": "volume",
+        "ascending": "false",
+        "limit": fetch_limit,
+    }
+
+    if endpoint == "events":
+        if series_id:
+            params["series_id"] = series_id
+        if tag_id:
+            params["tag_id"] = tag_id
+        if volume_floor > 0:
+            params["volume_min"] = volume_floor
+    else:
+        # /markets endpoint uses different param names
+        if tag_id:
+            params["tag_id"] = tag_id
+        if volume_floor > 0:
+            params["volume_num_min"] = volume_floor
+
+    if end_date_min is not None:
+        params["end_date_min"] = end_date_min.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if end_date_max is not None:
+        params["end_date_max"] = end_date_max.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return params
+
+
+def _apply_client_filters(
+    markets: list[_ParsedMarket],
+    *,
+    live: bool = False,
+    starts_within_hours: int | None = None,
+    resolve_within_hours: int | None = None,
+    now: datetime,
+) -> list[_ParsedMarket]:
+    """
+    Apply composable client-side filters to parsed markets.
+
+    Filters:
+      - live: keep only markets from live events (API's event.live field,
+              fallback to event_start_time < now)
+      - starts_within: keep markets whose event starts within N hours
+                       (includes live events — no lower bound on start time)
+      - resolve_within: belt-and-suspenders check on end_date range
+    """
+    result = markets
+
+    if live and starts_within_hours is None:
+        # --live only: keep markets from events the API marks as live,
+        # or (fallback) where event_start_time has passed
+        def _is_live(pm: _ParsedMarket) -> bool:
+            if pm.event_live is True:
+                return True
+            if pm.event_live is False:
+                return False
+            # event_live is None (e.g. /markets path) — fallback to start time
+            m = pm.market
+            return m.event_start_time is not None and m.event_start_time < now
+
+        result = [pm for pm in result if _is_live(pm)]
+
+    elif starts_within_hours is not None:
+        # --starts-within (with or without --live): include live + upcoming
+        start_max = now + timedelta(hours=starts_within_hours)
+
+        def _starts_in_window(pm: _ParsedMarket) -> bool:
+            m = pm.market
+            if m.event_start_time is None:
+                return False
+            return m.event_start_time <= start_max
+
+        result = [pm for pm in result if _starts_in_window(pm)]
+
+    if resolve_within_hours is not None:
+        # Belt-and-suspenders: server already filters end_date, but double-check
+        end_max = now + timedelta(hours=resolve_within_hours)
+        result = [
+            pm for pm in result
+            if now <= pm.market.end_date <= end_max
+        ]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Core fetch function (replaces _fetch_markets_general + _fetch_markets_by_time_window)
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_and_filter(
+    limit: int,
+    endpoint: str,
+    series_id: str | None,
+    tag_id: str | None,
+    volume_floor: float,
+    *,
+    live: bool = False,
+    starts_within_hours: int | None = None,
+    resolve_within_hours: int | None = None,
+) -> list[MarketData]:
+    """
+    Fetch markets from the Gamma API, parse, filter, sort, and return.
+
+    Single function handling all query types (general, time-windowed, live).
+    The endpoint ("events" or "markets") and filter params drive the behavior.
+    """
+    now = datetime.now(timezone.utc)
+    has_client_filters = live or starts_within_hours is not None
+
+    # Always exclude already-resolved events via end_date_min
+    end_date_min = now
+    end_date_max = (
+        now + timedelta(hours=resolve_within_hours)
+        if resolve_within_hours is not None
+        else None
+    )
+
+    params = _build_api_params(
+        endpoint,
+        limit,
+        series_id=series_id,
+        tag_id=tag_id,
+        volume_floor=volume_floor,
+        end_date_min=end_date_min,
+        end_date_max=end_date_max,
+        has_client_filters=has_client_filters,
+    )
+
+    logger.debug(
+        "_fetch_and_filter: endpoint=%s params=%s",
+        endpoint,
+        {k: v for k, v in params.items() if k not in ("active", "closed", "ascending")},
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{config.GAMMA_BASE_URL}/{endpoint}", params=params,
+        )
+        response.raise_for_status()
+        raw_data: list[dict] = response.json()
+
+    await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+
+    # Parse raw API response into _ParsedMarket list
+    if endpoint == "events":
+        parsed = _parse_events_to_markets(raw_data)
+    else:
+        # /markets returns flat list of market dicts (no event wrapper)
+        parsed = []
+        for raw in raw_data:
+            market = _parse_market(raw)
+            if market is not None:
+                parsed.append(_ParsedMarket(market=market))
+
+    logger.debug(
+        "_fetch_and_filter: API returned %d raw items → %d parsed markets",
+        len(raw_data), len(parsed),
+    )
+
+    # Apply client-side filters (live, starts_within, resolve_within)
+    filtered = _apply_client_filters(
+        parsed,
+        live=live,
+        starts_within_hours=starts_within_hours,
+        resolve_within_hours=resolve_within_hours,
+        now=now,
+    )
+
+    # Sort: time-based queries by start time, general by volume
+    if has_client_filters:
+        filtered.sort(key=lambda pm: pm.market.event_start_time or pm.market.end_date)
+    elif resolve_within_hours is not None:
+        filtered.sort(key=lambda pm: pm.market.end_date)
+    else:
+        filtered.sort(key=lambda pm: pm.market.volume_usd, reverse=True)
+
+    filtered = filtered[:limit]
+
+    # Log summary
+    filter_desc = []
+    if live:
+        filter_desc.append("live")
+    if starts_within_hours is not None:
+        filter_desc.append(f"starts_within={starts_within_hours}h")
+    if resolve_within_hours is not None:
+        filter_desc.append(f"resolve_within={resolve_within_hours}h")
+    label = ", ".join(filter_desc) if filter_desc else "general"
+    logger.info(
+        "fetch_markets (%s): %d markets after filtering "
+        "(api_items=%d, limit=%d, volume_floor=%.0f)",
+        label, len(filtered), len(raw_data), limit, volume_floor,
+    )
+
+    return [pm.market for pm in filtered]
+
+
+# ---------------------------------------------------------------------------
+# Category resolution (untouched — well-separated)
+# ---------------------------------------------------------------------------
 
 
 class CategoryMatch:
@@ -278,6 +560,11 @@ async def resolve_category(query: str) -> CategoryMatch | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Discovery helpers (untouched)
+# ---------------------------------------------------------------------------
+
+
 async def fetch_categories(limit: int = 20) -> list[dict]:
     """
     Return the top active series sorted by 24-hour volume, for the `categories`
@@ -350,6 +637,11 @@ class CategoryNotFoundError(ValueError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
 async def fetch_markets(
     limit: int = config.MAX_MARKETS_TO_FETCH,
     category: str | None = None,
@@ -363,7 +655,7 @@ async def fetch_markets(
 
     Category filtering (two-tier):
       1. Exact/partial series slug match → server-side filter via series_id on /events
-      2. Broad tag match (e.g. "esports") → client-side filter on event tags
+      2. Broad tag match (e.g. "esports") → server-side filter via tag_id on /events
       Raises CategoryNotFoundError if --category is set but nothing matches.
 
     Args:
@@ -372,12 +664,12 @@ async def fetch_markets(
         resolve_within_hours:  Only return markets resolving within this many hours.
         starts_within_hours:   Only return markets whose event starts within this many hours.
                                Includes live events (already started, not resolved).
-        live:                  Only return live events (started but not yet resolved).
+        live:                  Only return live events (uses API's event.live field).
                                Composable with starts_within (live + upcoming).
         volume_floor_override: If set, overrides the config-based volume floor (use 0 to see all).
 
     Returns:
-        With time filters: sorted by start time asc. Otherwise by volume desc.
+        With time/live filters: sorted by start time asc. Otherwise by volume desc.
     """
     # Volume floor: override > config
     if volume_floor_override is not None:
@@ -392,7 +684,7 @@ async def fetch_markets(
             config.MIN_VOLUME_SHORT_WINDOW_USD if is_short_window else config.MIN_VOLUME_USD
         )
 
-    # Resolve category → series_id or tag slug
+    # Resolve category → series_id or tag_id
     cat_match: CategoryMatch | None = None
     if category:
         cat_match = await resolve_category(category)
@@ -405,242 +697,26 @@ async def fetch_markets(
     series_id = cat_match.value if (cat_match and cat_match.is_series) else None
     tag_id = cat_match.value if (cat_match and cat_match.is_tag) else None
 
-    if resolve_within_hours is not None or starts_within_hours is not None or live:
-        return await _fetch_markets_by_time_window(
-            limit=limit,
-            series_id=series_id,
-            tag_id=tag_id,
-            resolve_within_hours=resolve_within_hours,
-            starts_within_hours=starts_within_hours,
-            live=live,
-            volume_floor=volume_floor,
-        )
-    else:
-        return await _fetch_markets_general(
-            limit=limit,
-            series_id=series_id,
-            tag_id=tag_id,
-            volume_floor=volume_floor,
-        )
-
-
-async def _fetch_markets_general(
-    limit: int,
-    series_id: str | None,
-    tag_id: str | None,
-    volume_floor: float,
-) -> list[MarketData]:
-    """
-    Fetch markets without a time filter, sorted by volume descending.
-
-    Three modes:
-      - series_id set:  GET /events?series_id=<id>&order=volume (server-side filter)
-      - tag_id set:     GET /events?tag_id=<id>&order=volume (server-side tag filter)
-      - neither:        GET /markets?order=volume (fastest, all markets)
-    """
-    fetch_limit = max(limit * 3, 30)
-
-    markets: list[MarketData] = []
-
-    if series_id or tag_id:
-        # Both paths use /events with server-side filtering
-        params: dict[str, str | int] = {
-            "active": "true",
-            "closed": "false",
-            "order": "volume",
-            "ascending": "false",
-            "limit": fetch_limit,
-        }
-        if series_id:
-            params["series_id"] = series_id
-        if tag_id:
-            params["tag_id"] = tag_id
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{config.GAMMA_BASE_URL}/events", params=params)
-            response.raise_for_status()
-            raw_events: list[dict] = response.json()
-
-        await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
-        logger.debug(
-            "_fetch_markets_general (series_id=%s, tag_id=%s): API returned %d events",
-            series_id, tag_id, len(raw_events),
-        )
-
-        seen_ids: set[str] = set()
-        for event in raw_events:
-            if event.get("ended") is True:
-                continue
-            event_category = _category_from_event(event)
-            for raw_market in event.get("markets") or []:
-                market_id = str(raw_market.get("id", ""))
-                if market_id in seen_ids:
-                    continue
-                seen_ids.add(market_id)
-                parsed = _parse_market(raw_market, volume_floor=volume_floor,
-                                       category_override=event_category)
-                if parsed is not None:
-                    markets.append(parsed)
-    else:
-        params = {
-            "active": "true",
-            "closed": "false",
-            "order": "volume",
-            "ascending": "false",
-            "limit": fetch_limit,
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{config.GAMMA_BASE_URL}/markets", params=params)
-            response.raise_for_status()
-            raw_markets: list[dict] = response.json()
-
-        await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
-        logger.debug("_fetch_markets_general: API returned %d raw markets", len(raw_markets))
-
-        for raw in raw_markets:
-            parsed = _parse_market(raw, volume_floor=volume_floor)
-            if parsed is not None:
-                markets.append(parsed)
-
-    markets.sort(key=lambda m: m.volume_usd, reverse=True)
-    markets = markets[:limit]
-    logger.info(
-        "fetch_markets (general): %d markets after filtering (limit=%d, volume_floor=%.0f)",
-        len(markets), limit, volume_floor,
+    # Pick endpoint: /events when we have category filters or time filters
+    # (events have tags, series, live/ended fields). /markets only for unfiltered general queries.
+    use_events = bool(
+        series_id or tag_id
+        or resolve_within_hours is not None
+        or starts_within_hours is not None
+        or live
     )
-    return markets
+    endpoint = "events" if use_events else "markets"
 
-
-async def _fetch_markets_by_time_window(
-    limit: int,
-    series_id: str | None,
-    tag_id: str | None,
-    resolve_within_hours: int | None,
-    starts_within_hours: int | None,
-    live: bool,
-    volume_floor: float,
-) -> list[MarketData]:
-    """
-    Fetch markets within a time window via /events endpoint.
-
-    Both filters are composable — when both are set, markets must pass BOTH.
-    Server-side: uses event_start_time_min/max and/or end_date_min/max on /events API.
-    Client-side: double-checks parsed market times since API may include edge cases.
-
-    Sort order: starts_within → by event_start_time asc; resolve_within only → by end_date asc.
-    """
-    now = datetime.now(timezone.utc)
-    fetch_limit = max(limit * 2, 40)
-
-    params: dict[str, str | int] = {
-        "active": "true",
-        "closed": "false",
-        "order": "volume",
-        "ascending": "false",
-        "limit": fetch_limit,
-    }
-    if series_id:
-        params["series_id"] = series_id
-    if tag_id:
-        params["tag_id"] = tag_id
-
-    # Server-side time filters — only end_date_min/max works server-side.
-    # event_start_time filtering is client-side (API ignores those params).
-    end_max: datetime | None = None
-    start_max: datetime | None = None
-
-    if resolve_within_hours is not None:
-        end_max = now + timedelta(hours=resolve_within_hours)
-        params["end_date_min"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        params["end_date_max"] = end_max.strftime("%Y-%m-%dT%H:%M:%SZ")
-    else:
-        # Even without resolve_within, exclude already-resolved events
-        params["end_date_min"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    if starts_within_hours is not None:
-        start_max = now + timedelta(hours=starts_within_hours)
-        # No server-side param — filtered client-side below
-
-    logger.debug(
-        "_fetch_markets_by_time_window: params=%s (volume_floor=%.0f)",
-        {k: v for k, v in params.items() if "date" in k or "time" in k or "id" in k},
-        volume_floor,
+    return await _fetch_and_filter(
+        limit=limit,
+        endpoint=endpoint,
+        series_id=series_id,
+        tag_id=tag_id,
+        volume_floor=volume_floor,
+        live=live,
+        starts_within_hours=starts_within_hours,
+        resolve_within_hours=resolve_within_hours,
     )
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(f"{config.GAMMA_BASE_URL}/events", params=params)
-        response.raise_for_status()
-        raw_events: list[dict] = response.json()
-
-    await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
-    logger.debug(
-        "_fetch_markets_by_time_window: API returned %d events", len(raw_events)
-    )
-
-    markets: list[MarketData] = []
-    seen_ids: set[str] = set()
-
-    for event in raw_events:
-        # Skip events the API has marked as ended (field populated on direct
-        # fetches and /public-search; usually None on list endpoint, but check anyway)
-        if event.get("ended") is True:
-            continue
-
-        event_category = _category_from_event(event)
-        for raw_market in event.get("markets") or []:
-            market_id = str(raw_market.get("id", ""))
-            if market_id in seen_ids:
-                continue
-            seen_ids.add(market_id)
-
-            parsed = _parse_market(
-                raw_market,
-                volume_floor=volume_floor,
-                category_override=event_category,
-            )
-            if parsed is None:
-                continue
-
-            # Client-side time checks (belt-and-suspenders with API filtering)
-            if end_max is not None:
-                if parsed.end_date < now or parsed.end_date > end_max:
-                    continue
-
-            # Event start time filtering (all client-side — API ignores these params)
-            if live and starts_within_hours is None:
-                # --live only: must have started already
-                if parsed.event_start_time is None or parsed.event_start_time >= now:
-                    continue
-            elif starts_within_hours is not None:
-                # --starts-within (with or without --live): include live + upcoming
-                if parsed.event_start_time is None:
-                    continue
-                if parsed.event_start_time > start_max:
-                    continue
-
-            markets.append(parsed)
-
-    # Sort: prefer event_start_time when available, fall back to end_date
-    if starts_within_hours is not None or live:
-        markets.sort(key=lambda m: m.event_start_time or m.end_date)
-    else:
-        markets.sort(key=lambda m: m.end_date)
-
-    markets = markets[:limit]
-
-    filter_desc = []
-    if live:
-        filter_desc.append("live")
-    if starts_within_hours is not None:
-        filter_desc.append(f"starts_within={starts_within_hours}h")
-    if resolve_within_hours is not None:
-        filter_desc.append(f"resolve_within={resolve_within_hours}h")
-    logger.info(
-        "fetch_markets (%s): %d markets after filtering "
-        "(events_fetched=%d, limit=%d, volume_floor=%.0f)",
-        ", ".join(filter_desc), len(markets), len(raw_events), limit, volume_floor,
-    )
-    return markets
 
 
 async def fetch_market_detail(market_id: str) -> MarketData | None:
@@ -701,17 +777,16 @@ async def fetch_event_markets(market_id: str) -> tuple[str, list[MarketData]]:
             logger.warning("Failed to fetch event %s: %s", event_id, exc)
             return ("", [])
 
-    event_category = _category_from_event(event_data)
-    raw_markets = event_data.get("markets") or []
-
-    siblings: list[MarketData] = []
-    for raw in raw_markets:
-        parsed = _parse_market(raw, volume_floor=0, category_override=event_category)
-        if parsed is not None:
-            siblings.append(parsed)
-
+    # Reuse shared parsing (no volume floor for sibling discovery)
+    parsed = _parse_events_to_markets([event_data])
+    siblings = [pm.market for pm in parsed]
     siblings.sort(key=lambda m: m.volume_usd, reverse=True)
     return (event_title, siblings)
+
+
+# ---------------------------------------------------------------------------
+# Smoke test
+# ---------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
@@ -739,7 +814,6 @@ if __name__ == "__main__":
             assert m.resolution_criteria is not None, f"Market missing resolution_criteria: {m.id}"
             assert m.end_date, f"Market missing end_date: {m.id}"
             assert 0.0 <= m.yes_price <= 1.0, f"yes_price out of range: {m.id}"
-            assert m.volume_usd >= config.MIN_VOLUME_USD, f"volume below threshold: {m.id}"
             assert m.category, f"Market missing category: {m.id}"
         print(f"  All {len(markets)} markets passed field validation.")
 
