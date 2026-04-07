@@ -5,15 +5,21 @@ Tavily-powered research synthesizer.
 Given a MarketData object, runs targeted Tavily searches (configurable via
 TAVILY_SEARCHES_PER_MARKET, default 5) and condenses the results into a
 BriefingDocument for the Council of Seven.
+
+Search queries are designed by an LLM "Search Architect" that analyzes the
+market data and generates category-aware, timing-aware queries with optimized
+Tavily parameters (topic, time_range, include_domains, etc.).
 """
 
 import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 
-from tavily import TavilyClient
+from pydantic import BaseModel, Field, ValidationError
+from tavily import AsyncTavilyClient
 
 from pqi import config
 from pqi.llm.client import chat as llm_chat
@@ -21,8 +27,83 @@ from pqi.models import BriefingDocument, MarketData
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# LLM prompts (kept short — this is data-cleaning, not a council agent)
+# Internal models (not cross-module contracts — stay in synthesizer.py)
+# ---------------------------------------------------------------------------
+
+class TavilyQuery(BaseModel):
+    """A single search query with full Tavily parameter tuning."""
+    query: str
+    search_depth: Literal["basic", "advanced"] = "advanced"
+    topic: Literal["general", "news", "finance"] = "general"
+    max_results: int = Field(default=5, ge=1, le=10)
+    time_range: Literal["day", "week", "month", "year"] | None = None
+    include_domains: list[str] = Field(default_factory=list)
+    exclude_domains: list[str] = Field(default_factory=list)
+
+
+class SearchPlan(BaseModel):
+    """Wrapper for LLM-generated search plan."""
+    queries: list[TavilyQuery]
+
+
+# ---------------------------------------------------------------------------
+# Search Architect prompts
+# ---------------------------------------------------------------------------
+
+_SEARCH_ARCHITECT_SYSTEM = """\
+You are a Search Architect for a prediction market intelligence system. \
+Given a market, design optimal web search queries to gather intelligence \
+for analysts evaluating whether to buy YES or NO shares.
+
+Each query specifies: query (text), search_depth (basic|advanced), \
+topic (general|news|finance), max_results (1-10), \
+time_range (day|week|month|year|null), include_domains (list), \
+exclude_domains (list).
+
+AUTHORITATIVE SOURCES BY CATEGORY:
+- Esports: hltv.org (CS2), vlr.gg (Valorant), liquipedia.net, dust2.us, over.gg
+- Sports: espn.com, theathletic.com, transfermarkt.com, flashscore.com
+- Crypto/DeFi: defillama.com, coingecko.com, theblock.co, decrypt.co
+- Politics: fivethirtyeight.com, politico.com, realclearpolitics.com
+- Finance: bloomberg.com, reuters.com, ft.com
+
+TIMING STRATEGY:
+- LIVE/IMMINENT (within 24h): time_range="day", topic="news", breaking developments
+- THIS WEEK: time_range="week", mix news + analysis
+- FUTURE: no time_range, focus on analysis/predictions/historical data
+
+QUERY DESIGN RULES:
+1. First query: direct market question + latest developments (advanced, high max_results)
+2. For competitive markets (A vs B): include entity-specific queries for EACH side's recent form
+3. Include one query targeting expert analysis or odds/predictions
+4. Include one query focused on the specific resolution condition/criteria
+5. Diversify keywords — don't repeat the same terms across queries
+6. Use topic="finance" for crypto/finance, "news" for current events, "general" for analysis
+7. Only set include_domains when the category clearly maps to known authoritative sources
+8. Keep query text under 400 characters
+
+Respond with ONLY valid JSON — no markdown fences, no explanation."""
+
+_SEARCH_ARCHITECT_USER_TMPL = """\
+Market question: {question}
+Category: {category}
+Resolution criteria: {resolution_criteria}
+Current YES price: {yes_price:.0%}
+Volume: ${volume_usd:,.0f}
+End date: {end_date}
+Event start: {event_start_display}
+Time status: {time_status}
+
+Generate exactly {num_queries} search queries as JSON:
+{{"queries": [{{"query": "...", "search_depth": "advanced", "topic": "news", \
+"max_results": 7, "time_range": "week", "include_domains": [], \
+"exclude_domains": []}}]}}"""
+
+
+# ---------------------------------------------------------------------------
+# LLM prompts for synthesis (unchanged)
 # ---------------------------------------------------------------------------
 
 _SYNTHESIZER_SYSTEM = (
@@ -70,7 +151,7 @@ def _extract_key_facts(search_results: list[dict]) -> list[str]:
     Extract concise sentence-level facts from raw Tavily result dicts.
 
     Each result's "content" field is split into sentences. We keep sentences
-    that are ≥ 40 characters and are not bare URLs. Deduplicates case-insensitively.
+    that are >= 40 characters and are not bare URLs. Deduplicates case-insensitively.
     Returns up to 10 facts.
     """
     seen: set[str] = set()
@@ -158,6 +239,191 @@ def _extract_entities(question: str) -> tuple[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
+# Search Architect — LLM-driven query planning
+# ---------------------------------------------------------------------------
+
+def _compute_time_status(market: MarketData) -> tuple[str, str]:
+    """
+    Compute event timing display and status for the Search Architect prompt.
+
+    Returns (event_start_display, time_status).
+    """
+    now = datetime.now(timezone.utc)
+
+    if market.event_start_time is None:
+        return "Unknown", "UNKNOWN — no event start time available"
+
+    delta = market.event_start_time - now
+    if delta < timedelta(0):
+        # Event already started
+        return (
+            market.event_start_time.strftime("%Y-%m-%d %H:%M UTC"),
+            "LIVE — event already started",
+        )
+    elif delta < timedelta(hours=24):
+        hours = delta.total_seconds() / 3600
+        return (
+            market.event_start_time.strftime("%Y-%m-%d %H:%M UTC"),
+            f"IMMINENT — starts in {hours:.1f} hours",
+        )
+    elif delta < timedelta(days=7):
+        days = delta.days
+        return (
+            market.event_start_time.strftime("%Y-%m-%d %H:%M UTC"),
+            f"THIS WEEK — starts in {days} day{'s' if days != 1 else ''}",
+        )
+    else:
+        return (
+            market.event_start_time.strftime("%Y-%m-%d"),
+            f"FUTURE — event on {market.event_start_time.strftime('%Y-%m-%d')}",
+        )
+
+
+def _fallback_queries(market: MarketData) -> list[TavilyQuery]:
+    """
+    Hardcoded query templates — used when the Search Architect LLM fails.
+
+    This preserves the pre-refactor query logic as a reliable fallback.
+    """
+    all_queries = [
+        TavilyQuery(
+            query=f"{market.question} latest news",
+            search_depth="advanced",
+            topic="news",
+            max_results=7,
+        ),
+        TavilyQuery(
+            query=f"{market.question} prediction analysis",
+            search_depth="advanced",
+            max_results=7,
+        ),
+        TavilyQuery(
+            query=f"{market.question} odds betting",
+            search_depth="basic",
+            max_results=5,
+        ),
+    ]
+
+    entities = _extract_entities(market.question)
+    if entities:
+        e1, e2 = entities
+        all_queries.extend([
+            TavilyQuery(
+                query=f"{e1} recent form results stats 2026",
+                search_depth="basic",
+                max_results=5,
+            ),
+            TavilyQuery(
+                query=f"{e2} recent form results stats 2026",
+                search_depth="basic",
+                max_results=5,
+            ),
+        ])
+    else:
+        all_queries.extend([
+            TavilyQuery(
+                query=f"{market.question} stats form results",
+                search_depth="basic",
+                max_results=5,
+            ),
+            TavilyQuery(
+                query=f"{market.question} expert preview",
+                search_depth="basic",
+                max_results=5,
+            ),
+        ])
+
+    return all_queries[:config.TAVILY_SEARCHES_PER_MARKET]
+
+
+async def _plan_searches(market: MarketData) -> list[TavilyQuery]:
+    """
+    Use the Search Architect LLM to design optimal Tavily queries for a market.
+
+    Falls back to hardcoded templates if the LLM call or JSON parsing fails.
+    """
+    event_start_display, time_status = _compute_time_status(market)
+
+    user_msg = _SEARCH_ARCHITECT_USER_TMPL.format(
+        question=market.question,
+        category=market.category,
+        resolution_criteria=market.resolution_criteria,
+        yes_price=market.yes_price,
+        volume_usd=market.volume_usd,
+        end_date=market.end_date.strftime("%Y-%m-%d %H:%M UTC"),
+        event_start_display=event_start_display,
+        time_status=time_status,
+        num_queries=config.TAVILY_SEARCHES_PER_MARKET,
+    )
+
+    try:
+        logger.debug("Search Architect: planning %d queries for '%s'",
+                      config.TAVILY_SEARCHES_PER_MARKET, market.question[:80])
+        raw = await llm_chat(
+            system=_SEARCH_ARCHITECT_SYSTEM,
+            user=user_msg,
+            json_mode=True,
+        )
+
+        # Strip markdown fences if present
+        text = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+        plan = SearchPlan.model_validate_json(text)
+        queries = plan.queries[:config.TAVILY_SEARCHES_PER_MARKET]
+
+        if not queries:
+            logger.warning("Search Architect returned empty query list; using fallback")
+            return _fallback_queries(market)
+
+        for tq in queries:
+            logger.info("Search Architect query: '%s' [depth=%s, topic=%s, time=%s, domains=%s]",
+                        tq.query[:80], tq.search_depth, tq.topic,
+                        tq.time_range, tq.include_domains or "any")
+
+        return queries
+
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.warning("Search Architect JSON/validation failed (%s); using fallback", exc)
+        return _fallback_queries(market)
+    except Exception as exc:
+        logger.warning("Search Architect LLM call failed (%s); using fallback", exc)
+        return _fallback_queries(market)
+
+
+# ---------------------------------------------------------------------------
+# Tavily search execution
+# ---------------------------------------------------------------------------
+
+async def _execute_search(
+    client: AsyncTavilyClient, tq: TavilyQuery,
+) -> list[dict]:
+    """Execute a single TavilyQuery and return results, or empty list on failure."""
+    try:
+        kwargs: dict = {
+            "query": tq.query,
+            "search_depth": tq.search_depth,
+            "topic": tq.topic,
+            "max_results": tq.max_results,
+        }
+        if tq.time_range:
+            kwargs["time_range"] = tq.time_range
+        if tq.include_domains:
+            kwargs["include_domains"] = tq.include_domains
+        if tq.exclude_domains:
+            kwargs["exclude_domains"] = tq.exclude_domains
+
+        response = await client.search(**kwargs)
+        results: list[dict] = response.get("results", [])
+        logger.debug(
+            "Tavily '%s' [%s/%s] → %d results",
+            tq.query[:60], tq.search_depth, tq.topic, len(results),
+        )
+        return results
+    except Exception as exc:
+        logger.warning("Tavily query failed ('%s'): %s", tq.query[:60], exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -166,62 +432,30 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
     Orchestrate Tavily searches and produce a BriefingDocument.
 
     Steps:
-      1. Run 3 targeted Tavily searches via asyncio.to_thread (client is sync)
-      2. Extract key_facts heuristically from raw search content
-      3. Call LLM once to synthesise news_summary, green_flags, red_flags
-      4. Assemble and return BriefingDocument
+      1. LLM Search Architect designs optimal queries (with fallback)
+      2. Execute all queries in parallel via AsyncTavilyClient
+      3. Extract key_facts heuristically from raw search content
+      4. Call LLM once to synthesise news_summary, side_yes/no_case, key_context
+      5. Assemble and return BriefingDocument
 
     Raises:
         ValueError:   If TAVILY_API_KEY is not configured.
-        RuntimeError: If all 3 Tavily searches return no results.
+        RuntimeError: If all Tavily searches return no results.
     """
     if not config.TAVILY_API_KEY:
         raise ValueError(
             "TAVILY_API_KEY is not set. Add it to your .env file."
         )
 
-    tavily = TavilyClient(api_key=config.TAVILY_API_KEY)
+    # Step 1 — LLM-driven query planning
+    queries = await _plan_searches(market)
 
-    # Query templates — first N are used based on TAVILY_SEARCHES_PER_MARKET config.
-    # For competitive markets, try to detect entities and add targeted queries.
-    all_query_templates = [
-        (f"{market.question} latest news",       "advanced", 7),
-        (f"{market.question} prediction analysis","advanced", 7),
-        (f"{market.question} odds betting",       "basic",   5),
-    ]
-
-    # Entity detection: split on common competitive market patterns
-    entities = _extract_entities(market.question)
-    if entities:
-        e1, e2 = entities
-        all_query_templates.extend([
-            (f"{e1} recent form results stats 2026",  "basic", 5),
-            (f"{e2} recent form results stats 2026",  "basic", 5),
-        ])
-    else:
-        all_query_templates.extend([
-            (f"{market.question} stats form results", "basic", 5),
-            (f"{market.question} expert preview",     "basic", 5),
-        ])
-
-    queries = all_query_templates[:config.TAVILY_SEARCHES_PER_MARKET]
-
-    all_results: list[dict] = []
-    for query_text, depth, max_res in queries:
-        try:
-            response = await asyncio.to_thread(
-                lambda q=query_text, d=depth, m=max_res: tavily.search(
-                    q, max_results=m, search_depth=d
-                )
-            )
-            results: list[dict] = response.get("results", [])
-            if results:
-                all_results.extend(results)
-                logger.debug("Query '%s' [%s] → %d results", query_text, depth, len(results))
-            else:
-                logger.warning("Tavily returned no results for query: %s", query_text)
-        except Exception as exc:
-            logger.warning("Tavily query failed ('%s'): %s", query_text, exc)
+    # Step 2 — parallel search execution
+    tavily = AsyncTavilyClient(api_key=config.TAVILY_API_KEY)
+    results_per_query = await asyncio.gather(
+        *[_execute_search(tavily, tq) for tq in queries]
+    )
+    all_results = [r for batch in results_per_query for r in batch]
 
     if not all_results:
         raise RuntimeError(
@@ -233,10 +467,10 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
         len(all_results), len(queries), market.id,
     )
 
-    # Step 2 — heuristic key_facts extraction
+    # Step 3 — heuristic key_facts extraction
     key_facts = _extract_key_facts(all_results)
 
-    # Step 3 — build snippet text for LLM, capped at 3000 chars to avoid token blowout
+    # Step 4 — build snippet text for LLM, capped to avoid token blowout
     raw_snippets = "\n\n".join(
         f"[{r.get('title', 'No title')}]\n{r.get('content', '')}"
         for r in all_results

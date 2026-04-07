@@ -20,7 +20,7 @@ from rich.table import Table
 from rich import box
 
 from pqi import config
-from pqi.models import CouncilResult, MarketData
+from pqi.models import CouncilResult, EventGroup, MarketData
 
 app = typer.Typer(help="PQI — Polymarket Qualitative Intelligence advisor.")
 console = Console()
@@ -168,6 +168,112 @@ def prompt_market_selection(markets: list[MarketData]) -> MarketData:
         console.print(f"[red]Please enter a number between 1 and {len(markets)}.[/red]")
 
 
+def display_event_list(groups: list[EventGroup]) -> None:
+    """Render a numbered Rich table of event groups."""
+    table = Table(
+        title="Active Polymarket Events",
+        box=box.ROUNDED,
+        show_lines=True,
+    )
+    table.add_column("#", style="bold cyan", justify="right", width=4)
+    table.add_column("Event", style="white", max_width=44)
+    table.add_column("Starts", justify="right", width=9)
+    table.add_column("Mkts", justify="center", width=5)
+    table.add_column("YES", justify="right", width=6)
+    table.add_column("NO", justify="right", width=6)
+    table.add_column("Volume (USD)", justify="right", width=14)
+
+    for i, g in enumerate(groups, start=1):
+        # Single-market events show the market question; multi-market show event title
+        if len(g.markets) == 1 or not g.event_title:
+            label = g.primary_market.question
+        else:
+            label = g.event_title
+        if len(label) > 44:
+            label = label[:41] + "..."
+
+        starts = _format_end_date(g.event_start_time) if g.event_start_time else "—"
+        pm = g.primary_market
+
+        live_marker = " [green]LIVE[/green]" if g.live else ""
+
+        table.add_row(
+            str(i),
+            f"{label}{live_marker}",
+            starts,
+            str(len(g.markets)),
+            f"{pm.yes_price:.0%}",
+            f"{1.0 - pm.yes_price:.0%}",
+            f"${g.total_volume:,.0f}",
+        )
+
+    console.print(table)
+
+
+def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, MarketData]:
+    """
+    Display the event list and prompt the user to select an event, then a market.
+
+    Single-market events skip the sub-selection step.
+    Returns (selected_group, selected_market).
+    """
+    display_event_list(groups)
+
+    # Step 1: pick an event group
+    while True:
+        raw = input(f"\nSelect an event [1–{len(groups)}, Enter for #1]: ").strip()
+        if raw == "":
+            group = groups[0]
+            break
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(groups):
+                group = groups[idx - 1]
+                break
+        except ValueError:
+            pass
+        console.print(f"[red]Please enter a number between 1 and {len(groups)}.[/red]")
+
+    # Step 2: if single market, return directly
+    if len(group.markets) == 1:
+        return group, group.markets[0]
+
+    # Step 3: sub-select from sibling markets
+    console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
+    console.print(f"[cyan]{len(group.markets)} markets in this event:[/cyan]")
+
+    sub_table = Table(box=box.SIMPLE, show_lines=False)
+    sub_table.add_column("#", style="bold cyan", justify="right", width=4)
+    sub_table.add_column("Market", style="white", max_width=50)
+    sub_table.add_column("YES", justify="right", width=6)
+    sub_table.add_column("NO", justify="right", width=6)
+    sub_table.add_column("Volume", justify="right", width=12)
+
+    for i, m in enumerate(group.markets, start=1):
+        q = m.question if len(m.question) <= 50 else m.question[:47] + "..."
+        sub_table.add_row(
+            str(i),
+            q,
+            f"{m.yes_price:.0%}",
+            f"{1.0 - m.yes_price:.0%}",
+            f"${m.volume_usd:,.0f}",
+        )
+
+    console.print(sub_table)
+
+    while True:
+        raw = input(f"\nSelect a market [1–{len(group.markets)}, Enter for #1]: ").strip()
+        if raw == "":
+            return group, group.markets[0]
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(group.markets):
+                return group, group.markets[idx - 1]
+        except ValueError:
+            pass
+        console.print(f"[red]Please enter a number between 1 and {len(group.markets)}.[/red]")
+
+
 # ---------------------------------------------------------------------------
 # Async pipeline
 # ---------------------------------------------------------------------------
@@ -242,14 +348,14 @@ def analyze(
     ),
 ) -> None:
     """
-    Fetch active Polymarket markets, run the Council of Seven, and print recommendations.
+    Fetch active Polymarket events, run the Council of Seven, and print recommendations.
     """
-    from pqi.market.polymarket import fetch_markets, CategoryNotFoundError
+    from pqi.market.polymarket import fetch_events, CategoryNotFoundError
 
     console.print("[bold cyan]PQI — Polymarket Qualitative Intelligence[/bold cyan]\n")
 
     try:
-        markets = asyncio.run(fetch_markets(
+        groups = asyncio.run(fetch_events(
             category=category,
             resolve_within_hours=resolve_within,
             starts_within_hours=starts_within,
@@ -260,8 +366,8 @@ def analyze(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
-    if not markets:
-        msg = "No markets found matching your filters."
+    if not groups:
+        msg = "No events found matching your filters."
         if live:
             msg += " No live events found."
         if starts_within is not None:
@@ -286,27 +392,25 @@ def analyze(
     if min_volume is not None:
         filter_desc.append(f"min_vol=${min_volume:,.0f}")
     if filter_desc:
-        console.print(f"[dim]Filters: {', '.join(filter_desc)} → {len(markets)} markets found.[/dim]")
+        console.print(f"[dim]Filters: {', '.join(filter_desc)} → {len(groups)} events found.[/dim]")
 
-    markets = markets[:top_n]
+    groups = groups[:top_n]
 
     if top:
-        market = markets[0]
-        console.print(f"[dim]Auto-selected top market by volume.[/dim]")
-        display_market_list([market])
+        group = groups[0]
+        market = group.primary_market
+        console.print(f"[dim]Auto-selected top event by volume.[/dim]")
+        display_event_list([group])
     else:
-        market = prompt_market_selection(markets)
+        group, market = prompt_event_selection(groups)
 
-    # Discover sibling markets from the same event
-    from pqi.market.polymarket import fetch_event_markets
-    event_title, siblings = asyncio.run(fetch_event_markets(market.id))
-    # Filter out the selected market from siblings list
-    other_siblings = [s for s in siblings if s.id != market.id]
+    # Show sibling markets if this is a multi-market event
+    other_siblings = [m for m in group.markets if m.id != market.id]
 
     if other_siblings:
-        console.print(f"\n[cyan]Event:[/cyan] {event_title}")
-        console.print(f"[cyan]This event has {len(siblings)} markets total:[/cyan]")
-        for i, s in enumerate(siblings, 1):
+        console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
+        console.print(f"[cyan]This event has {len(group.markets)} markets total:[/cyan]")
+        for i, s in enumerate(group.markets, 1):
             marker = " [bold green]← selected[/bold green]" if s.id == market.id else ""
             console.print(f"  {i}. {s.question[:60]}  (YES {s.yes_price:.0%}){marker}")
 
@@ -319,7 +423,7 @@ def analyze(
     append_result(result)
     console.print("[dim]Result saved to history.[/dim]")
 
-    # Offer to analyze sibling markets
+    # Offer to analyze sibling markets (already known from EventGroup — no extra API call)
     if other_siblings:
         console.print(f"\n[cyan]{len(other_siblings)} sibling market(s) available.[/cyan]")
         raw = input("Analyze siblings too? [y/N]: ").strip().lower()

@@ -29,6 +29,41 @@ class MarketData(BaseModel):
     category: str
 
 
+class EventGroup(BaseModel):
+    """
+    A group of sibling markets from the same Polymarket event.
+
+    Example: a BO3 esports match has Moneyline, Map 1, Map 2 as sibling
+    markets under one event.  The primary_market property returns the
+    highest-volume market (markets are pre-sorted by volume desc).
+    """
+
+    event_id: str
+    event_title: str
+    markets: list[MarketData]
+    """Sibling markets, sorted by volume descending."""
+    event_start_time: datetime | None = None
+    """Real-world event start (kickoff, hearing date, etc). Derived from child markets' eventStartTime."""
+    live: bool | None = None
+    """Whether the event is currently live. Reliable only after enrichment via /events/{id}."""
+    ended: bool | None = None
+    """Whether the event has ended. Reliable only after enrichment via /events/{id}."""
+    category: str
+    total_volume: float = Field(..., ge=0.0)
+    """Sum of volume_usd across all child markets."""
+
+    @property
+    def primary_market(self) -> MarketData:
+        """The highest-volume market in the group (used for headline display)."""
+        return self.markets[0]
+
+    @model_validator(mode="after")
+    def _check_markets_nonempty(self) -> EventGroup:
+        if not self.markets:
+            raise ValueError("EventGroup must contain at least one market.")
+        return self
+
+
 class BriefingDocument(BaseModel):
     """
     Synthesized research package produced by synthesizer.py.

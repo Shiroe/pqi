@@ -253,9 +253,13 @@ Key tag IDs: esports=64, sports=1, valorant=101672, counter-strike-2=100780, vid
 ## Tavily Synthesizer (`pqi/ingestion/synthesizer.py`)
 
 - Use `TAVILY_API_KEY` from env
-- Run 2–3 targeted searches per market (event name + "latest news", event + "prediction", event + "analysis")
-- Condense results into `BriefingDocument`
-- Cap at 3 searches per market to stay in free tier
+- **LLM Search Architect** designs queries before searching (category-aware, timing-aware)
+  - Generates `TavilyQuery` objects with full param tuning: `topic`, `time_range`,
+    `include_domains`, `exclude_domains`, `search_depth`
+  - Falls back to hardcoded templates if LLM call fails
+- Searches run in **parallel** via `AsyncTavilyClient` + `asyncio.gather()`
+- Condense results into `BriefingDocument` via separate LLM synthesis call
+- Cap at `TAVILY_SEARCHES_PER_MARKET` queries (default 5)
 
 ---
 
@@ -408,12 +412,17 @@ as a literal.
   signal type. Market-aligned bets use standard thresholds; contrarian bets
   use stricter probability + confidence requirements.
 - `llm/client.py` — Ollama + Anthropic backends, `async def chat()` public interface.
-- `ingestion/synthesizer.py` — `build_briefing()`: configurable Tavily searches
-  (default 5 queries with smarter templates). Snippet cap configurable (default 5000).
-  Session 15: entity-specific Tavily queries for competitive markets (splits on
-  "vs", "beat", "win against", "defeat" patterns via `_extract_entities()`).
-  LLM synthesis now extracts `side_yes_case`, `side_no_case`, `key_context`
-  (replaces `green_flags`/`red_flags`).
+- `ingestion/synthesizer.py` — `build_briefing()`: LLM-driven search query generation.
+  **Session 17: Search Architect refactor.** Added LLM "Search Architect" step that
+  analyzes MarketData (question, category, timing, prices) and designs optimal Tavily
+  queries with full parameter tuning: `topic` (news/general/finance), `time_range`
+  (day/week/month), `include_domains` (category-specific authoritative sources),
+  `exclude_domains`, `search_depth`. Internal `TavilyQuery` and `SearchPlan` Pydantic
+  models validate LLM output. Falls back to hardcoded templates (`_fallback_queries()`)
+  on LLM failure. Switched from sync `TavilyClient` + sequential `asyncio.to_thread()`
+  to `AsyncTavilyClient` + `asyncio.gather()` for parallel search execution.
+  `_extract_entities()` preserved for fallback path. Snippet cap configurable (default 5000).
+  LLM synthesis extracts `side_yes_case`, `side_no_case`, `key_context`.
 - `agents/council.py` — `run_council()`: 7 agents via `asyncio.gather()`.
   Semaphore only active for Ollama backend; Anthropic runs all 7 fully parallel.
   Parser extracts `confidence_yes`/`confidence_no` with fallback to legacy

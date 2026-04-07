@@ -9,11 +9,19 @@ No authentication required. Uses httpx.AsyncClient.
 Rate limit: 0.5s delay after each request (config.GAMMA_RATE_LIMIT_DELAY).
 
 Architecture:
-  fetch_markets()            — public entry point, thin coordinator
-    └── _fetch_and_filter()  — single fetch function for all queries
-          ├── _build_api_params()      — builds query params (one place)
-          ├── _parse_events_to_markets() — events → _ParsedMarket[] (one place)
-          └── _apply_client_filters()  — composable client-side filters (one place)
+  fetch_markets()            — public entry point (flat market list, legacy)
+    └── _fetch_and_filter()  — single fetch for all flat-market queries
+
+  fetch_events()             — public entry point (event-centric, grouped)
+    └── _fetch_and_filter_groups() — fetch → group → enrich → filter
+          ├── _parse_events_to_groups()     — events → EventGroup[]
+          ├── _apply_client_filters_groups() — live/timing filters on groups
+          └── _enrich_event_groups()        — parallel /events/{id} detail calls
+
+  Shared helpers:
+    _build_api_params()      — builds query params (one place)
+    _parse_market()          — raw market dict → MarketData
+    _category_from_event()   — event dict → category string
 """
 
 import asyncio
@@ -25,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from pqi import config
-from pqi.models import MarketData
+from pqi.models import EventGroup, MarketData
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +50,15 @@ class _ParsedMarket:
     market: MarketData
     event_live: bool | None = None   # from event's `live` field
     event_ended: bool | None = None  # from event's `ended` field
+
+
+@dataclasses.dataclass
+class _ParsedEventGroup:
+    """EventGroup + transient metadata for client-side filtering before enrichment."""
+
+    group: EventGroup
+    raw_event_live: bool | None = None   # from list endpoint (often None)
+    raw_event_ended: bool | None = None  # from list endpoint (often None)
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +230,17 @@ def _build_api_params(
     """
     Build query params dict for a Gamma API request.
 
+    TIMING NOTE: end_date_min/max control RESOLUTION time (when markets expire),
+    NOT when the real-world event starts. The Gamma API has no server-side filter
+    for eventStartTime — all event-start filtering is client-side only.
+
     Args:
         endpoint:           "events" or "markets"
         limit:              User-requested market count (fetch_limit is scaled up)
         series_id:          Server-side series filter (events endpoint only)
         tag_id:             Server-side tag filter
         volume_floor:       Server-side volume minimum
-        end_date_min/max:   Server-side resolution time window
+        end_date_min/max:   Server-side RESOLUTION time window (not event start)
         has_client_filters: If True, fetch more to compensate for client-side filtering
     """
     # Scale up fetch_limit: we always fetch more than requested because
@@ -341,8 +362,9 @@ async def _fetch_and_filter(
     now = datetime.now(timezone.utc)
     has_client_filters = live or starts_within_hours is not None
 
-    # Always exclude already-resolved events via end_date_min
-    end_date_min = now
+    # end_date_min/max = RESOLUTION time bounds (when markets expire).
+    # starts_within_hours is purely client-side (API has no eventStartTime filter).
+    end_date_min = now  # exclude already-resolved markets
     end_date_max = (
         now + timedelta(hours=resolve_within_hours)
         if resolve_within_hours is not None
@@ -426,6 +448,314 @@ async def _fetch_and_filter(
     )
 
     return [pm.market for pm in filtered]
+
+
+# ---------------------------------------------------------------------------
+# Event-centric fetch pipeline (groups markets by parent event)
+# ---------------------------------------------------------------------------
+
+
+def _parse_events_to_groups(raw_events: list[dict]) -> list[_ParsedEventGroup]:
+    """
+    Parse raw event dicts into deduplicated EventGroup objects.
+
+    Each event becomes one EventGroup containing its child markets.
+    Filters out ended events and invalid markets (same rules as _parse_events_to_markets).
+
+    "True Start Time" heuristic: uses the first non-None event_start_time
+    from child markets (eventStartTime is a market-level API field).
+    """
+    results: list[_ParsedEventGroup] = []
+    seen_market_ids: set[str] = set()
+
+    for event in raw_events:
+        if event.get("ended") is True:
+            continue
+
+        event_id = str(event.get("id", ""))
+        if not event_id:
+            continue
+
+        event_title = event.get("title") or ""
+        event_category = _category_from_event(event)
+        event_live = event.get("live")
+        event_ended = event.get("ended")
+
+        markets: list[MarketData] = []
+        for raw_market in event.get("markets") or []:
+            market_id = str(raw_market.get("id", ""))
+            if market_id in seen_market_ids:
+                continue
+            seen_market_ids.add(market_id)
+
+            parsed = _parse_market(raw_market, category_override=event_category)
+            if parsed is not None:
+                markets.append(parsed)
+
+        if not markets:
+            continue
+
+        # Sort by volume descending — primary_market = highest volume
+        markets.sort(key=lambda m: m.volume_usd, reverse=True)
+
+        # "True Start Time": first non-None event_start_time from child markets
+        group_start_time: datetime | None = None
+        for m in markets:
+            if m.event_start_time is not None:
+                group_start_time = m.event_start_time
+                break
+
+        total_volume = sum(m.volume_usd for m in markets)
+
+        group = EventGroup(
+            event_id=event_id,
+            event_title=event_title,
+            markets=markets,
+            event_start_time=group_start_time,
+            live=event_live,
+            ended=event_ended,
+            category=event_category,
+            total_volume=total_volume,
+        )
+        results.append(_ParsedEventGroup(
+            group=group,
+            raw_event_live=event_live,
+            raw_event_ended=event_ended,
+        ))
+
+    return results
+
+
+def _apply_client_filters_groups(
+    groups: list[_ParsedEventGroup],
+    *,
+    live: bool = False,
+    starts_within_hours: int | None = None,
+    resolve_within_hours: int | None = None,
+    now: datetime,
+) -> list[_ParsedEventGroup]:
+    """
+    Apply composable client-side filters to parsed event groups.
+
+    Same predicates as _apply_client_filters but operates on _ParsedEventGroup.
+    """
+    result = groups
+
+    if live and starts_within_hours is None:
+        def _is_live(pg: _ParsedEventGroup) -> bool:
+            if pg.raw_event_live is True:
+                return True
+            if pg.raw_event_live is False:
+                return False
+            # Fallback: check event_start_time
+            g = pg.group
+            return g.event_start_time is not None and g.event_start_time < now
+
+        result = [pg for pg in result if _is_live(pg)]
+
+    elif starts_within_hours is not None:
+        start_max = now + timedelta(hours=starts_within_hours)
+
+        def _starts_in_window(pg: _ParsedEventGroup) -> bool:
+            g = pg.group
+            if g.event_start_time is None:
+                return False
+            return g.event_start_time <= start_max
+
+        result = [pg for pg in result if _starts_in_window(pg)]
+
+    if resolve_within_hours is not None:
+        end_max = now + timedelta(hours=resolve_within_hours)
+        result = [
+            pg for pg in result
+            if any(now <= m.end_date <= end_max for m in pg.group.markets)
+        ]
+
+    return result
+
+
+async def _enrich_event_groups(
+    groups: list[_ParsedEventGroup],
+    client: httpx.AsyncClient,
+) -> list[_ParsedEventGroup]:
+    """
+    Enrich event groups with reliable live/ended/event_start_time data
+    by fetching individual /events/{id} details in parallel.
+
+    The list endpoint returns None for live/ended fields. Detail fetches
+    populate them reliably for sports/esports events.
+
+    Drops groups where enrichment reveals ended=True.
+    """
+    if not groups:
+        return groups
+
+    cap = config.EVENT_ENRICHMENT_MAX
+    to_enrich = groups[:cap]
+
+    async def _fetch_detail(pg: _ParsedEventGroup) -> _ParsedEventGroup:
+        try:
+            r = await asyncio.wait_for(
+                client.get(f"{config.GAMMA_BASE_URL}/events/{pg.group.event_id}"),
+                timeout=5.0,
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            # Update live/ended from detail response
+            if data.get("live") is not None:
+                pg.group.live = data["live"]
+                pg.raw_event_live = data["live"]
+            if data.get("ended") is not None:
+                pg.group.ended = data["ended"]
+                pg.raw_event_ended = data["ended"]
+
+            # Update event_start_time from detail response's embedded markets
+            if pg.group.event_start_time is None:
+                for raw_m in data.get("markets") or []:
+                    est_raw = raw_m.get("eventStartTime")
+                    if est_raw:
+                        try:
+                            pg.group.event_start_time = datetime.fromisoformat(
+                                est_raw.replace("Z", "+00:00")
+                            )
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+        except Exception as exc:
+            logger.debug(
+                "Enrichment failed for event %s: %s", pg.group.event_id, exc
+            )
+
+        return pg
+
+    enriched = await asyncio.gather(*[_fetch_detail(pg) for pg in to_enrich])
+    # Combine enriched + any unenriched remainder
+    result = list(enriched) + groups[cap:]
+    # Drop groups where enrichment revealed ended=True
+    result = [pg for pg in result if pg.group.ended is not True]
+    return result
+
+
+async def _fetch_and_filter_groups(
+    limit: int,
+    endpoint: str,
+    series_id: str | None,
+    tag_id: str | None,
+    volume_floor: float,
+    *,
+    live: bool = False,
+    starts_within_hours: int | None = None,
+    resolve_within_hours: int | None = None,
+) -> list[EventGroup]:
+    """
+    Fetch events from the Gamma API, group markets, enrich, filter, and return.
+
+    Flow:
+      1. Build params + fetch /events list
+      2. Parse into EventGroup objects (_parse_events_to_groups)
+      3. Apply client-side filters (live, starts_within, resolve_within)
+      4. Sort and truncate to candidates
+      5. Enrich via parallel /events/{id} detail calls
+      6. Re-filter (drop newly-ended), truncate to final limit
+    """
+    now = datetime.now(timezone.utc)
+    has_client_filters = live or starts_within_hours is not None
+
+    # end_date_min/max control RESOLUTION time bounds, NOT event start time.
+    # starts_within_hours is purely client-side (API has no eventStartTime filter).
+    end_date_min = now
+    end_date_max = (
+        now + timedelta(hours=resolve_within_hours)
+        if resolve_within_hours is not None
+        else None
+    )
+
+    params = _build_api_params(
+        endpoint,
+        limit,
+        series_id=series_id,
+        tag_id=tag_id,
+        volume_floor=volume_floor,
+        end_date_min=end_date_min,
+        end_date_max=end_date_max,
+        has_client_filters=has_client_filters,
+    )
+
+    # Override fetch_limit for event-centric queries: need more headroom
+    # because events contain multiple markets and client-side filters are lossy.
+    params["limit"] = min(limit * 10, 500)
+
+    logger.debug(
+        "_fetch_and_filter_groups: endpoint=%s params=%s",
+        endpoint,
+        {k: v for k, v in params.items() if k not in ("active", "closed", "ascending")},
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{config.GAMMA_BASE_URL}/{endpoint}", params=params,
+        )
+        response.raise_for_status()
+        raw_data: list[dict] = response.json()
+
+        await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+
+        # Parse into event groups
+        parsed = _parse_events_to_groups(raw_data)
+
+        logger.debug(
+            "_fetch_and_filter_groups: API returned %d raw events → %d groups",
+            len(raw_data), len(parsed),
+        )
+
+        # Apply client-side filters
+        filtered = _apply_client_filters_groups(
+            parsed,
+            live=live,
+            starts_within_hours=starts_within_hours,
+            resolve_within_hours=resolve_within_hours,
+            now=now,
+        )
+
+        # Sort: time-based queries by start time, general by volume
+        if has_client_filters:
+            filtered.sort(
+                key=lambda pg: pg.group.event_start_time or pg.group.markets[0].end_date
+            )
+        elif resolve_within_hours is not None:
+            filtered.sort(
+                key=lambda pg: min(m.end_date for m in pg.group.markets)
+            )
+        else:
+            filtered.sort(key=lambda pg: pg.group.total_volume, reverse=True)
+
+        # Truncate to candidates before enrichment (generous headroom)
+        candidates = filtered[:limit * 2]
+
+        # Enrich with parallel /events/{id} detail calls
+        enriched = await _enrich_event_groups(candidates, client)
+
+    # Final truncation
+    enriched = enriched[:limit]
+
+    # Log summary
+    filter_desc = []
+    if live:
+        filter_desc.append("live")
+    if starts_within_hours is not None:
+        filter_desc.append(f"starts_within={starts_within_hours}h")
+    if resolve_within_hours is not None:
+        filter_desc.append(f"resolve_within={resolve_within_hours}h")
+    label = ", ".join(filter_desc) if filter_desc else "general"
+    logger.info(
+        "fetch_events (%s): %d event groups after filtering+enrichment "
+        "(api_events=%d, limit=%d, volume_floor=%.0f)",
+        label, len(enriched), len(raw_data), limit, volume_floor,
+    )
+
+    return [pg.group for pg in enriched]
 
 
 # ---------------------------------------------------------------------------
@@ -642,34 +972,18 @@ class CategoryNotFoundError(ValueError):
 # ---------------------------------------------------------------------------
 
 
-async def fetch_markets(
-    limit: int = config.MAX_MARKETS_TO_FETCH,
-    category: str | None = None,
-    resolve_within_hours: int | None = None,
-    starts_within_hours: int | None = None,
-    live: bool = False,
-    volume_floor_override: float | None = None,
-) -> list[MarketData]:
+async def _resolve_volume_and_category(
+    category: str | None,
+    volume_floor_override: float | None,
+    resolve_within_hours: int | None,
+    starts_within_hours: int | None,
+    live: bool,
+) -> tuple[float, str | None, str | None]:
     """
-    Fetch active markets from the Gamma API and return parsed, filtered results.
+    Shared setup for fetch_markets() and fetch_events():
+    compute volume floor + resolve category → (volume_floor, series_id, tag_id).
 
-    Category filtering (two-tier):
-      1. Exact/partial series slug match → server-side filter via series_id on /events
-      2. Broad tag match (e.g. "esports") → server-side filter via tag_id on /events
-      Raises CategoryNotFoundError if --category is set but nothing matches.
-
-    Args:
-        limit:                 Max markets to return after filtering.
-        category:              Series slug or broad tag (e.g. "counter-strike", "esports").
-        resolve_within_hours:  Only return markets resolving within this many hours.
-        starts_within_hours:   Only return markets whose event starts within this many hours.
-                               Includes live events (already started, not resolved).
-        live:                  Only return live events (uses API's event.live field).
-                               Composable with starts_within (live + upcoming).
-        volume_floor_override: If set, overrides the config-based volume floor (use 0 to see all).
-
-    Returns:
-        With time/live filters: sorted by start time asc. Otherwise by volume desc.
+    Raises CategoryNotFoundError if --category is set but nothing matches.
     """
     # Volume floor: override > config
     if volume_floor_override is not None:
@@ -697,8 +1011,27 @@ async def fetch_markets(
     series_id = cat_match.value if (cat_match and cat_match.is_series) else None
     tag_id = cat_match.value if (cat_match and cat_match.is_tag) else None
 
-    # Pick endpoint: /events when we have category filters or time filters
-    # (events have tags, series, live/ended fields). /markets only for unfiltered general queries.
+    return volume_floor, series_id, tag_id
+
+
+async def fetch_markets(
+    limit: int = config.MAX_MARKETS_TO_FETCH,
+    category: str | None = None,
+    resolve_within_hours: int | None = None,
+    starts_within_hours: int | None = None,
+    live: bool = False,
+    volume_floor_override: float | None = None,
+) -> list[MarketData]:
+    """
+    Fetch active markets from the Gamma API and return a flat list.
+
+    Legacy entry point — returns individual MarketData objects.
+    For event-centric grouped results, use fetch_events() instead.
+    """
+    volume_floor, series_id, tag_id = await _resolve_volume_and_category(
+        category, volume_floor_override, resolve_within_hours, starts_within_hours, live,
+    )
+
     use_events = bool(
         series_id or tag_id
         or resolve_within_hours is not None
@@ -710,6 +1043,49 @@ async def fetch_markets(
     return await _fetch_and_filter(
         limit=limit,
         endpoint=endpoint,
+        series_id=series_id,
+        tag_id=tag_id,
+        volume_floor=volume_floor,
+        live=live,
+        starts_within_hours=starts_within_hours,
+        resolve_within_hours=resolve_within_hours,
+    )
+
+
+async def fetch_events(
+    limit: int = config.MAX_MARKETS_TO_FETCH,
+    category: str | None = None,
+    resolve_within_hours: int | None = None,
+    starts_within_hours: int | None = None,
+    live: bool = False,
+    volume_floor_override: float | None = None,
+) -> list[EventGroup]:
+    """
+    Fetch active events from the Gamma API, grouped by parent event.
+
+    Event-centric entry point — returns EventGroup objects, each containing
+    sibling markets sorted by volume. Includes parallel enrichment via
+    /events/{id} detail calls for reliable live/ended/start_time data.
+
+    Args:
+        limit:                 Max event groups to return.
+        category:              Series slug or broad tag (e.g. 'counter-strike', 'esports').
+        resolve_within_hours:  Only return events with markets resolving within N hours.
+        starts_within_hours:   Only return events starting within N hours (client-side).
+        live:                  Only return live events (enriched via /events/{id}).
+        volume_floor_override: Override config volume floor (use 0 to see all).
+
+    Returns:
+        With time/live filters: sorted by event start time asc.
+        Otherwise: sorted by total event volume desc.
+    """
+    volume_floor, series_id, tag_id = await _resolve_volume_and_category(
+        category, volume_floor_override, resolve_within_hours, starts_within_hours, live,
+    )
+
+    return await _fetch_and_filter_groups(
+        limit=limit,
+        endpoint="events",
         series_id=series_id,
         tag_id=tag_id,
         volume_floor=volume_floor,

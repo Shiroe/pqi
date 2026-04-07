@@ -61,6 +61,8 @@ TAVILY_SNIPPET_CAP: int = int(os.getenv("TAVILY_SNIPPET_CAP", "5000"))
 GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
 
 GAMMA_RATE_LIMIT_DELAY: float = float(os.getenv("GAMMA_RATE_LIMIT_DELAY", "0.5"))
+EVENT_ENRICHMENT_MAX: int = int(os.getenv("EVENT_ENRICHMENT_MAX", "30"))
+"""Max parallel GET /events/{id} detail calls during event enrichment."""
 
 # ---------------------------------------------------------------------------
 # Market filtering
