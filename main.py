@@ -20,7 +20,7 @@ from rich.table import Table
 from rich import box
 
 from pqi import config
-from pqi.models import CouncilResult, EventGroup, MarketData
+from pqi.models import BriefingDocument, CouncilResult, EventGroup, MarketData
 
 app = typer.Typer(help="PQI — Polymarket Qualitative Intelligence advisor.")
 console = Console()
@@ -140,12 +140,20 @@ def display_council_result(result: CouncilResult) -> None:
 
     yes_edge_sign = "+" if result.edge >= 0 else ""
     no_edge_sign = "+" if result.no_edge >= 0 else ""
+    # Show max ROI for whichever side the council leaned, even on PASS —
+    # it's context for why a near-resolved side was rejected or what a
+    # borderline call would have yielded.
+    roi_side_price = yes_price if result.final_score >= result.no_score else no_price
+    roi_val = ((1.0 - roi_side_price) / roi_side_price) if roi_side_price > 0 else 0.0
+    roi_label = "YES" if result.final_score >= result.no_score else "NO"
+    roi_line = f"[bold]Max ROI ({roi_label}):[/bold]  +{roi_val:.1%}  (if that side wins)\n"
     summary = (
         f"[bold]Council YES:[/bold]    {result.final_score:.1%}  |  "
         f"[bold]Council NO:[/bold]  {result.no_score:.1%}\n"
         f"[bold]Market Prices:[/bold]  YES = {yes_price:.1%}  |  NO = {no_price:.1%}\n"
         f"[bold]YES Edge:[/bold]       {yes_edge_sign}{result.edge:.1%}  |  "
         f"[bold]NO Edge:[/bold]  {no_edge_sign}{result.no_edge:.1%}\n"
+        f"{roi_line}"
         f"[bold]Confidence:[/bold]     {result.confidence_level}\n\n"
         f"{trade_line}"
     )
@@ -279,8 +287,17 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
 # ---------------------------------------------------------------------------
 
 
-async def _run_analysis(market: MarketData, no_cache: bool = False) -> CouncilResult:
-    """Execute the full analysis pipeline for one market, with optional cache."""
+async def _run_analysis(
+    market: MarketData,
+    no_cache: bool = False,
+    shared_briefing: "BriefingDocument | None" = None,
+) -> CouncilResult:
+    """Execute the full analysis pipeline for one market, with optional cache.
+
+    If shared_briefing is provided (e.g. for sibling markets from the same event),
+    the synthesizer step is skipped. The briefing's market is rebound to the
+    current market so the council sees the right resolution criteria.
+    """
     from pqi.ingestion.synthesizer import build_briefing
     from pqi.agents.council import run_council
     from pqi.scoring import build_council_result
@@ -292,8 +309,12 @@ async def _run_analysis(market: MarketData, no_cache: bool = False) -> CouncilRe
             console.print("[green]Cache hit — using previous council result.[/green]")
             return cached
 
-    console.print(f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}")
-    briefing = await build_briefing(market)
+    if shared_briefing is not None:
+        console.print(f"\n[cyan]Reusing shared event briefing for:[/cyan] {market.question[:80]}")
+        briefing = shared_briefing.model_copy(update={"market": market})
+    else:
+        console.print(f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}")
+        briefing = await build_briefing(market)
     console.print(f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]")
 
     concurrency_info = f"concurrency={config.LOCAL_LLM_CONCURRENCY}" if config.LLM_BACKEND == "ollama" else "parallel"
@@ -302,6 +323,7 @@ async def _run_analysis(market: MarketData, no_cache: bool = False) -> CouncilRe
     console.print(f"[cyan]Council complete: {len(verdicts)}/7 verdicts.[/cyan]\n")
 
     result = build_council_result(market, verdicts)
+    result.briefing = briefing
     await store_result(result)
     return result
 
@@ -428,10 +450,15 @@ def analyze(
         console.print(f"\n[cyan]{len(other_siblings)} sibling market(s) available.[/cyan]")
         raw = input("Analyze siblings too? [y/N]: ").strip().lower()
         if raw in ("y", "yes"):
+            # Reuse the parent market's briefing — same event, same news.
+            # Council still runs separately per sibling (different resolution criteria).
+            shared = result.briefing
             for sibling in other_siblings:
                 console.print(f"\n{'─' * 60}")
                 console.print(f"[bold]Analysing:[/bold] {sibling.question}\n")
-                sib_result = asyncio.run(_run_analysis(sibling, no_cache=no_cache))
+                sib_result = asyncio.run(_run_analysis(
+                    sibling, no_cache=no_cache, shared_briefing=shared,
+                ))
                 display_council_result(sib_result)
                 append_result(sib_result)
                 console.print("[dim]Result saved to history.[/dim]")
@@ -493,70 +520,461 @@ def categories(
     console.print("\n[dim]Usage: pqi analyze --category <tag-or-slug>[/dim]")
 
 
-@app.command()
-def history(
-    last_n: int = typer.Option(
-        20, "--last", "-n", help="Number of recent entries to show."
-    ),
+# ---------------------------------------------------------------------------
+# `pqi history` sub-app
+# ---------------------------------------------------------------------------
+
+history_app = typer.Typer(
+    help="Inspect past council runs and validation analytics.",
+    no_args_is_help=True,
+)
+app.add_typer(history_app, name="history")
+
+
+def _spawn_auto_sync() -> None:
+    """Fire-and-forget subprocess that syncs unresolved entries past their end_date."""
+    import subprocess, sys
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "pqi.main", "history", "sync", "--auto"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        logger.debug("Auto-sync subprocess failed to spawn: %s", exc)
+
+
+def _short_question(q: str, n: int = 50) -> str:
+    return q if len(q) <= n else q[: n - 3] + "..."
+
+
+def _outcome_glyph(kind: str) -> str:
+    return {
+        "correct_buy": "[green]✓[/green]",
+        "wrong_buy": "[red]✗[/red]",
+        "missed_opportunity": "[yellow]MISS[/yellow]",
+        "correct_pass": "[dim]pass[/dim]",
+        "voided": "[dim]void[/dim]",
+        "unresolved": "[yellow]⏳[/yellow]",
+    }.get(kind, "?")
+
+
+@history_app.command("list")
+def history_list(
+    last_n: int = typer.Option(20, "--last", "-n", help="Number of entries per page."),
+    offset: int = typer.Option(0, "--offset", "-o", help="Skip this many of the most recent entries (paginate backwards)."),
+    no_auto_sync: bool = typer.Option(False, "--no-auto-sync", help="Skip background sync."),
 ) -> None:
-    """
-    Show past council runs from ~/.pqi/history.jsonl.
-    """
+    """Overview table of past council runs."""
     from pqi.history import load_history
+    from pqi.analytics import classify_outcome, signal_postmortem
 
     entries = load_history()
     if not entries:
         console.print("[yellow]No history yet. Run `pqi analyze` first.[/yellow]")
         raise typer.Exit(0)
 
-    entries = entries[-last_n:]
+    if not no_auto_sync:
+        _spawn_auto_sync()
 
+    total = len(entries)
+    # Pagination window: offset counts from the newest end.
+    end = total - offset
+    start = max(0, end - last_n)
+    if end <= 0 or start >= end:
+        console.print(f"[yellow]Offset {offset} is past the start of history ({total} entries).[/yellow]")
+        raise typer.Exit(0)
+    visible = entries[start:end]
+    # Absolute IDs are 1-based positions in the full history (oldest = 1).
+    start_id = start + 1
+
+    title = f"PQI History (#{start_id}–{end} of {total})"
+    if offset > 0:
+        title += f" [offset {offset}]"
     table = Table(
-        title=f"PQI History (last {len(entries)} runs)",
+        title=title,
         box=box.ROUNDED,
         show_lines=False,
     )
-    table.add_column("#", style="bold cyan", justify="right", width=4)
-    table.add_column("Question", style="white", max_width=40)
-    table.add_column("Mkt YES", justify="right", width=8)
-    table.add_column("Council", justify="right", width=8)
-    table.add_column("Edge", justify="right", width=8)
+    table.add_column("#", style="bold cyan", justify="right", width=3)
+    table.add_column("Question", style="white", max_width=42)
+    table.add_column("Mkt Y", justify="right", width=5)
+    table.add_column("Mkt N", justify="right", width=5)
+    table.add_column("Cncl Y", justify="right", width=6)
+    table.add_column("Cncl N", justify="right", width=6)
+    table.add_column("Lean", justify="center", width=4)
+    table.add_column("Lean✓", justify="center", width=5)
+    table.add_column("vs Mkt", justify="center", width=6)
     table.add_column("Rec", justify="center", width=9)
     table.add_column("Conf", justify="center", width=6)
-    table.add_column("When", style="dim", width=16)
+    table.add_column("Outcome", justify="center", width=8)
+    table.add_column("Won", justify="center", width=4)
+    table.add_column("Verdict", style="dim", max_width=44)
+    table.add_column("When", style="dim", width=10)
 
-    for i, e in enumerate(entries, 1):
-        question = e.get("question", "?")
-        if len(question) > 40:
-            question = question[:37] + "..."
-
-        rec = e.get("recommendation", "?")
+    for i, entry in enumerate(visible, start=start_id):
+        r = entry.get("result") or {}
+        market = r.get("market") or {}
+        rec = r.get("recommendation", "?")
         if rec == "BUY YES":
             rec_style = "[green]BUY YES[/green]"
-            edge_val = e.get("edge", 0)
-            council_val = e.get("final_score", 0)
         elif rec == "BUY NO":
             rec_style = "[red]BUY NO[/red]"
-            edge_val = e.get("no_edge", 0)
-            council_val = e.get("no_score", 0)
         else:
             rec_style = "[yellow]PASS[/yellow]"
-            edge_val = max(e.get("edge", 0), e.get("no_edge", 0))
-            council_val = e.get("final_score", 0)
 
-        ts = e.get("timestamp", "")[:16].replace("T", " ")
+        mkt_yes = market.get("yes_price", 0) or 0
+        mkt_no = 1 - mkt_yes
+        cncl_yes = r.get("final_score", 0) or 0
+        cncl_no = r.get("no_score")
+        if cncl_no is None:
+            cncl_no = 1 - cncl_yes
 
-        edge_sign = "+" if edge_val >= 0 else ""
+        # Council lean — directional read independent of recommendation gates.
+        if cncl_yes > 0.55:
+            lean = "Y"
+        elif cncl_yes < 0.45:
+            lean = "N"
+        else:
+            lean = "·"
+
+        winning_side = (entry.get("resolution") or {}).get("winning_side")
+        if lean in ("Y", "N") and winning_side in ("YES", "NO"):
+            lean_check = "[green]✓[/green]" if lean == winning_side[0] else "[red]✗[/red]"
+        else:
+            lean_check = "—"
+
+        if mkt_yes > 0.5:
+            mkt_lean = "Y"
+        elif mkt_yes < 0.5:
+            mkt_lean = "N"
+        else:
+            mkt_lean = "·"
+        vs_mkt = "[magenta]↕[/magenta]" if {lean, mkt_lean} == {"Y", "N"} else ""
+
+        kind = classify_outcome(entry)
+        winner = (entry.get("resolution") or {}).get("winning_side") or "—"
+        # Verdict tagline — use cached analysis if present, otherwise quick-compute
+        analysis = entry.get("analysis") or signal_postmortem(entry)
+        tagline = analysis.get("summary", "")[:80] if not entry.get("legacy") else "[dim]legacy[/dim]"
+
+        ts = (entry.get("timestamp") or "")[:10]
+
         table.add_row(
             str(i),
-            question,
-            f"{e.get('yes_price_at_run', 0):.0%}",
-            f"{council_val:.0%}",
-            f"{edge_sign}{edge_val:.1%}",
+            _short_question(market.get("question", "?"), 42),
+            f"{mkt_yes:.0%}",
+            f"{mkt_no:.0%}",
+            f"{cncl_yes:.0%}",
+            f"{cncl_no:.0%}",
+            lean,
+            lean_check,
+            vs_mkt,
             rec_style,
-            e.get("confidence_level", "?"),
+            r.get("confidence_level", "?"),
+            _outcome_glyph(kind),
+            winner,
+            tagline,
             ts,
         )
+
+    console.print(table)
+    console.print(
+        "[dim]Tip: `pqi history show <#>` for detail (IDs are stable across pagination), "
+        "`-o N` to page backwards, `pqi history sync` to refresh, `pqi history stats` for leaderboard.[/dim]"
+    )
+
+
+@history_app.command("show")
+def history_show(
+    index: str = typer.Argument(..., help="Absolute ID from `history list` (# column, stable across pagination) or a run_id."),
+) -> None:
+    """Detailed view of a single past run + per-agent breakdown + postmortem."""
+    from pqi.history import load_history
+    from pqi.analytics import compute_and_persist_postmortem, classify_outcome
+
+    entries = load_history()
+    if not entries:
+        console.print("[yellow]No history yet.[/yellow]")
+        raise typer.Exit(0)
+
+    # Resolve index — absolute 1-based position in full history, then run_id fallback.
+    entry: dict | None = None
+    if index.isdigit():
+        idx = int(index) - 1
+        if 0 <= idx < len(entries):
+            entry = entries[idx]
+    if entry is None:
+        for e in entries:
+            if e.get("run_id") == index:
+                entry = e
+                break
+    if entry is None:
+        console.print(f"[red]No entry matching '{index}'.[/red]")
+        raise typer.Exit(1)
+
+    if entry.get("legacy"):
+        console.print("[yellow]Legacy entry — only summary fields available.[/yellow]")
+
+    r = entry.get("result") or {}
+    market = r.get("market") or {}
+    res = entry.get("resolution") or {}
+
+    # Header panel
+    header_lines = [
+        f"[bold]{market.get('question', '?')}[/bold]",
+        f"[dim]run_id:[/dim] {entry.get('run_id', '?')}",
+        f"[dim]run at:[/dim] {entry.get('timestamp', '?')}",
+        f"[dim]market id:[/dim] {market.get('id', '?')}  [dim]category:[/dim] {market.get('category', '?')}",
+        "",
+        f"Market YES at run: [cyan]{market.get('yes_price', 0):.0%}[/cyan]",
+    ]
+    if res:
+        header_lines.append(
+            f"Final YES: [cyan]{res.get('final_yes_price', 0):.0%}[/cyan]   "
+            f"Winner: [bold]{res.get('winning_side') or 'voided'}[/bold]   "
+            f"Resolved: [dim]{res.get('resolved_at', '?')}[/dim]"
+        )
+    else:
+        header_lines.append("[yellow]Unresolved — run `pqi history sync` to fetch outcome.[/yellow]")
+    console.print(Panel("\n".join(header_lines), border_style="cyan"))
+
+    # Recommendation panel
+    rec = r.get("recommendation", "?")
+    rec_color = "green" if rec == "BUY YES" else ("red" if rec == "BUY NO" else "yellow")
+    rec_lines = [
+        f"[{rec_color}]{rec}[/{rec_color}]   "
+        f"signal: [bold]{r.get('signal_type') or '—'}[/bold]   "
+        f"confidence: [bold]{r.get('confidence_level', '?')}[/bold]",
+        f"Council YES: {r.get('final_score', 0):.1%}   "
+        f"Council NO: {r.get('no_score', 0):.1%}   "
+        f"Edge YES: {r.get('edge', 0):+.1%}   Edge NO: {r.get('no_edge', 0):+.1%}",
+    ]
+    roi_val = r.get("expected_roi", 0) or 0
+    if roi_val > 0:
+        rec_lines.append(f"[bold]Expected ROI:[/bold] +{roi_val:.1%}")
+    if r.get("pass_reason"):
+        rec_lines.append(f"[dim]Pass reason:[/dim] {r['pass_reason']}")
+    console.print(Panel("\n".join(rec_lines), title="Recommendation", border_style=rec_color))
+
+    # Per-agent verdict table
+    verdicts = r.get("verdicts") or []
+    if verdicts:
+        winner = res.get("winning_side")
+        vtable = Table(title="Council Verdicts", box=box.SIMPLE)
+        vtable.add_column("Agent", style="cyan")
+        vtable.add_column("Prob YES", justify="right")
+        vtable.add_column("Conf YES", justify="right")
+        vtable.add_column("Conf NO", justify="right")
+        vtable.add_column("Called", justify="center")
+        if winner:
+            vtable.add_column("✓", justify="center")
+            vtable.add_column("Brier", justify="right")
+        vtable.add_column("Key Factor", style="dim", max_width=40)
+
+        for v in verdicts:
+            prob = float(v.get("probability", 0.5))
+            picked = "YES" if prob > 0.5 else "NO"
+            row = [
+                v.get("agent_name", "?"),
+                f"{prob:.0%}",
+                f"{float(v.get('confidence_yes', 0)):.0%}",
+                f"{float(v.get('confidence_no', 0)):.0%}",
+                picked,
+            ]
+            if winner:
+                hit = picked == winner
+                actual = 1.0 if winner == "YES" else 0.0
+                row.append("[green]✓[/green]" if hit else "[red]✗[/red]")
+                row.append(f"{(prob - actual) ** 2:.2f}")
+            row.append(_short_question(v.get("key_factor", ""), 40))
+            vtable.add_row(*row)
+        console.print(vtable)
+
+    # Postmortem panel
+    pm = compute_and_persist_postmortem(entry)
+    kind = pm.get("kind", "unresolved")
+    pm_color = {"correct_buy": "green", "wrong_buy": "red", "missed_opportunity": "yellow",
+                "correct_pass": "blue", "voided": "white", "unresolved": "dim"}.get(kind, "white")
+    console.print(Panel(
+        pm.get("summary", ""),
+        title=f"Postmortem — {kind}",
+        border_style=pm_color,
+    ))
+
+    # Briefing recap (if persisted)
+    briefing = r.get("briefing")
+    if briefing:
+        recap_lines = []
+        if briefing.get("key_facts"):
+            recap_lines.append("[bold]Key facts:[/bold]")
+            recap_lines.extend(f"  • {f}" for f in briefing["key_facts"][:5])
+        if briefing.get("side_yes_case"):
+            recap_lines.append("\n[bold green]Case for YES:[/bold green]")
+            recap_lines.extend(f"  • {f}" for f in briefing["side_yes_case"][:4])
+        if briefing.get("side_no_case"):
+            recap_lines.append("\n[bold red]Case for NO:[/bold red]")
+            recap_lines.extend(f"  • {f}" for f in briefing["side_no_case"][:4])
+        if recap_lines:
+            console.print(Panel("\n".join(recap_lines), title="Briefing recap", border_style="dim"))
+
+
+@history_app.command("sync")
+def history_sync(
+    auto: bool = typer.Option(
+        False, "--auto",
+        help="Background mode: only sync entries past their end_date, no output.",
+    ),
+) -> None:
+    """Fetch resolutions for unresolved entries from the Polymarket Gamma API."""
+    from pqi.history import iter_unresolved, update_resolution
+    from pqi.resolution import fetch_resolution
+
+    async def _run() -> tuple[int, int, int]:
+        resolved = pending = errors = 0
+        targets = list(iter_unresolved(past_end_only=auto))
+        for entry in targets:
+            r = entry.get("result") or {}
+            market_id = (r.get("market") or {}).get("id")
+            if not market_id:
+                continue
+            if not auto:
+                console.print(f"[dim]Syncing {market_id}…[/dim]")
+            try:
+                res = await fetch_resolution(market_id)
+            except Exception as exc:
+                errors += 1
+                if not auto:
+                    console.print(f"[red]  error: {exc}[/red]")
+                await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+                continue
+            if res is None:
+                pending += 1
+            else:
+                update_resolution(entry["run_id"], dict(res))
+                resolved += 1
+            await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+        return resolved, pending, errors
+
+    resolved, pending, errors = asyncio.run(_run())
+    if not auto:
+        console.print(
+            f"[green]✓ {resolved} resolved[/green], "
+            f"[yellow]{pending} still pending[/yellow]"
+            + (f", [red]{errors} errors[/red]" if errors else "")
+        )
+
+
+@history_app.command("stats")
+def history_stats(
+    no_auto_sync: bool = typer.Option(False, "--no-auto-sync", help="Skip background sync."),
+) -> None:
+    """Per-agent accuracy leaderboard across resolved history."""
+    from pqi.history import load_history
+    from pqi.analytics import agent_accuracy, classify_outcome
+    from collections import Counter
+
+    entries = load_history()
+    if not entries:
+        console.print("[yellow]No history yet.[/yellow]")
+        raise typer.Exit(0)
+
+    if not no_auto_sync:
+        _spawn_auto_sync()
+
+    counts = Counter(classify_outcome(e) for e in entries)
+    stats = agent_accuracy(entries)
+
+    summary = (
+        f"[bold]{len(entries)}[/bold] runs total   "
+        f"[green]{counts.get('correct_buy', 0)} correct buys[/green]   "
+        f"[red]{counts.get('wrong_buy', 0)} wrong buys[/red]   "
+        f"[yellow]{counts.get('missed_opportunity', 0)} missed[/yellow]   "
+        f"[blue]{counts.get('correct_pass', 0)} correct passes[/blue]   "
+        f"[dim]{counts.get('unresolved', 0)} unresolved   "
+        f"{counts.get('voided', 0)} voided[/dim]"
+    )
+    console.print(Panel(summary, title="Council overview", border_style="cyan"))
+
+    if not stats:
+        console.print("[yellow]No resolved entries with per-agent detail yet.[/yellow]")
+        return
+
+    table = Table(title="Per-agent accuracy", box=box.ROUNDED, show_footer=True)
+    table.add_column("Agent", style="cyan", footer="[bold]Average[/bold]")
+    table.add_column("n", justify="right")
+    table.add_column("Hit %", justify="right")
+    table.add_column("Wtd Hit %", justify="right")
+    table.add_column("Lean %", justify="right")
+    table.add_column("Brier", justify="right")
+    table.add_column("HiConf %", justify="right")
+    table.add_column("HiConf ✓", justify="right", style="green")
+    table.add_column("HiConf ✗", justify="right", style="red")
+
+    sorted_stats = sorted(stats.items(), key=lambda kv: kv[1]["weighted_hit_rate"], reverse=True)
+
+    # Totals for the footer row — micro-averages weighted by sample counts.
+    tot_n = 0
+    tot_hits = 0.0
+    tot_wtd_num = 0.0
+    tot_wtd_den = 0.0
+    tot_lean_n = 0
+    tot_lean_hits = 0.0
+    tot_brier = 0.0
+    tot_hc_hits = 0
+    tot_hc_misses = 0
+
+    for name, s in sorted_stats:
+        hc_total = s["high_conf_hits"] + s["high_conf_misses"]
+        hc_pct = (s["high_conf_hits"] / hc_total) if hc_total else None
+        lean_pct = s.get("lean_rate")
+        table.add_row(
+            name,
+            str(s["n"]),
+            f"{s['hit_rate']:.0%}",
+            f"{s['weighted_hit_rate']:.0%}",
+            f"{lean_pct:.0%}" if lean_pct is not None else "—",
+            f"{s['mean_brier']:.3f}",
+            f"{hc_pct:.0%}" if hc_pct is not None else "—",
+            str(s["high_conf_hits"]),
+            str(s["high_conf_misses"]),
+        )
+
+        n = s["n"]
+        tot_n += n
+        tot_hits += s["hit_rate"] * n
+        # Reconstruct weighted numerator/denominator from rate (we don't have raw).
+        # Approximate by treating each agent equally if denominator unknown — but
+        # since weighted_hit_rate = wtd_hits / wtd_total, and we only have the
+        # ratio, fall back to a simple mean across agents below.
+        tot_brier += s["mean_brier"] * n
+        tot_hc_hits += s["high_conf_hits"]
+        tot_hc_misses += s["high_conf_misses"]
+        lean_n = s.get("lean_n", 0)
+        tot_lean_n += lean_n
+        if lean_pct is not None:
+            tot_lean_hits += lean_pct * lean_n
+
+    # Macro-average across agents for weighted_hit_rate (no raw access).
+    avg_wtd = (
+        sum(s["weighted_hit_rate"] for _, s in sorted_stats) / len(sorted_stats)
+        if sorted_stats else 0.0
+    )
+    avg_hit = (tot_hits / tot_n) if tot_n else 0.0
+    avg_brier = (tot_brier / tot_n) if tot_n else 0.0
+    avg_lean = (tot_lean_hits / tot_lean_n) if tot_lean_n else None
+    hc_total_all = tot_hc_hits + tot_hc_misses
+    avg_hc = (tot_hc_hits / hc_total_all) if hc_total_all else None
+
+    table.columns[1].footer = f"[bold]{tot_n}[/bold]"
+    table.columns[2].footer = f"[bold]{avg_hit:.0%}[/bold]"
+    table.columns[3].footer = f"[bold]{avg_wtd:.0%}[/bold]"
+    table.columns[4].footer = f"[bold]{avg_lean:.0%}[/bold]" if avg_lean is not None else "—"
+    table.columns[5].footer = f"[bold]{avg_brier:.3f}[/bold]"
+    table.columns[6].footer = f"[bold]{avg_hc:.0%}[/bold]" if avg_hc is not None else "—"
+    table.columns[7].footer = f"[bold]{tot_hc_hits}[/bold]"
+    table.columns[8].footer = f"[bold]{tot_hc_misses}[/bold]"
 
     console.print(table)
 

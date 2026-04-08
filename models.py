@@ -129,6 +129,12 @@ class CouncilResult(BaseModel):
     """Conviction label for BUY recommendations. None when PASS."""
     pass_reason: str = ""
     """Why the recommendation is PASS (empty for BUY YES / BUY NO)."""
+    expected_roi: float = 0.0
+    """Max ROI of the recommended side at run time: (1 - price) / price.
+    0.0 when PASS. Independent of council conviction — conviction is gated
+    separately by the probability/confidence thresholds."""
+    briefing: BriefingDocument | None = None
+    """Full briefing document handed to the council. Optional for backward compat."""
 
     # ------------------------------------------------------------------
     # Classmethod factory — keeps scoring logic co-located with the model
@@ -140,10 +146,13 @@ class CouncilResult(BaseModel):
         cls,
         market: MarketData,
         verdicts: list[AgentVerdict],
-        edge_threshold: float = 0.07,
+        edge_threshold: float = 0.07,  # deprecated — informational only
         confidence_high: float = 0.60,
         confidence_medium: float = 0.40,
         min_tradeable_price: float = 0.05,
+        max_tradeable_price: float = 0.90,
+        min_expected_roi: float = 0.15,
+        min_contrarian_roi: float = 0.20,
         min_council_probability: float = 0.60,
         min_contrarian_probability: float = 0.70,
         min_contrarian_confidence: float = 0.80,
@@ -220,6 +229,10 @@ class CouncilResult(BaseModel):
             side_conf = mean_conf_no
             side_price = no_price
 
+        # Max ROI of the recommended side: (1 - price) / price. Purely a
+        # function of price — council conviction is gated separately.
+        expected_roi = ((1.0 - side_price) / side_price) if side_price > 0 else 0.0
+
         # Apply gates
         recommendation: Literal["BUY YES", "BUY NO", "PASS"]
         signal_type: Literal["STRONG", "CONFIRMED", "CAUTIOUS", "CONTRARIAN"] | None
@@ -233,10 +246,19 @@ class CouncilResult(BaseModel):
                 f"{rec_side} price too low: ${side_price:.2f} "
                 f"(need ≥${min_tradeable_price:.2f})"
             )
+        elif side_price > max_tradeable_price:
+            # Price ceiling: near-resolved; ROI doesn't justify execution risk
+            recommendation = "PASS"
+            signal_type = None
+            pass_reason = (
+                f"{rec_side} price too high: ${side_price:.2f} "
+                f"(≤${max_tradeable_price:.2f}); near-resolved, max ROI {expected_roi:.1%}"
+            )
         elif is_contrarian:
-            # Contrarian: stricter gates
+            # Contrarian: stricter gates across the board
             if (council_favored_prob >= min_contrarian_probability
-                    and side_conf >= min_contrarian_confidence):
+                    and side_conf >= min_contrarian_confidence
+                    and expected_roi >= min_contrarian_roi):
                 recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
                 signal_type = "CONTRARIAN"
             else:
@@ -253,14 +275,21 @@ class CouncilResult(BaseModel):
                         f"Contrarian call: {rec_side}-side confidence {side_conf:.0%} "
                         f"< {min_contrarian_confidence:.0%} threshold"
                     )
+                if expected_roi < min_contrarian_roi:
+                    reasons.append(
+                        f"Contrarian call: {rec_side} max ROI {expected_roi:.1%} "
+                        f"< {min_contrarian_roi:.0%} threshold"
+                    )
                 pass_reason = "; ".join(reasons)
-        elif council_favored_prob >= min_council_probability and side_conf >= confidence_high:
+        elif (council_favored_prob >= min_council_probability
+                and side_conf >= confidence_high
+                and expected_roi >= min_expected_roi):
             # Market-aligned: standard gates
             recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
-            # Signal type based on edge direction
-            if rec_edge > edge_threshold:
+            # Signal type based on max ROI bands
+            if expected_roi >= 0.50:
                 signal_type = "STRONG"
-            elif rec_edge >= -edge_threshold:
+            elif expected_roi >= 0.25:
                 signal_type = "CONFIRMED"
             else:
                 signal_type = "CAUTIOUS"
@@ -278,7 +307,18 @@ class CouncilResult(BaseModel):
                     f"{rec_side}-side confidence too low: {side_conf:.0%} "
                     f"(need ≥{confidence_high:.0%})"
                 )
+            if expected_roi < min_expected_roi:
+                reasons.append(
+                    f"{rec_side} max ROI too low: {expected_roi:.1%} "
+                    f"(need ≥{min_expected_roi:.0%})"
+                )
             pass_reason = "; ".join(reasons) if reasons else "No side meets gates"
+
+        # ROI is only meaningful for BUY signals — zero it on PASS.
+        if recommendation == "PASS":
+            expected_roi_final = 0.0
+        else:
+            expected_roi_final = expected_roi
 
         return cls(
             market=market,
@@ -291,6 +331,7 @@ class CouncilResult(BaseModel):
             confidence_level=confidence_level,
             signal_type=signal_type,
             pass_reason=pass_reason,
+            expected_roi=expected_roi_final,
         )
 
 
@@ -396,28 +437,28 @@ if __name__ == "__main__":
             for i in range(7)
         ]
 
-    # Scenario 1: Market-aligned STRONG — council confirms + positive edge
-    # Market: YES=62%, Council: YES≈75%, edge≈+13%
-    m1 = MarketData(**{**market.model_dump(), "yes_price": 0.62})
+    # Scenario 1: Market-aligned STRONG — cheap side, high ROI band (≥50%)
+    # Market YES=0.55, Council YES≈0.75 → side_price 0.55, max ROI = 81.8%
+    m1 = MarketData(**{**market.model_dump(), "yes_price": 0.55})
     r1 = CouncilResult.from_council_verdicts(market=m1, verdicts=_make_verdicts(0.75, 0.80, 0.60))
     print(f"  S1 (STRONG):      rec={r1.recommendation:<10} signal={r1.signal_type:<12} "
-          f"council_yes={r1.final_score:.0%} market_yes={m1.yes_price:.0%} edge={r1.edge:+.0%}")
+          f"council_yes={r1.final_score:.0%} price={m1.yes_price:.0%} roi={r1.expected_roi:.1%}")
     assert r1.recommendation == "BUY YES" and r1.signal_type == "STRONG"
 
-    # Scenario 2: Market-aligned CONFIRMED — council agrees, edge ≈ 0
-    # Market: NO=80% (yes=20%), Council: NO≈80%
-    m2 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
-    r2 = CouncilResult.from_council_verdicts(market=m2, verdicts=_make_verdicts(0.20, 0.60, 0.80))
+    # Scenario 2: Market-aligned CONFIRMED — mid-price, ROI 25%–50%
+    # Market NO=0.72 (yes=0.28), Council NO≈0.72 → side_price 0.72, ROI = 38.9%
+    m2 = MarketData(**{**market.model_dump(), "yes_price": 0.28})
+    r2 = CouncilResult.from_council_verdicts(market=m2, verdicts=_make_verdicts(0.28, 0.50, 0.70))
     print(f"  S2 (CONFIRMED):   rec={r2.recommendation:<10} signal={r2.signal_type:<12} "
-          f"council_no={r2.no_score:.0%} market_no={1-m2.yes_price:.0%} no_edge={r2.no_edge:+.0%}")
+          f"council_no={r2.no_score:.0%} price={1-m2.yes_price:.0%} roi={r2.expected_roi:.1%}")
     assert r2.recommendation == "BUY NO" and r2.signal_type == "CONFIRMED"
 
-    # Scenario 3: Market-aligned CAUTIOUS — council favors same side but less
-    # Market: NO=80% (yes=20%), Council: NO≈70%
-    m3 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
-    r3 = CouncilResult.from_council_verdicts(market=m3, verdicts=_make_verdicts(0.30, 0.60, 0.75))
+    # Scenario 3: Market-aligned CAUTIOUS — pricey side, ROI 15%–25%
+    # Market NO=0.82 (yes=0.18), Council NO≈0.75 → side_price 0.82, ROI = 22.0%
+    m3 = MarketData(**{**market.model_dump(), "yes_price": 0.18})
+    r3 = CouncilResult.from_council_verdicts(market=m3, verdicts=_make_verdicts(0.25, 0.45, 0.70))
     print(f"  S3 (CAUTIOUS):    rec={r3.recommendation:<10} signal={r3.signal_type:<12} "
-          f"council_no={r3.no_score:.0%} market_no={1-m3.yes_price:.0%} no_edge={r3.no_edge:+.0%}")
+          f"council_no={r3.no_score:.0%} price={1-m3.yes_price:.0%} roi={r3.expected_roi:.1%}")
     assert r3.recommendation == "BUY NO" and r3.signal_type == "CAUTIOUS"
 
     # Scenario 4: Contrarian — council goes against market, strict criteria met
@@ -442,7 +483,23 @@ if __name__ == "__main__":
           f"council_yes={r6.final_score:.0%} reason={r6.pass_reason[:60]}")
     assert r6.recommendation == "PASS"
 
-    print("  ✓ All 6 scenarios passed")
+    # Scenario 7: PASS — price ceiling. Side priced above MAX_TRADEABLE_PRICE.
+    # Market YES=0.95, Council YES≈0.95 → side_price 0.95 > 0.90 → PASS
+    m7 = MarketData(**{**market.model_dump(), "yes_price": 0.95})
+    r7 = CouncilResult.from_council_verdicts(market=m7, verdicts=_make_verdicts(0.95, 0.90, 0.40))
+    print(f"  S7 (PASS ceil):   rec={r7.recommendation:<10} signal={str(r7.signal_type):<12} "
+          f"price={m7.yes_price:.0%} reason={r7.pass_reason[:60]}")
+    assert r7.recommendation == "PASS" and "too high" in r7.pass_reason
+
+    # Scenario 8: PASS — ROI gate. Market-aligned with conviction but side too expensive.
+    # Market YES=0.88, Council YES≈0.75 → side_price 0.88, ROI = 13.6% < 15% → PASS
+    m8 = MarketData(**{**market.model_dump(), "yes_price": 0.88})
+    r8 = CouncilResult.from_council_verdicts(market=m8, verdicts=_make_verdicts(0.75, 0.80, 0.50))
+    print(f"  S8 (PASS ROI):    rec={r8.recommendation:<10} signal={str(r8.signal_type):<12} "
+          f"council_yes={r8.final_score:.0%} price={m8.yes_price:.0%} reason={r8.pass_reason[:60]}")
+    assert r8.recommendation == "PASS" and "ROI too low" in r8.pass_reason
+
+    print("  ✓ All 8 scenarios passed")
 
     # Empty verdicts must raise
     try:

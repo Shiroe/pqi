@@ -49,3 +49,10 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+.*
+!.claude
+!.gitignore
+!.env.example
+
+skills/

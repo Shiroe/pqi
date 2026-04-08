@@ -86,7 +86,7 @@ python3 -m pqi.main [COMMAND] [OPTIONS]
 |---------|-------------|
 | `analyze` (default) | Fetch events, run the council, print recommendations |
 | `categories` | List available tags and series slugs for `--category` |
-| `history` | Show past council runs from `~/.pqi/history.jsonl` |
+| `history` | History sub-app: `list`, `show`, `sync`, `stats` (see below) |
 
 ### Flags (analyze command)
 
@@ -104,11 +104,52 @@ python3 -m pqi.main [COMMAND] [OPTIONS]
 All flags can be freely combined. For example, `--live -c esports -v 0` shows all
 live esports events regardless of volume.
 
-### Flags (history command)
+### History sub-commands
 
-| Flag | Short | Type | Default | Description |
-|------|-------|------|---------|-------------|
-| `--last` | `-n` | `INT` | `20` | Number of recent entries to show |
+`pqi history` is a sub-app — running it bare prints help.
+
+| Sub-command | Description |
+|-------------|-------------|
+| `pqi history list [-n N]` | Overview table: market YES/NO, council YES/NO, **lean** (council's directional read), **lean✓** (was the read right?), **vs Mkt** (↕ when council disagreed with market), recommendation, **outcome** (✓/✗/MISS/pass/⏳), winning side, postmortem tagline |
+| `pqi history show <#\|run_id>` | Detailed view: header, recommendation panel, **per-agent verdict table** (with hit/✗ + Brier when resolved), postmortem panel, briefing recap |
+| `pqi history sync [--auto]` | Fetch resolutions for unresolved entries from the Gamma API. `--auto` mode is used by the background sync subprocess and only touches entries past their `end_date` |
+| `pqi history stats` | Council-wide outcome counter + per-agent leaderboard (n, hit %, weighted hit %, **lean %** with 0.45–0.55 dead band, Brier, high-conf accuracy %) plus an **Average** footer row with totals/micro-averages across all agents |
+
+`list` and `stats` automatically spawn a background sync subprocess for any
+unresolved entries past their `end_date` (suppress with `--no-auto-sync`).
+
+History is **upserted keyed on `market.id`** — re-running `analyze` on the
+same market (e.g. with `--no-cache`) fully overwrites the previous entry
+rather than appending a duplicate. The `run_id` is preserved across re-runs
+so stable references survive, but `resolution` and `analysis` are cleared
+(they're derived from the now-stale result and will be re-synced on the next
+`history sync`). Sibling markets under the same parent event remain
+distinct entries because the key is market id, not event id.
+
+#### Outcome classification
+
+| Outcome | Meaning |
+|---------|---------|
+| `correct_buy` | BUY recommendation matched the winning side |
+| `wrong_buy` | BUY recommendation against the winning side |
+| `missed_opportunity` | PASS, but council favored the winning side with prob ≥ 65% — confidence gates blocked an actionable signal |
+| `correct_pass` | PASS, council was unsure or wrong (correctly avoided) |
+| `voided` | Market closed without a clean YES/NO winner |
+| `unresolved` | Resolution not yet fetched |
+
+#### Per-agent accuracy
+
+The leaderboard tracks each council member individually across all resolved,
+non-legacy runs:
+
+- **Hit %** — fraction of times the agent's probability (>0.5 = YES, <0.5 = NO) matched the winner
+- **Weighted Hit %** — same, weighted by the agent's confidence on the side it picked
+- **Brier** — mean squared error between the agent's probability and the actual outcome (lower is better)
+- **HiConf %** — accuracy when the agent committed with confidence ≥ 70%
+- **HiConf ✓ / ✗** — raw counts of correct vs wrong high-conviction calls
+
+This surfaces *which agents identify the right side most confidently*, *who is
+loudest when wrong*, and lets you weight individual voices in your own judgment.
 
 ### Examples
 
@@ -137,8 +178,11 @@ python3 -m pqi.main --top --no-cache
 # List available categories
 python3 -m pqi.main categories
 
-# Show last 10 council runs
-python3 -m pqi.main history -n 10
+# History — overview, detail, sync, stats
+python3 -m pqi.main history list -n 10
+python3 -m pqi.main history show 3
+python3 -m pqi.main history sync
+python3 -m pqi.main history stats
 ```
 
 ---
@@ -156,7 +200,11 @@ When you select a multi-market event, a sub-table appears to pick which specific
 market to analyze. Single-market events skip this step.
 
 After analyzing a market, PQI offers to analyze its siblings too (no extra API call
-needed — siblings are already known from the event group).
+needed — siblings are already known from the event group). When you accept,
+**the Tavily briefing built for the parent market is reused** across all
+siblings (same event = same news), so the synthesizer step runs only once per
+event. The Council of Seven still runs separately per sibling because each
+market has its own resolution criteria.
 
 ### Parallel enrichment
 
@@ -224,11 +272,11 @@ Council of Seven — Verdicts
 
 | Recommendation | Meaning |
 |----------------|---------|
-| **BUY YES — STRONG** | Council favors YES, positive edge (council thinks YES is underpriced) |
-| **BUY YES — CONFIRMED** | Council favors YES, edge near zero (council agrees with market) |
-| **BUY YES — CAUTIOUS** | Council favors YES, negative edge (council thinks YES is slightly overpriced but still bets) |
-| **BUY NO — CONTRARIAN** | Council disagrees with market — stricter probability and confidence gates required |
-| **PASS** | No actionable signal. Reason shown (e.g. "Council prob too low", "Contrarian call: confidence below threshold") |
+| **BUY YES — STRONG** | Cheap side, max ROI ≥ 50% (price ≤ ~0.667) |
+| **BUY YES — CONFIRMED** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80) |
+| **BUY YES — CAUTIOUS** | Pricey side, max ROI 15%–25% (price ~0.80–0.87) — still above the ROI gate but close to the ceiling |
+| **BUY NO — CONTRARIAN** | Council disagrees with market — stricter probability, confidence, and ROI gates required |
+| **PASS** | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92") |
 
 The same labels apply symmetrically to BUY NO.
 
@@ -284,9 +332,12 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MIN_COUNCIL_PROBABILITY` | `0.60` | Minimum council probability to issue a market-aligned BUY |
 | `MIN_CONTRARIAN_PROBABILITY` | `0.70` | Minimum council probability for a contrarian BUY (against market) |
 | `MIN_CONTRARIAN_CONFIDENCE` | `0.80` | Minimum per-side confidence for a contrarian BUY |
-| `CONFIDENCE_HIGH_THRESHOLD` | `0.70` | Mean confidence required for HIGH label |
-| `EDGE_THRESHOLD` | `0.07` | Edge magnitude for STRONG vs CONFIRMED vs CAUTIOUS signal type |
+| `CONFIDENCE_HIGH_THRESHOLD` | `0.67` | Mean confidence required for HIGH label |
+| `EDGE_THRESHOLD` | `0.07` | **Deprecated** — informational only; no longer gates recommendations |
 | `MIN_TRADEABLE_PRICE` | `0.05` | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals) |
+| `MAX_TRADEABLE_PRICE` | `0.90` | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk) |
+| `MIN_EXPECTED_ROI` | `0.15` | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.87) |
+| `MIN_CONTRARIAN_ROI` | `0.20` | Stricter ROI floor for contrarian BUYs (≈ price ≤ 0.833) |
 | `MIN_VOLUME_USD` | `10000` | Volume floor for general queries |
 | `MIN_VOLUME_SHORT_WINDOW_USD` | `500` | Volume floor for short time-window / live queries |
 | `RULES_LAWYER_WEIGHT` | `2` | Rules Lawyer counts as N agents in weighted scoring |
@@ -318,7 +369,10 @@ pqi/
 │                        #   AgentVerdict, CouncilResult
 ├── scoring.py           # two-sided confidence-weighted scoring + recommendation logic
 ├── cache.py             # SQLite result cache (keyed by market_id + price delta)
-├── history.py           # JSONL history logger (~/.pqi/history.jsonl)
+├── history.py           # JSONL history logger (~/.pqi/history.jsonl) — full-fidelity
+│                        #   records with run_id, resolution, analysis blocks
+├── resolution.py        # Gamma /markets/{id} → winning side / final price
+├── analytics.py         # Outcome classification, per-agent accuracy, postmortem
 ├── agents/
 │   ├── personas.py      # all 7 system prompts (AGENT_PERSONAS dict)
 │   └── council.py       # parallel agent runner + JSON parser + event timing

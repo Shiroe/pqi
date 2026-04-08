@@ -111,6 +111,7 @@ class CouncilResult(BaseModel):
     confidence_level: str     # "HIGH" | "MEDIUM" | "LOW"
     signal_type: str | None   # "STRONG" | "CONFIRMED" | "CAUTIOUS" | "CONTRARIAN" | None
     pass_reason: str          # why PASS (empty for BUY)
+    expected_roi: float       # max ROI (1-price)/price of recommended side; 0.0 on PASS
 ```
 
 ---
@@ -177,23 +178,37 @@ no_score  = Σ(prob_no × conf_no) / Σ(conf_no)     # prob_no = 1 − prob_yes
 no_edge   = no_score − (1 − market.yes_price)
 ```
 
-Recommendation logic (probability-first, session 15):
+Recommendation logic (ROI-aware, probability-first):
 
-1. Identify council's favored side (the side with >50% council probability)
-2. Check if council agrees with market (market-aligned) or disagrees (contrarian)
-3. **Market-aligned**: council prob >= `MIN_COUNCIL_PROBABILITY` (0.60) + confidence HIGH → BUY
-4. **Contrarian**: council prob >= `MIN_CONTRARIAN_PROBABILITY` (0.70) + confidence
-   >= `MIN_CONTRARIAN_CONFIDENCE` (0.80) → BUY with CONTRARIAN label
-5. Otherwise → PASS
+Max ROI of the recommended side: `expected_roi = (1 - side_price) / side_price`.
+Purely a function of price — council conviction is gated separately. A 70¢
+share has a max ROI of 42.9% (sell at $1 = +30¢/70¢); an 80¢ share caps at
+25%; a 90¢ share at 11.1%.
 
-Signal type (conviction label on BUY recommendations):
-- `STRONG` — positive edge on recommended side (council > market)
-- `CONFIRMED` — edge near zero (council ≈ market)
-- `CAUTIOUS` — negative edge (council < market but still favors same side)
-- `CONTRARIAN` — council goes against market, strict criteria met
+Gate order inside `from_council_verdicts()`:
 
-Edge is informational (affects signal type label), NOT a gate for recommendations.
+1. **Price floor**: `side_price < MIN_TRADEABLE_PRICE` (0.05) → PASS
+2. **Price ceiling**: `side_price > MAX_TRADEABLE_PRICE` (0.90) → PASS.
+   Near-resolved; ROI doesn't justify execution risk.
+3. **Contrarian** (council disagrees with market): requires all of
+   `council_prob >= MIN_CONTRARIAN_PROBABILITY` (0.70),
+   `side_conf >= MIN_CONTRARIAN_CONFIDENCE` (0.80),
+   `expected_roi >= MIN_CONTRARIAN_ROI` (0.20). Label: `CONTRARIAN`.
+4. **Market-aligned**: requires
+   `council_prob >= MIN_COUNCIL_PROBABILITY` (0.60),
+   `side_conf >= CONFIDENCE_HIGH_THRESHOLD` (0.67),
+   `expected_roi >= MIN_EXPECTED_ROI` (0.15).
+5. Otherwise → PASS with dynamic pass_reason.
+
+Signal type on market-aligned BUYs is ROI-banded:
+- `STRONG` — expected_roi ≥ 50% (cheap side; price ≤ ~0.667)
+- `CONFIRMED` — 25% ≤ expected_roi < 50% (price ~0.667–0.80)
+- `CAUTIOUS` — 15% ≤ expected_roi < 25% (price ~0.80–0.87)
+
+`EDGE_THRESHOLD` is **deprecated** — `edge` is still computed and displayed
+for historical continuity but is no longer consumed as a gate or label.
 Overall `confidence_level` label uses the higher of the two per-side means.
+`CouncilResult.expected_roi` is persisted on every result (0.0 on PASS).
 
 ---
 
@@ -307,6 +322,11 @@ MIN_VOLUME_SHORT_WINDOW_USD=500 # volume floor for short-window queries
 - [x] Anthropic backend fix (`claude-haiku-4-5-20251001`) + concurrency bypass
 - [x] Rules Lawyer veto weight (2x multiplier config)
 - [x] Historical accuracy tracking
+- [x] History validation system: full-fidelity persistence, resolution sync,
+      per-agent accuracy, postmortem analysis, `pqi history` sub-app
+      (list/show/sync/stats)
+- [x] Shared briefing for sibling markets (skip synthesizer when analyzing
+      siblings from the same event)
 
 ---
 
@@ -366,7 +386,74 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 16 — polymarket.py refactor, API live/ended fields, --live flag]
+**Last updated:** [session 17 — history validation overhaul, resolution sync, per-agent accuracy, postmortem, shared sibling briefing]
+
+### Session 17 additions
+
+- `models.py` — `CouncilResult.briefing: BriefingDocument | None` field added so
+  the full briefing handed to the council is persisted with each result.
+- `history.py` — full rewrite. Each entry is now `{run_id, timestamp, legacy,
+  result, resolution, analysis}`. `result` is the entire CouncilResult.
+  Legacy flat-schema entries are migrated in-memory by `_migrate_legacy_entry()`
+  and tagged `legacy: True` so analytics can exclude them. New helpers:
+  `iter_unresolved(past_end_only=False)`, `update_resolution(run_id, ...)`,
+  `update_analysis(run_id, ...)`, `_rewrite_all()` (atomic tmp+rename).
+- `resolution.py` — **NEW.** `fetch_resolution(market_id) -> Resolution | None`
+  hits `/markets/{id}`, parses `closed` + `outcomePrices` to determine winner.
+  Returns None for still-open markets, dict with `winning_side` (YES/NO/None),
+  `final_yes_price`, `resolved_at`, `checked_at`, `source`.
+- `analytics.py` — **NEW.** Pure functions over migrated history entries:
+  - `classify_outcome(entry)` → correct_buy / wrong_buy / missed_opportunity /
+    correct_pass / unresolved / voided. Missed opportunity = PASS where
+    council favored the winning side with prob ≥ 0.65 (`MISSED_OPPORTUNITY_PROB_FLOOR`).
+  - `agent_accuracy(entries)` → per-agent dict with hit_rate, weighted_hit_rate
+    (weighted by chosen-side confidence), mean_brier, high_conf_hits/misses.
+  - `signal_postmortem(entry)` → structured dict (kind, summary, agents_with_winner,
+    agents_against_winner, median_prob, coin_flip flag).
+  - `compute_and_persist_postmortem(entry)` writes the analysis back to history
+    via `update_analysis()` (idempotent).
+- `main.py` — `pqi history` is now a Typer sub-app. Bare `pqi history` shows
+  help (no_args_is_help=True). Sub-commands:
+  - `pqi history list` — overview table. Columns: Mkt Y/N + Cncl Y/N (both
+    sides shown), Lean (council's directional read with 0.45–0.55 dead band),
+    Lean✓ (did the lean match the winner — independent of recommendation
+    gates), vs Mkt (↕ when council and market lean opposite directions),
+    Rec, Conf, Outcome glyph, Won side, Verdict tagline. Spawns auto-sync
+    subprocess. The Lean/Lean✓/vs Mkt trio surfaces cases where the council's
+    raw read was right but recommendation gates blocked the bet (or vice
+    versa).
+  - `pqi history show <#|run_id>` — header + recommendation + per-agent verdict
+    table (with hit/✗ + Brier when resolved) + postmortem panel + briefing recap.
+    First call also persists the postmortem into the entry.
+  - `pqi history sync [--auto]` — fetches resolutions for unresolved entries.
+    `--auto` filters to entries past their `end_date` and suppresses output;
+    used by the background subprocess spawned from `list`/`stats`.
+  - `pqi history stats` — overview counter + per-agent leaderboard sorted by
+    weighted hit rate. Columns: n, Hit %, Wtd Hit %, Lean % (directional read
+    accuracy with 0.45–0.55 dead band, mirrors the list view's Lean✓), Brier,
+    HiConf %, HiConf ✓/✗. Footer row shows micro-averaged totals across all
+    agents (Wtd Hit % is macro-averaged since raw weights aren't exposed at
+    this layer).
+- `_run_analysis()` — accepts optional `shared_briefing: BriefingDocument | None`.
+  When provided (sibling-analysis loop), the synthesizer step is skipped and the
+  briefing's market is rebound via `model_copy()` so the council still sees the
+  correct resolution criteria. Also now attaches `briefing` to the returned
+  CouncilResult.
+- Sibling-analysis loop in `analyze` passes `result.briefing` to subsequent
+  sibling runs — one Tavily call per event, separate council per market.
+
+### End-to-end verified (session 17)
+
+- `pqi analyze --top --no-cache` runs full pipeline, persists 7 verdicts +
+  briefing in new history schema.
+- `pqi history sync` fetched 27 resolutions from 31 entries.
+- `pqi history list` shows outcome glyphs and verdict taglines for legacy +
+  new entries.
+- `pqi history show <#>` renders header / recommendation / per-agent table /
+  postmortem / briefing recap panels correctly.
+- `pqi history stats` aggregates correctly (5 correct buys / 1 wrong / 3
+  missed / 17 correct pass / 4 unresolved / 1 voided in test data). Per-agent
+  table is empty until non-legacy resolved entries accumulate.
 
 ### Implemented & tested ✓
 
@@ -434,10 +521,15 @@ as a literal.
   (`{"The Rules Lawyer": RULES_LAWYER_WEIGHT}`). Two-sided scoring functions.
   Session 15: now passes `MIN_COUNCIL_PROBABILITY`, `MIN_CONTRARIAN_PROBABILITY`,
   `MIN_CONTRARIAN_CONFIDENCE` to `from_council_verdicts()`.
-- `history.py` — **NEW (session 14).** `append_result()` writes one JSON line to
-  `~/.pqi/history.jsonl` per analyze run. `load_history()` reads all entries.
-  Fields: market_id, question, yes_price_at_run, final_score, no_score, edge,
-  no_edge, recommendation, confidence_level, timestamp.
+- `history.py` — **NEW (session 14).** `append_result()` upserts into
+  `~/.pqi/history.jsonl` keyed on `market.id` (NOT event.id, so sibling
+  markets under the same parent event stay distinct). If an entry for the
+  same market already exists, it is fully overwritten: fresh result +
+  timestamp, and `resolution`/`analysis` are cleared (they're derived from
+  the now-stale inputs and will be re-synced by the next `history sync`).
+  `run_id` is preserved across re-runs so stable references survive. Only
+  non-legacy entries participate in upsert matching. `load_history()` reads
+  all entries and migrates legacy rows in-memory.
 - `cache.py` — **NEW (session 14).** SQLite cache via `aiosqlite`. Table:
   `council_cache(market_id PK, yes_price, result_json, created_at)`.
   `get_cached(market_id, current_yes_price)` returns cached CouncilResult if price
@@ -542,65 +634,51 @@ as a literal.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 
-Session 16 focused on two areas:
-
-### A. polymarket.py refactor
-Major architectural cleanup. Eliminated duplicated `_fetch_markets_general` and
-`_fetch_markets_by_time_window` (shared ~25 lines of code). New architecture:
-  fetch_markets() → _fetch_and_filter() → _build_api_params() +
-                    _parse_events_to_markets() + _apply_client_filters()
-
-Key improvements:
-- Uses API's `event.live` and `event.ended` fields (confirmed populated on
-  /events list endpoint for sports/esports)
-- Server-side volume filtering (volume_min on /events, volume_num_min on /markets)
-- Higher fetch_limit (limit*5 vs limit*2) when client-side filters active —
-  fixes missing low-volume live events
-- `_ParsedMarket` dataclass carries event-level metadata through pipeline
-- `_apply_client_filters()` centralizes live/starts_within/resolve_within logic
-- `--live` flag added to CLI, uses API's event.live field
-
-### B. API documentation
-- Created auto-memory `reference_gamma_api.md` with full endpoint params, schemas,
-  and known behaviors from the official OpenAPI spec
-- Corrected CLAUDE.md: /markets HAS tag_id param, /events HAS tag_slug param,
-  both have server-side volume filtering
-- Created `feedback_api_research.md` — always check docs before exploring
+Session 17 delivered the history validation system: full-fidelity persistence,
+resolution sync from the Gamma API, per-agent accuracy stats, and a postmortem
+layer that explains why each call was right/wrong/missed. CLI was reshaped into
+a `pqi history` sub-app (list/show/sync/stats). Shared sibling briefing also
+landed (one Tavily call per event).
 
 ## Remaining ideas / future work
 
-### 1. End-to-end test run
-Session 15 changes (agent perspectives, probability-first scoring, enriched briefing)
-have NOT been tested end-to-end yet. Run `pqi analyze` on esports + binary markets.
+### 1. Cache TTL / expiry
+Add time-based expiry to cached council results (e.g. 24h max age). Currently
+cache only invalidates on price movement > 2%.
 
-### 2. Cache TTL / expiry
-Add time-based expiry to cached results (e.g. 24h max age). Currently cache
-only invalidates on price movement > 2%.
+### 2. /public-search integration
+Use `/public-search?q=TEXT` as supplementary fetch for ghost events that don't
+appear in /events list queries.
 
-### 3. History: resolution tracking
-Extend `pqi history` to check if markets resolved and show whether the
-recommendation was correct (win/loss). Fetch market outcome from Gamma API.
-
-### 4. /public-search integration
-Use `/public-search?q=TEXT` as supplementary fetch for ghost events.
-
-### 5. Multi-market batch analysis
+### 3. Multi-market batch analysis
 Allow `pqi analyze --top 3` to analyze top N markets sequentially.
 
-### 6. Shared briefing for sibling markets
-When analyzing siblings from the same event, share the Tavily briefing
-(same event = same news) but still run separate councils (different
-resolution criteria per market).
-
-### 7. Use tag_slug for simpler category resolution
+### 4. Use tag_slug for simpler category resolution
 The /events endpoint accepts `tag_slug` directly — could simplify
 resolve_category() by skipping the tag_id lookup step for exact slug matches.
 
+### 5. Per-category accuracy slicing
+`pqi history stats --category esports` would let us see which agents are
+strong in which domains (Domain Specialist should excel in technical fields,
+Statistician on base-rate-driven sports, etc).
+
+### 6. Resolution voided handling
+Currently `voided` markets (closed but no clean YES/NO winner) are counted
+separately. Consider whether they should affect agent accuracy or be silently
+excluded.
+
+### 7. Postmortem persistence on `list`
+`pqi history list` currently calls `signal_postmortem()` for each row but does
+not persist (only `show` does). Consider eager persistence so the list view
+gets faster on repeat calls.
+
+### 8. Auto-sync race condition
+Two consecutive `pqi history list` calls in <2s could spawn two background
+syncs that both try to rewrite history.jsonl. Low impact (atomic rename), but
+a lockfile would be cleaner.
+
 ## Instructions
-- Do an end-to-end test run (session 15 + 16 changes)
-- Test --live and --starts-within on esports markets
-- Verify ended events are filtered, live events show correctly
-- Test general queries still work (no category, no time filter)
+- Pick the next priority with the user before starting
 - Read the relevant existing files before writing any new code
 - Update ## Current State and ## Next Session Prompt at end of session
 ```

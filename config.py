@@ -79,9 +79,12 @@ MIN_VOLUME_SHORT_WINDOW_USD: float = float(
 # Scoring & recommendation gates
 # ---------------------------------------------------------------------------
 
-EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.09"))
+EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.09"))  # deprecated — informational only
 MIN_TRADEABLE_PRICE: float = float(os.getenv("MIN_TRADEABLE_PRICE", "0.05"))
-CONFIDENCE_HIGH_THRESHOLD: float = float(os.getenv("CONFIDENCE_HIGH_THRESHOLD", "0.70"))
+MAX_TRADEABLE_PRICE: float = float(os.getenv("MAX_TRADEABLE_PRICE", "0.90"))
+MIN_EXPECTED_ROI: float = float(os.getenv("MIN_EXPECTED_ROI", "0.15"))
+MIN_CONTRARIAN_ROI: float = float(os.getenv("MIN_CONTRARIAN_ROI", "0.20"))
+CONFIDENCE_HIGH_THRESHOLD: float = float(os.getenv("CONFIDENCE_HIGH_THRESHOLD", "0.67"))
 CONFIDENCE_MEDIUM_THRESHOLD: float = float(os.getenv("CONFIDENCE_MEDIUM_THRESHOLD", "0.40"))
 CONSENSUS_YES_FLOOR: float = float(os.getenv("CONSENSUS_YES_FLOOR", "0.40"))
 CONSENSUS_NO_CEILING: float = float(os.getenv("CONSENSUS_NO_CEILING", "0.60"))
@@ -180,6 +183,9 @@ if __name__ == "__main__":
         ("MIN_VOLUME_SHORT_WINDOW_USD",str(MIN_VOLUME_SHORT_WINDOW_USD)),
         ("EDGE_THRESHOLD",             str(EDGE_THRESHOLD)),
         ("MIN_TRADEABLE_PRICE",        str(MIN_TRADEABLE_PRICE)),
+        ("MAX_TRADEABLE_PRICE",        str(MAX_TRADEABLE_PRICE)),
+        ("MIN_EXPECTED_ROI",           str(MIN_EXPECTED_ROI)),
+        ("MIN_CONTRARIAN_ROI",         str(MIN_CONTRARIAN_ROI)),
         ("CONFIDENCE_HIGH_THRESHOLD",  str(CONFIDENCE_HIGH_THRESHOLD)),
         ("CONFIDENCE_MEDIUM_THRESHOLD",str(CONFIDENCE_MEDIUM_THRESHOLD)),
         ("CONSENSUS_YES_FLOOR",        str(CONSENSUS_YES_FLOOR)),
