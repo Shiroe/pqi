@@ -110,10 +110,90 @@ live esports events regardless of volume.
 
 | Sub-command | Description |
 |-------------|-------------|
-| `pqi history list [-n N]` | Overview table: market YES/NO, council YES/NO, **lean** (council's directional read), **lean✓** (was the read right?), **vs Mkt** (↕ when council disagreed with market), recommendation, **outcome** (✓/✗/MISS/pass/⏳), winning side, postmortem tagline |
+| `pqi history list [flags]` | Overview table: market YES/NO, council YES/NO, **lean** (council's directional read), **lean✓** (was the read right?), **vs Mkt** (↕ when council disagreed with market), recommendation, **outcome** (✓/✗/MISS/pass/⏳), winning side, postmortem tagline |
 | `pqi history show <#\|run_id>` | Detailed view: header, recommendation panel, **per-agent verdict table** (with hit/✗ + Brier when resolved), postmortem panel, briefing recap |
 | `pqi history sync [--auto]` | Fetch resolutions for unresolved entries from the Gamma API. `--auto` mode is used by the background sync subprocess and only touches entries past their `end_date` |
-| `pqi history stats` | Council-wide outcome counter + per-agent leaderboard (n, hit %, weighted hit %, **lean %** with 0.45–0.55 dead band, Brier, high-conf accuracy %) plus an **Average** footer row with totals/micro-averages across all agents |
+| `pqi history stats` | Council overview (totals, outcome counts, **council-level lean accuracy** computed across all resolved entries with the same dead band as the `list` view) + per-agent leaderboard (n, hit %, weighted hit %, **lean %**, Brier, high-conf accuracy %) with an **Average** footer row of micro-averaged totals |
+
+#### `history list` flags
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--last` | `-n` | `INT` | `20` | Page size — number of most recent entries to show. Ignored when `--all` is set |
+| `--offset` | `-o` | `INT` | `0` | Skip this many of the most recent entries (paginate backwards through history) |
+| `--all` | `-a` | flag | off | Show every entry in history. Numbering still starts at `#1` (oldest) and goes up to total |
+| `--no-auto-sync` | | flag | off | Skip the background `history sync` subprocess that auto-resolves entries past their `end_date` |
+| `--outcome` | | `TEXT` | _(none)_ | Filter by outcome class (see values below) |
+| `--rec` | | `TEXT` | _(none)_ | Filter by recommendation type (see values below) |
+| `--conf` | | `TEXT` | _(none)_ | Filter by overall confidence label (see values below) |
+
+All filter flags are independent and freely combinable — e.g.
+`pqi history list --all --conf high --rec pass` shows every HIGH-confidence run
+where the council still recommended PASS (a useful slice for inspecting
+gate-blocked signals). Filters are applied **after** numbering, so the `#`
+column stays stable and `pqi history show <#>` always refers to the same entry
+across different filtered views.
+
+Some combinations are logically empty by definition (e.g.
+`--rec pass --outcome correct_buy` — a PASS can never be a `correct_buy`).
+These return an empty result rather than being blocked.
+
+##### Insight recipes — useful filter combinations
+
+Each row is a question you might want to answer about the council's behavior,
+the command that surfaces it, and how to read the result.
+
+| Question | Command | How to interpret |
+|----------|---------|------------------|
+| **Where are my gates too tight?** Show every PASS where the council was actually confident enough that something should have triggered. | `pqi history list --all --conf high --rec pass` | Each row is a HIGH-confidence PASS — the council was sure but a gate (price floor/ceiling, ROI, contrarian threshold) blocked the bet. Cross-reference the `Lean✓` column: if most are `✓`, the gates are leaving money on the table and `MIN_EXPECTED_ROI` / `MAX_TRADEABLE_PRICE` likely need loosening. If most are `✗`, the gates are correctly catching overconfident reads. |
+| **Were my "missed opportunities" actually missed?** | `pqi history list --all --outcome miss` | Every row here is a PASS where the council favored the eventual winner with prob ≥ 65%. Read the `pass_reason` (visible via `history show <#>`) to spot the dominant blocker. If one reason ("Council prob too low", "ROI too low") repeats across many rows, that's the lever to tune. |
+| **When the council is HIGH and bets, how often is it right?** | `pqi history list --all --conf high --rec buy` | The hit-rate of `✓` vs `✗` outcomes in this slice is your *actionable accuracy* — this is the population that real trading would have touched. Compare against the broader `history stats` per-agent leaderboard to see if HIGH-conviction buys actually outperform the agents' raw averages. |
+| **Is the council brave enough?** | `pqi history list --all --rec pass --outcome miss` followed by `pqi history list --all --rec buy --outcome correct_buy` | Compare row counts. Many missed opportunities + few correct buys = council is too cautious. Few missed + many correct = gates are well-calibrated. Few of either = the council is rarely producing actionable reads (look at `--conf` distribution next). |
+| **Where does the council blow up loudly?** | `pqi history list --all --outcome wrong_buy --conf high` | These are the worst-case rows: confident BUYs that lost. Open each with `history show <#>` and read the postmortem — it lists the loudest agents on the wrong side. Repeated agent names point at a bias in a specific persona that needs prompt tuning. |
+| **Does HIGH confidence mean anything?** | Run `pqi history list --all --conf high` and `pqi history list --all --conf medium` | Tally `Lean✓` rates in each. If HIGH and MEDIUM have the same accuracy, the confidence label is noise — `CONFIDENCE_HIGH_THRESHOLD` may be too low or the agents are over-claiming. HIGH should clearly outperform MEDIUM. |
+| **Are LOW-confidence PASSes correctly cautious?** | `pqi history list --all --conf low --rec pass` | This *should* be the council's "I don't know" pile. The `Lean✓` column should be near 50% (coin-flip). If it's much higher, the council is being too humble — its own uncertainty estimate underrates a real signal. If much lower, LOW is correctly catching cases where the council is wrong. |
+| **Did the council's lean disagree with the market and win?** | `pqi history list --all --rec buy_no` (and `--rec buy_yes`) and look at the `vs Mkt` column for `↕` markers | These are contrarian wins — cases worth studying. Use `history show <#>` to inspect *which* agents drove the contrarian read. Repeated contributors are your highest-signal voices. |
+| **What does the recent picture look like vs all-time?** | `pqi history list -n 20` then `pqi history stats` | The first shows the last 20 entries with their outcomes — eyeball recent performance. The stats panel's *council lean accuracy* line uses the same formula but across all resolved entries, so a divergence between recent `Lean✓` density and the global rate is a drift signal (the council is getting better/worse, or category mix has shifted). |
+| **Per-outcome breakdown for one period** | `pqi history list -n 50 --outcome correct_pass` | Useful when you've added 50+ runs since last review and want to confirm the correct-pass pile is genuinely uncertain markets, not actionable signals the council bottled. Pair with `--conf high` to flag suspicious "correct passes" that were actually high-conviction reads. |
+
+**General reading tips:**
+
+- The `Lean✓` column is **independent of recommendation gates** — it tells you whether the raw council read was right, regardless of whether it converted to a BUY. This is the most direct measure of council intelligence.
+- The `outcome` column is **gate-aware** — it tells you whether the *system as a whole* (council + gates) made the right call.
+- A row where `Lean✓` is `✓` but the outcome is `MISS` is a system failure: the council saw it correctly, the gates blocked it. Several of these in a row → relax gates.
+- A row where `Lean✓` is `✗` but the outcome is `pass` is a system success: the council was wrong, the gates correctly stopped you from acting on it.
+- Always pair filter views with `history show <#>` on a few sample rows — the postmortem panel lists which agents called the winner and which called against, which is where prompt-tuning leverage lives.
+
+##### `--outcome` values
+
+| Value (and aliases) | Matches |
+|---------------------|---------|
+| `correct_buy` (`buy`, `win`) | BUY recommendation that matched the winning side |
+| `wrong_buy` (`wrong`, `loss`) | BUY recommendation against the winning side |
+| `missed_opportunity` (`miss`, `missed`) | PASS where the council favored the winning side with prob ≥ 65% (gates blocked an actionable signal) |
+| `correct_pass` (`pass`) | PASS where the council was correctly unsure or wrong about the winner |
+| `voided` (`void`) | Market closed without a clean YES/NO winner |
+| `unresolved` (`pending`) | Resolution not yet fetched from the Gamma API |
+
+##### `--rec` values
+
+| Value (and aliases) | Matches |
+|---------------------|---------|
+| `pass` | `PASS` recommendations |
+| `buy` | Both `BUY YES` and `BUY NO` (any actionable BUY) |
+| `buy_yes` (`yes`) | `BUY YES` only |
+| `buy_no` (`no`) | `BUY NO` only |
+
+##### `--conf` values
+
+Filters by `CouncilResult.confidence_level`, which is the higher of the two
+per-side mean confidences.
+
+| Value (and aliases) | Matches |
+|---------------------|---------|
+| `high` (`h`) | `HIGH` — mean confidence ≥ `CONFIDENCE_HIGH_THRESHOLD` (default 0.67) on the favored side |
+| `medium` (`med`, `m`) | `MEDIUM` — middle band |
+| `low` (`l`) | `LOW` — below the medium floor |
 
 `list` and `stats` automatically spawn a background sync subprocess for any
 unresolved entries past their `end_date` (suppress with `--no-auto-sync`).
@@ -180,6 +260,10 @@ python3 -m pqi.main categories
 
 # History — overview, detail, sync, stats
 python3 -m pqi.main history list -n 10
+python3 -m pqi.main history list --all                       # every entry, numbered 1..N
+python3 -m pqi.main history list --all --outcome miss        # all missed opportunities
+python3 -m pqi.main history list --all --rec pass --conf high  # HIGH-conf PASS calls (gate-blocked signals)
+python3 -m pqi.main history list --all --outcome wrong_buy   # every wrong BUY
 python3 -m pqi.main history show 3
 python3 -m pqi.main history sync
 python3 -m pqi.main history stats

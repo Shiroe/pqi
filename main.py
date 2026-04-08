@@ -131,7 +131,9 @@ def display_council_result(result: CouncilResult) -> None:
     elif rec == "BUY NO":
         sig_style = _signal_colours.get(sig, "red")
         colour = "magenta" if sig == "CONTRARIAN" else "green"
-        trade_line = f"[{sig_style}]>>> BUY NO @ ${no_price:.2f}/share — {sig} <<<[/{sig_style}]"
+        trade_line = (
+            f"[{sig_style}]>>> BUY NO @ ${no_price:.2f}/share — {sig} <<<[/{sig_style}]"
+        )
     else:
         colour = "yellow"
         trade_line = "[bold yellow]>>> PASS — no actionable signal <<<[/bold yellow]"
@@ -146,7 +148,9 @@ def display_council_result(result: CouncilResult) -> None:
     roi_side_price = yes_price if result.final_score >= result.no_score else no_price
     roi_val = ((1.0 - roi_side_price) / roi_side_price) if roi_side_price > 0 else 0.0
     roi_label = "YES" if result.final_score >= result.no_score else "NO"
-    roi_line = f"[bold]Max ROI ({roi_label}):[/bold]  +{roi_val:.1%}  (if that side wins)\n"
+    roi_line = (
+        f"[bold]Max ROI ({roi_label}):[/bold]  +{roi_val:.1%}  (if that side wins)\n"
+    )
     summary = (
         f"[bold]Council YES:[/bold]    {result.final_score:.1%}  |  "
         f"[bold]Council NO:[/bold]  {result.no_score:.1%}\n"
@@ -157,7 +161,9 @@ def display_council_result(result: CouncilResult) -> None:
         f"[bold]Confidence:[/bold]     {result.confidence_level}\n\n"
         f"{trade_line}"
     )
-    console.print(Panel(summary, title="Recommendation", border_style=colour, expand=False))
+    console.print(
+        Panel(summary, title="Recommendation", border_style=colour, expand=False)
+    )
 
 
 def prompt_market_selection(markets: list[MarketData]) -> MarketData:
@@ -270,7 +276,9 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
     console.print(sub_table)
 
     while True:
-        raw = input(f"\nSelect a market [1–{len(group.markets)}, Enter for #1]: ").strip()
+        raw = input(
+            f"\nSelect a market [1–{len(group.markets)}, Enter for #1]: "
+        ).strip()
         if raw == "":
             return group, group.markets[0]
         try:
@@ -279,7 +287,9 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
                 return group, group.markets[idx - 1]
         except ValueError:
             pass
-        console.print(f"[red]Please enter a number between 1 and {len(group.markets)}.[/red]")
+        console.print(
+            f"[red]Please enter a number between 1 and {len(group.markets)}.[/red]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -310,14 +320,20 @@ async def _run_analysis(
             return cached
 
     if shared_briefing is not None:
-        console.print(f"\n[cyan]Reusing shared event briefing for:[/cyan] {market.question[:80]}")
+        console.print(
+            f"\n[cyan]Reusing shared event briefing for:[/cyan] {market.question[:80]}"
+        )
         briefing = shared_briefing.model_copy(update={"market": market})
     else:
         console.print(f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}")
         briefing = await build_briefing(market)
     console.print(f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]")
 
-    concurrency_info = f"concurrency={config.LOCAL_LLM_CONCURRENCY}" if config.LLM_BACKEND == "ollama" else "parallel"
+    concurrency_info = (
+        f"concurrency={config.LOCAL_LLM_CONCURRENCY}"
+        if config.LLM_BACKEND == "ollama"
+        else "parallel"
+    )
     console.print(f"[cyan]Summoning the Council of Seven… ({concurrency_info})[/cyan]")
     verdicts = await run_council(briefing)
     console.print(f"[cyan]Council complete: {len(verdicts)}/7 verdicts.[/cyan]\n")
@@ -336,7 +352,9 @@ async def _run_analysis(
 @app.command()
 def analyze(
     category: Optional[str] = typer.Option(
-        None, "--category", "-c",
+        None,
+        "--category",
+        "-c",
         help="Filter by series slug or broad tag (e.g. 'counter-strike', 'esports'). Run `pqi categories` to list options.",
     ),
     top_n: int = typer.Option(
@@ -346,26 +364,35 @@ def analyze(
         False, "--top", "-t", help="Auto-select the top market by volume (skip prompt)."
     ),
     starts_within: Optional[int] = typer.Option(
-        None, "--starts-within", "-s",
+        None,
+        "--starts-within",
+        "-s",
         help="Only show markets whose event starts within this many hours (e.g. 4). Best for sports/esports.",
         min=1,
     ),
     resolve_within: Optional[int] = typer.Option(
-        None, "--resolve-within", "-r",
+        None,
+        "--resolve-within",
+        "-r",
         help="Only show markets that resolve within this many hours (e.g. 48).",
         min=1,
     ),
     live: bool = typer.Option(
-        False, "--live", "-l",
+        False,
+        "--live",
+        "-l",
         help="Only show live events (already started, not yet resolved). Composable with --starts-within.",
     ),
     min_volume: Optional[float] = typer.Option(
-        None, "--min-volume", "-v",
+        None,
+        "--min-volume",
+        "-v",
         help="Override minimum volume floor in USD (use 0 to see all markets).",
         min=0,
     ),
     no_cache: bool = typer.Option(
-        False, "--no-cache",
+        False,
+        "--no-cache",
         help="Force a fresh council run, ignoring any cached result.",
     ),
 ) -> None:
@@ -377,13 +404,15 @@ def analyze(
     console.print("[bold cyan]PQI — Polymarket Qualitative Intelligence[/bold cyan]\n")
 
     try:
-        groups = asyncio.run(fetch_events(
-            category=category,
-            resolve_within_hours=resolve_within,
-            starts_within_hours=starts_within,
-            live=live,
-            volume_floor_override=min_volume,
-        ))
+        groups = asyncio.run(
+            fetch_events(
+                category=category,
+                resolve_within_hours=resolve_within,
+                starts_within_hours=starts_within,
+                live=live,
+                volume_floor_override=min_volume,
+            )
+        )
     except CategoryNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
@@ -414,7 +443,9 @@ def analyze(
     if min_volume is not None:
         filter_desc.append(f"min_vol=${min_volume:,.0f}")
     if filter_desc:
-        console.print(f"[dim]Filters: {', '.join(filter_desc)} → {len(groups)} events found.[/dim]")
+        console.print(
+            f"[dim]Filters: {', '.join(filter_desc)} → {len(groups)} events found.[/dim]"
+        )
 
     groups = groups[:top_n]
 
@@ -431,7 +462,9 @@ def analyze(
 
     if other_siblings:
         console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
-        console.print(f"[cyan]This event has {len(group.markets)} markets total:[/cyan]")
+        console.print(
+            f"[cyan]This event has {len(group.markets)} markets total:[/cyan]"
+        )
         for i, s in enumerate(group.markets, 1):
             marker = " [bold green]← selected[/bold green]" if s.id == market.id else ""
             console.print(f"  {i}. {s.question[:60]}  (YES {s.yes_price:.0%}){marker}")
@@ -442,12 +475,15 @@ def analyze(
     display_council_result(result)
 
     from pqi.history import append_result
+
     append_result(result)
     console.print("[dim]Result saved to history.[/dim]")
 
     # Offer to analyze sibling markets (already known from EventGroup — no extra API call)
     if other_siblings:
-        console.print(f"\n[cyan]{len(other_siblings)} sibling market(s) available.[/cyan]")
+        console.print(
+            f"\n[cyan]{len(other_siblings)} sibling market(s) available.[/cyan]"
+        )
         raw = input("Analyze siblings too? [y/N]: ").strip().lower()
         if raw in ("y", "yes"):
             # Reuse the parent market's briefing — same event, same news.
@@ -456,9 +492,13 @@ def analyze(
             for sibling in other_siblings:
                 console.print(f"\n{'─' * 60}")
                 console.print(f"[bold]Analysing:[/bold] {sibling.question}\n")
-                sib_result = asyncio.run(_run_analysis(
-                    sibling, no_cache=no_cache, shared_briefing=shared,
-                ))
+                sib_result = asyncio.run(
+                    _run_analysis(
+                        sibling,
+                        no_cache=no_cache,
+                        shared_briefing=shared,
+                    )
+                )
                 display_council_result(sib_result)
                 append_result(sib_result)
                 console.print("[dim]Result saved to history.[/dim]")
@@ -534,6 +574,7 @@ app.add_typer(history_app, name="history")
 def _spawn_auto_sync() -> None:
     """Fire-and-forget subprocess that syncs unresolved entries past their end_date."""
     import subprocess, sys
+
     try:
         subprocess.Popen(
             [sys.executable, "-m", "pqi.main", "history", "sync", "--auto"],
@@ -560,11 +601,57 @@ def _outcome_glyph(kind: str) -> str:
     }.get(kind, "?")
 
 
+_OUTCOME_ALIASES = {
+    "correct_buy": "correct_buy", "buy": "correct_buy", "win": "correct_buy",
+    "wrong_buy": "wrong_buy", "wrong": "wrong_buy", "loss": "wrong_buy",
+    "missed_opportunity": "missed_opportunity", "miss": "missed_opportunity",
+    "missed": "missed_opportunity",
+    "correct_pass": "correct_pass", "pass": "correct_pass",
+    "voided": "voided", "void": "voided",
+    "unresolved": "unresolved", "pending": "unresolved",
+}
+
+_REC_ALIASES = {
+    "pass": {"PASS"},
+    "buy": {"BUY YES", "BUY NO"},
+    "buy_yes": {"BUY YES"}, "yes": {"BUY YES"},
+    "buy_no": {"BUY NO"}, "no": {"BUY NO"},
+}
+
+_CONF_ALIASES = {
+    "high": "HIGH", "h": "HIGH",
+    "medium": "MEDIUM", "med": "MEDIUM", "m": "MEDIUM",
+    "low": "LOW", "l": "LOW",
+}
+
+
 @history_app.command("list")
 def history_list(
     last_n: int = typer.Option(20, "--last", "-n", help="Number of entries per page."),
-    offset: int = typer.Option(0, "--offset", "-o", help="Skip this many of the most recent entries (paginate backwards)."),
-    no_auto_sync: bool = typer.Option(False, "--no-auto-sync", help="Skip background sync."),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        "-o",
+        help="Skip this many of the most recent entries (paginate backwards).",
+    ),
+    no_auto_sync: bool = typer.Option(
+        False, "--no-auto-sync", help="Skip background sync."
+    ),
+    show_all: bool = typer.Option(
+        False, "--all", "-a", help="Show all results without pagination"
+    ),
+    outcome_filter: Optional[str] = typer.Option(
+        None, "--outcome",
+        help="Filter by outcome: correct_buy|wrong_buy|miss|correct_pass|voided|unresolved",
+    ),
+    rec_filter: Optional[str] = typer.Option(
+        None, "--rec",
+        help="Filter by recommendation: pass|buy|buy_yes|buy_no",
+    ),
+    conf_filter: Optional[str] = typer.Option(
+        None, "--conf",
+        help="Filter by confidence level: high|medium|low",
+    ),
 ) -> None:
     """Overview table of past council runs."""
     from pqi.history import load_history
@@ -578,20 +665,72 @@ def history_list(
     if not no_auto_sync:
         _spawn_auto_sync()
 
-    total = len(entries)
-    # Pagination window: offset counts from the newest end.
-    end = total - offset
-    start = max(0, end - last_n)
-    if end <= 0 or start >= end:
-        console.print(f"[yellow]Offset {offset} is past the start of history ({total} entries).[/yellow]")
-        raise typer.Exit(0)
-    visible = entries[start:end]
-    # Absolute IDs are 1-based positions in the full history (oldest = 1).
-    start_id = start + 1
+    # Resolve filter values up front (loud failure on typo).
+    want_outcome: Optional[str] = None
+    if outcome_filter:
+        want_outcome = _OUTCOME_ALIASES.get(outcome_filter.lower())
+        if want_outcome is None:
+            console.print(f"[red]Unknown --outcome '{outcome_filter}'. Valid: {sorted(set(_OUTCOME_ALIASES))}[/red]")
+            raise typer.Exit(1)
 
-    title = f"PQI History (#{start_id}–{end} of {total})"
-    if offset > 0:
-        title += f" [offset {offset}]"
+    want_recs: Optional[set[str]] = None
+    if rec_filter:
+        want_recs = _REC_ALIASES.get(rec_filter.lower())
+        if want_recs is None:
+            console.print(f"[red]Unknown --rec '{rec_filter}'. Valid: {sorted(_REC_ALIASES)}[/red]")
+            raise typer.Exit(1)
+
+    want_conf: Optional[str] = None
+    if conf_filter:
+        want_conf = _CONF_ALIASES.get(conf_filter.lower())
+        if want_conf is None:
+            console.print(f"[red]Unknown --conf '{conf_filter}'. Valid: high|medium|low[/red]")
+            raise typer.Exit(1)
+
+    total = len(entries)
+
+    # Build the visible window FIRST (preserves stable absolute IDs)…
+    if show_all:
+        windowed = list(enumerate(entries, start=1))  # (abs_id, entry)
+        title = f"PQI History (all {total})"
+    else:
+        end = total - offset
+        start = max(0, end - last_n)
+        if end <= 0 or start >= end:
+            console.print(
+                f"[yellow]Offset {offset} is past the start of history ({total} entries).[/yellow]"
+            )
+            raise typer.Exit(0)
+        windowed = [(start + 1 + i, e) for i, e in enumerate(entries[start:end])]
+        title = f"PQI History (#{start + 1}–{end} of {total})"
+        if offset > 0:
+            title += f" [offset {offset}]"
+
+    # …then apply filters (absolute IDs survive).
+    def _matches(entry: dict) -> bool:
+        r = entry.get("result") or {}
+        if want_recs is not None and r.get("recommendation") not in want_recs:
+            return False
+        if want_conf is not None and r.get("confidence_level") != want_conf:
+            return False
+        if want_outcome is not None and classify_outcome(entry) != want_outcome:
+            return False
+        return True
+
+    filtered = [(i, e) for i, e in windowed if _matches(e)]
+
+    if not filtered:
+        active = [
+            f"outcome={outcome_filter}" if outcome_filter else None,
+            f"rec={rec_filter}" if rec_filter else None,
+            f"conf={conf_filter}" if conf_filter else None,
+        ]
+        active_str = ", ".join(x for x in active if x) or "(none)"
+        console.print(f"[yellow]No entries match filters: {active_str}[/yellow]")
+        raise typer.Exit(0)
+
+    if outcome_filter or rec_filter or conf_filter:
+        title += f"  [{len(filtered)} match]"
     table = Table(
         title=title,
         box=box.ROUNDED,
@@ -613,7 +752,7 @@ def history_list(
     table.add_column("Verdict", style="dim", max_width=44)
     table.add_column("When", style="dim", width=10)
 
-    for i, entry in enumerate(visible, start=start_id):
+    for i, entry in filtered:
         r = entry.get("result") or {}
         market = r.get("market") or {}
         rec = r.get("recommendation", "?")
@@ -641,7 +780,9 @@ def history_list(
 
         winning_side = (entry.get("resolution") or {}).get("winning_side")
         if lean in ("Y", "N") and winning_side in ("YES", "NO"):
-            lean_check = "[green]✓[/green]" if lean == winning_side[0] else "[red]✗[/red]"
+            lean_check = (
+                "[green]✓[/green]" if lean == winning_side[0] else "[red]✗[/red]"
+            )
         else:
             lean_check = "—"
 
@@ -657,7 +798,11 @@ def history_list(
         winner = (entry.get("resolution") or {}).get("winning_side") or "—"
         # Verdict tagline — use cached analysis if present, otherwise quick-compute
         analysis = entry.get("analysis") or signal_postmortem(entry)
-        tagline = analysis.get("summary", "")[:80] if not entry.get("legacy") else "[dim]legacy[/dim]"
+        tagline = (
+            analysis.get("summary", "")[:80]
+            if not entry.get("legacy")
+            else "[dim]legacy[/dim]"
+        )
 
         ts = (entry.get("timestamp") or "")[:10]
 
@@ -688,7 +833,10 @@ def history_list(
 
 @history_app.command("show")
 def history_show(
-    index: str = typer.Argument(..., help="Absolute ID from `history list` (# column, stable across pagination) or a run_id."),
+    index: str = typer.Argument(
+        ...,
+        help="Absolute ID from `history list` (# column, stable across pagination) or a run_id.",
+    ),
 ) -> None:
     """Detailed view of a single past run + per-agent breakdown + postmortem."""
     from pqi.history import load_history
@@ -737,12 +885,16 @@ def history_show(
             f"Resolved: [dim]{res.get('resolved_at', '?')}[/dim]"
         )
     else:
-        header_lines.append("[yellow]Unresolved — run `pqi history sync` to fetch outcome.[/yellow]")
+        header_lines.append(
+            "[yellow]Unresolved — run `pqi history sync` to fetch outcome.[/yellow]"
+        )
     console.print(Panel("\n".join(header_lines), border_style="cyan"))
 
     # Recommendation panel
     rec = r.get("recommendation", "?")
-    rec_color = "green" if rec == "BUY YES" else ("red" if rec == "BUY NO" else "yellow")
+    rec_color = (
+        "green" if rec == "BUY YES" else ("red" if rec == "BUY NO" else "yellow")
+    )
     rec_lines = [
         f"[{rec_color}]{rec}[/{rec_color}]   "
         f"signal: [bold]{r.get('signal_type') or '—'}[/bold]   "
@@ -756,7 +908,9 @@ def history_show(
         rec_lines.append(f"[bold]Expected ROI:[/bold] +{roi_val:.1%}")
     if r.get("pass_reason"):
         rec_lines.append(f"[dim]Pass reason:[/dim] {r['pass_reason']}")
-    console.print(Panel("\n".join(rec_lines), title="Recommendation", border_style=rec_color))
+    console.print(
+        Panel("\n".join(rec_lines), title="Recommendation", border_style=rec_color)
+    )
 
     # Per-agent verdict table
     verdicts = r.get("verdicts") or []
@@ -795,13 +949,21 @@ def history_show(
     # Postmortem panel
     pm = compute_and_persist_postmortem(entry)
     kind = pm.get("kind", "unresolved")
-    pm_color = {"correct_buy": "green", "wrong_buy": "red", "missed_opportunity": "yellow",
-                "correct_pass": "blue", "voided": "white", "unresolved": "dim"}.get(kind, "white")
-    console.print(Panel(
-        pm.get("summary", ""),
-        title=f"Postmortem — {kind}",
-        border_style=pm_color,
-    ))
+    pm_color = {
+        "correct_buy": "green",
+        "wrong_buy": "red",
+        "missed_opportunity": "yellow",
+        "correct_pass": "blue",
+        "voided": "white",
+        "unresolved": "dim",
+    }.get(kind, "white")
+    console.print(
+        Panel(
+            pm.get("summary", ""),
+            title=f"Postmortem — {kind}",
+            border_style=pm_color,
+        )
+    )
 
     # Briefing recap (if persisted)
     briefing = r.get("briefing")
@@ -817,13 +979,18 @@ def history_show(
             recap_lines.append("\n[bold red]Case for NO:[/bold red]")
             recap_lines.extend(f"  • {f}" for f in briefing["side_no_case"][:4])
         if recap_lines:
-            console.print(Panel("\n".join(recap_lines), title="Briefing recap", border_style="dim"))
+            console.print(
+                Panel(
+                    "\n".join(recap_lines), title="Briefing recap", border_style="dim"
+                )
+            )
 
 
 @history_app.command("sync")
 def history_sync(
     auto: bool = typer.Option(
-        False, "--auto",
+        False,
+        "--auto",
         help="Background mode: only sync entries past their end_date, no output.",
     ),
 ) -> None:
@@ -868,7 +1035,9 @@ def history_sync(
 
 @history_app.command("stats")
 def history_stats(
-    no_auto_sync: bool = typer.Option(False, "--no-auto-sync", help="Skip background sync."),
+    no_auto_sync: bool = typer.Option(
+        False, "--no-auto-sync", help="Skip background sync."
+    ),
 ) -> None:
     """Per-agent accuracy leaderboard across resolved history."""
     from pqi.history import load_history
@@ -886,14 +1055,50 @@ def history_stats(
     counts = Counter(classify_outcome(e) for e in entries)
     stats = agent_accuracy(entries)
 
+    # Council-level lean accuracy — same formula as `history list`'s Lean✓
+    # column, aggregated over ALL resolved entries (legacy + non-legacy).
+    # This is what makes the list view and stats view directly comparable.
+    council_lean_n = council_lean_hits = 0
+    for e in entries:
+        win = (e.get("resolution") or {}).get("winning_side")
+        if win not in ("YES", "NO"):
+            continue
+        cy = (e.get("result") or {}).get("final_score")
+        if cy is None:
+            continue
+        if 0.45 <= cy <= 0.55:
+            continue  # dead band
+        council_lean_n += 1
+        lean_yes = cy > 0.55
+        if (lean_yes and win == "YES") or (not lean_yes and win == "NO"):
+            council_lean_hits += 1
+    lean_pct_str = (
+        f"{council_lean_hits}/{council_lean_n} ({council_lean_hits / council_lean_n:.0%})"
+        if council_lean_n
+        else "n/a"
+    )
+
+    resolved_total = sum(
+        1 for e in entries
+        if (e.get("resolution") or {}).get("winning_side") in ("YES", "NO")
+    )
+    nonlegacy_resolved = sum(
+        1 for e in entries
+        if not e.get("legacy")
+        and (e.get("resolution") or {}).get("winning_side") in ("YES", "NO")
+    )
+
     summary = (
-        f"[bold]{len(entries)}[/bold] runs total   "
+        f"[bold]{len(entries)}[/bold] runs total  "
+        f"([dim]{resolved_total} resolved, {nonlegacy_resolved} non-legacy[/dim])\n"
         f"[green]{counts.get('correct_buy', 0)} correct buys[/green]   "
         f"[red]{counts.get('wrong_buy', 0)} wrong buys[/red]   "
         f"[yellow]{counts.get('missed_opportunity', 0)} missed[/yellow]   "
         f"[blue]{counts.get('correct_pass', 0)} correct passes[/blue]   "
         f"[dim]{counts.get('unresolved', 0)} unresolved   "
-        f"{counts.get('voided', 0)} voided[/dim]"
+        f"{counts.get('voided', 0)} voided[/dim]\n"
+        f"[bold]Council lean accuracy[/bold] (all resolved, dead band 0.45–0.55): "
+        f"[cyan]{lean_pct_str}[/cyan]"
     )
     console.print(Panel(summary, title="Council overview", border_style="cyan"))
 
@@ -912,7 +1117,9 @@ def history_stats(
     table.add_column("HiConf ✓", justify="right", style="green")
     table.add_column("HiConf ✗", justify="right", style="red")
 
-    sorted_stats = sorted(stats.items(), key=lambda kv: kv[1]["weighted_hit_rate"], reverse=True)
+    sorted_stats = sorted(
+        stats.items(), key=lambda kv: kv[1]["weighted_hit_rate"], reverse=True
+    )
 
     # Totals for the footer row — micro-averages weighted by sample counts.
     tot_n = 0
@@ -959,7 +1166,8 @@ def history_stats(
     # Macro-average across agents for weighted_hit_rate (no raw access).
     avg_wtd = (
         sum(s["weighted_hit_rate"] for _, s in sorted_stats) / len(sorted_stats)
-        if sorted_stats else 0.0
+        if sorted_stats
+        else 0.0
     )
     avg_hit = (tot_hits / tot_n) if tot_n else 0.0
     avg_brier = (tot_brier / tot_n) if tot_n else 0.0
@@ -970,9 +1178,13 @@ def history_stats(
     table.columns[1].footer = f"[bold]{tot_n}[/bold]"
     table.columns[2].footer = f"[bold]{avg_hit:.0%}[/bold]"
     table.columns[3].footer = f"[bold]{avg_wtd:.0%}[/bold]"
-    table.columns[4].footer = f"[bold]{avg_lean:.0%}[/bold]" if avg_lean is not None else "—"
+    table.columns[4].footer = (
+        f"[bold]{avg_lean:.0%}[/bold]" if avg_lean is not None else "—"
+    )
     table.columns[5].footer = f"[bold]{avg_brier:.3f}[/bold]"
-    table.columns[6].footer = f"[bold]{avg_hc:.0%}[/bold]" if avg_hc is not None else "—"
+    table.columns[6].footer = (
+        f"[bold]{avg_hc:.0%}[/bold]" if avg_hc is not None else "—"
+    )
     table.columns[7].footer = f"[bold]{tot_hc_hits}[/bold]"
     table.columns[8].footer = f"[bold]{tot_hc_misses}[/bold]"
 
