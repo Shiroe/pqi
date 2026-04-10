@@ -27,6 +27,46 @@ class MarketData(BaseModel):
     """Current market-implied probability of YES (0.0–1.0)."""
     volume_usd: float = Field(..., ge=0.0)
     category: str
+    clob_token_ids: list[str] = Field(default_factory=list)
+    """CLOB token IDs for YES and NO outcomes. Parsed from Gamma API clobTokenIds field."""
+
+
+class PricePoint(BaseModel):
+    """A single price observation from the CLOB price history."""
+
+    timestamp: datetime
+    price: float = Field(..., ge=0.0, le=1.0)
+
+
+class SharpMove(BaseModel):
+    """A single-hour price move exceeding the sharp-move threshold."""
+
+    timestamp: datetime
+    delta_pp: float
+    """Signed change in percentage points."""
+
+
+class PriceHistory(BaseModel):
+    """Computed trend metrics from CLOB hourly price data."""
+
+    token_id: str
+    """CLOB token ID used to fetch this history (YES token)."""
+    data_points: int
+    """Number of hourly observations retrieved."""
+    weighted_avg: float = Field(..., ge=0.0, le=1.0)
+    """Exponential-decay weighted average price (half-life = 2 days)."""
+    change_1w_pp: float
+    """Net price change over the full retrieval window in percentage points."""
+    change_24h_pp: float
+    """Net price change over the last 24 hours in percentage points."""
+    volatility_24h: float
+    """Std dev of hourly price deltas over the last 24 hours (pp/hr)."""
+    direction: Literal["RISING", "FALLING", "STABLE"]
+    """Trend direction based on linear regression slope (±2pp threshold)."""
+    sharp_moves: list[SharpMove] = Field(default_factory=list)
+    """Up to 3 most recent single-hour moves exceeding 5pp."""
+    fetched_at: datetime
+    """UTC timestamp when the CLOB data was fetched."""
 
 
 class EventGroup(BaseModel):
@@ -83,6 +123,8 @@ class BriefingDocument(BaseModel):
     """Contextual factors: format, stakes, head-to-head, venue, tournament stage."""
     data_freshness: datetime
     """UTC timestamp of when the briefing was assembled."""
+    price_history: PriceHistory | None = None
+    """CLOB price history with trend metrics. None if fetch failed or unavailable."""
 
 
 class AgentVerdict(BaseModel):
@@ -125,7 +167,9 @@ class CouncilResult(BaseModel):
     """no_score − no_price.  Positive = underpriced NO."""
     recommendation: Literal["BUY YES", "BUY NO", "PASS"]
     confidence_level: Literal["HIGH", "MEDIUM", "LOW"]
-    signal_type: Literal["HIGH VALUE", "MODERATE VALUE", "LOW MARGIN", "CONTRARIAN"] | None = None
+    signal_type: (
+        Literal["HIGH VALUE", "MODERATE VALUE", "LOW MARGIN", "CONTRARIAN"] | None
+    ) = None
     """Conviction label for BUY recommendations. None when PASS."""
     pass_reason: str = ""
     """Why the recommendation is PASS (empty for BUY YES / BUY NO)."""
@@ -177,6 +221,7 @@ class CouncilResult(BaseModel):
 
         # Step 1 — two-sided confidence-weighted probabilities
         weights = agent_weights or {}
+
         def _w(v: AgentVerdict) -> float:
             return weights.get(v.agent_name, 1.0)
 
@@ -232,7 +277,9 @@ class CouncilResult(BaseModel):
 
         # Apply gates
         recommendation: Literal["BUY YES", "BUY NO", "PASS"]
-        signal_type: Literal["HIGH VALUE", "MODERATE VALUE", "LOW MARGIN", "CONTRARIAN"] | None
+        signal_type: (
+            Literal["HIGH VALUE", "MODERATE VALUE", "LOW MARGIN", "CONTRARIAN"] | None
+        )
         pass_reason = ""
 
         if side_price < min_tradeable_price:
@@ -253,9 +300,11 @@ class CouncilResult(BaseModel):
             )
         elif is_contrarian:
             # Contrarian: stricter gates across the board
-            if (council_favored_prob >= min_contrarian_probability
-                    and side_conf >= min_contrarian_confidence
-                    and expected_roi >= min_contrarian_roi):
+            if (
+                council_favored_prob >= min_contrarian_probability
+                and side_conf >= min_contrarian_confidence
+                and expected_roi >= min_contrarian_roi
+            ):
                 recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
                 signal_type = "CONTRARIAN"
             else:
@@ -278,9 +327,11 @@ class CouncilResult(BaseModel):
                         f"< {min_contrarian_roi:.0%} threshold"
                     )
                 pass_reason = "; ".join(reasons)
-        elif (council_favored_prob >= min_council_probability
-                and side_conf >= confidence_high
-                and expected_roi >= min_expected_roi):
+        elif (
+            council_favored_prob >= min_council_probability
+            and side_conf >= confidence_high
+            and expected_roi >= min_expected_roi
+        ):
             # Market-aligned: standard gates
             recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
             # Signal type based on max ROI bands
@@ -352,7 +403,9 @@ if __name__ == "__main__":
         volume_usd=450_000.0,
         category="technology",
     )
-    print(f"  id={market.id}  yes_price={market.yes_price}  volume=${market.volume_usd:,.0f}")
+    print(
+        f"  id={market.id}  yes_price={market.yes_price}  volume=${market.volume_usd:,.0f}"
+    )
 
     # Boundary: yes_price must be 0.0–1.0
     try:
@@ -371,32 +424,104 @@ if __name__ == "__main__":
     print("\n--- BriefingDocument ---")
     briefing = BriefingDocument(
         market=market,
-        key_facts=["Starship IFT-4 completed successfully in June 2024.", "FAA license pending for next flight."],
+        key_facts=[
+            "Starship IFT-4 completed successfully in June 2024.",
+            "FAA license pending for next flight.",
+        ],
         news_summary="SpaceX is on track for an orbital attempt in Q1 2025 pending FAA clearance.",
-        side_yes_case=["IFT-4 demonstrated full ascent profile.", "SpaceX has accelerating launch cadence."],
-        side_no_case=["FAA licensing delays common in 2024.", "Orbital attempt requires new trajectory approval."],
-        key_context=["SpaceX targeting Q1 2025 window.", "FAA regulatory review in progress."],
+        side_yes_case=[
+            "IFT-4 demonstrated full ascent profile.",
+            "SpaceX has accelerating launch cadence.",
+        ],
+        side_no_case=[
+            "FAA licensing delays common in 2024.",
+            "Orbital attempt requires new trajectory approval.",
+        ],
+        key_context=[
+            "SpaceX targeting Q1 2025 window.",
+            "FAA regulatory review in progress.",
+        ],
         data_freshness=datetime.now(timezone.utc),
     )
-    print(f"  market.id={briefing.market.id}  facts={len(briefing.key_facts)}  freshness={briefing.data_freshness.isoformat()[:10]}")
+    print(
+        f"  market.id={briefing.market.id}  facts={len(briefing.key_facts)}  freshness={briefing.data_freshness.isoformat()[:10]}"
+    )
 
     # ---- AgentVerdict -------------------------------------------------------
     print("\n--- AgentVerdict ---")
     verdicts = [
-        AgentVerdict(agent_name="The Bull",        probability=0.80, confidence_yes=0.75, confidence_no=0.50, rationale="Strong momentum.", key_factor="IFT-4 success"),
-        AgentVerdict(agent_name="The Bear",        probability=0.40, confidence_yes=0.60, confidence_no=0.70, rationale="FAA delays likely.", key_factor="Regulatory risk"),
-        AgentVerdict(agent_name="The Rules Lawyer",probability=0.65, confidence_yes=0.80, confidence_no=0.75, rationale="Criteria clear.", key_factor="Criteria specificity"),
-        AgentVerdict(agent_name="The Contrarian",  probability=0.30, confidence_yes=0.40, confidence_no=0.50, rationale="Black swan possible.", key_factor="Unexpected failure"),
-        AgentVerdict(agent_name="The Statistician",probability=0.55, confidence_yes=0.65, confidence_no=0.55, rationale="Base rate ~50%.", key_factor="Historical orbital rates"),
-        AgentVerdict(agent_name="The Sentiment Analyst", probability=0.70, confidence_yes=0.60, confidence_no=0.45, rationale="Market under-pricing.", key_factor="Crowd apathy"),
-        AgentVerdict(agent_name="The Domain Specialist",  probability=0.72, confidence_yes=0.70, confidence_no=0.60, rationale="Engineering on track.", key_factor="Raptor engine reliability"),
+        AgentVerdict(
+            agent_name="The Bull",
+            probability=0.80,
+            confidence_yes=0.75,
+            confidence_no=0.50,
+            rationale="Strong momentum.",
+            key_factor="IFT-4 success",
+        ),
+        AgentVerdict(
+            agent_name="The Bear",
+            probability=0.40,
+            confidence_yes=0.60,
+            confidence_no=0.70,
+            rationale="FAA delays likely.",
+            key_factor="Regulatory risk",
+        ),
+        AgentVerdict(
+            agent_name="The Rules Lawyer",
+            probability=0.65,
+            confidence_yes=0.80,
+            confidence_no=0.75,
+            rationale="Criteria clear.",
+            key_factor="Criteria specificity",
+        ),
+        AgentVerdict(
+            agent_name="The Contrarian",
+            probability=0.30,
+            confidence_yes=0.40,
+            confidence_no=0.50,
+            rationale="Black swan possible.",
+            key_factor="Unexpected failure",
+        ),
+        AgentVerdict(
+            agent_name="The Statistician",
+            probability=0.55,
+            confidence_yes=0.65,
+            confidence_no=0.55,
+            rationale="Base rate ~50%.",
+            key_factor="Historical orbital rates",
+        ),
+        AgentVerdict(
+            agent_name="The Sentiment Analyst",
+            probability=0.70,
+            confidence_yes=0.60,
+            confidence_no=0.45,
+            rationale="Market under-pricing.",
+            key_factor="Crowd apathy",
+        ),
+        AgentVerdict(
+            agent_name="The Domain Specialist",
+            probability=0.72,
+            confidence_yes=0.70,
+            confidence_no=0.60,
+            rationale="Engineering on track.",
+            key_factor="Raptor engine reliability",
+        ),
     ]
     for v in verdicts:
-        print(f"  {v.agent_name:<28}  p={v.probability:.2f}  cy={v.confidence_yes:.2f}  cn={v.confidence_no:.2f}")
+        print(
+            f"  {v.agent_name:<28}  p={v.probability:.2f}  cy={v.confidence_yes:.2f}  cn={v.confidence_no:.2f}"
+        )
 
     # Boundary: probability outside [0,1]
     try:
-        AgentVerdict(agent_name="X", probability=1.1, confidence_yes=0.5, confidence_no=0.5, rationale="...", key_factor="x")
+        AgentVerdict(
+            agent_name="X",
+            probability=1.1,
+            confidence_yes=0.5,
+            confidence_no=0.5,
+            rationale="...",
+            key_factor="x",
+        )
         raise AssertionError("Should have raised ValidationError for probability > 1.0")
     except Exception as e:
         print(f"  ✓ probability > 1.0 rejected: {type(e).__name__}")
@@ -417,7 +542,9 @@ if __name__ == "__main__":
     den = sum(v.confidence_yes for v in verdicts)
     expected_score = num / den
     assert abs(result.final_score - expected_score) < 1e-9, "final_score mismatch"
-    assert abs(result.edge - (expected_score - market.yes_price)) < 1e-9, "edge mismatch"
+    assert abs(result.edge - (expected_score - market.yes_price)) < 1e-9, (
+        "edge mismatch"
+    )
     print("  ✓ final_score and edge match manual calculation")
 
     # ---- Scenario tests for probability-first logic ----------------------
@@ -427,9 +554,12 @@ if __name__ == "__main__":
         """Helper: create 7 uniform verdicts for scenario testing."""
         return [
             AgentVerdict(
-                agent_name=f"Agent {i}", probability=prob,
-                confidence_yes=cy, confidence_no=cn,
-                rationale="Test.", key_factor="Test",
+                agent_name=f"Agent {i}",
+                probability=prob,
+                confidence_yes=cy,
+                confidence_no=cn,
+                rationale="Test.",
+                key_factor="Test",
             )
             for i in range(7)
         ]
@@ -437,63 +567,95 @@ if __name__ == "__main__":
     # Scenario 1: Market-aligned STRONG — cheap side, high ROI band (≥50%)
     # Market YES=0.55, Council YES≈0.75 → side_price 0.55, max ROI = 81.8%
     m1 = MarketData(**{**market.model_dump(), "yes_price": 0.55})
-    r1 = CouncilResult.from_council_verdicts(market=m1, verdicts=_make_verdicts(0.75, 0.80, 0.60))
-    print(f"  S1 (STRONG):      rec={r1.recommendation:<10} signal={r1.signal_type:<12} "
-          f"council_yes={r1.final_score:.0%} price={m1.yes_price:.0%} roi={r1.expected_roi:.1%}")
+    r1 = CouncilResult.from_council_verdicts(
+        market=m1, verdicts=_make_verdicts(0.75, 0.80, 0.60)
+    )
+    print(
+        f"  S1 (STRONG):      rec={r1.recommendation:<10} signal={r1.signal_type:<12} "
+        f"council_yes={r1.final_score:.0%} price={m1.yes_price:.0%} roi={r1.expected_roi:.1%}"
+    )
     assert r1.recommendation == "BUY YES" and r1.signal_type == "HIGH VALUE"
 
     # Scenario 2: Market-aligned CONFIRMED — mid-price, ROI 25%–50%
     # Market NO=0.72 (yes=0.28), Council NO≈0.72 → side_price 0.72, ROI = 38.9%
     m2 = MarketData(**{**market.model_dump(), "yes_price": 0.28})
-    r2 = CouncilResult.from_council_verdicts(market=m2, verdicts=_make_verdicts(0.28, 0.50, 0.70))
-    print(f"  S2 (CONFIRMED):   rec={r2.recommendation:<10} signal={r2.signal_type:<12} "
-          f"council_no={r2.no_score:.0%} price={1-m2.yes_price:.0%} roi={r2.expected_roi:.1%}")
+    r2 = CouncilResult.from_council_verdicts(
+        market=m2, verdicts=_make_verdicts(0.28, 0.50, 0.70)
+    )
+    print(
+        f"  S2 (CONFIRMED):   rec={r2.recommendation:<10} signal={r2.signal_type:<12} "
+        f"council_no={r2.no_score:.0%} price={1 - m2.yes_price:.0%} roi={r2.expected_roi:.1%}"
+    )
     assert r2.recommendation == "BUY NO" and r2.signal_type == "MODERATE VALUE"
 
     # Scenario 3: Market-aligned CAUTIOUS — pricey side, ROI 15%–25%
     # Market NO=0.82 (yes=0.18), Council NO≈0.75 → side_price 0.82, ROI = 22.0%
     m3 = MarketData(**{**market.model_dump(), "yes_price": 0.18})
-    r3 = CouncilResult.from_council_verdicts(market=m3, verdicts=_make_verdicts(0.25, 0.45, 0.70))
-    print(f"  S3 (CAUTIOUS):    rec={r3.recommendation:<10} signal={r3.signal_type:<12} "
-          f"council_no={r3.no_score:.0%} price={1-m3.yes_price:.0%} roi={r3.expected_roi:.1%}")
+    r3 = CouncilResult.from_council_verdicts(
+        market=m3, verdicts=_make_verdicts(0.25, 0.45, 0.70)
+    )
+    print(
+        f"  S3 (CAUTIOUS):    rec={r3.recommendation:<10} signal={r3.signal_type:<12} "
+        f"council_no={r3.no_score:.0%} price={1 - m3.yes_price:.0%} roi={r3.expected_roi:.1%}"
+    )
     assert r3.recommendation == "BUY NO" and r3.signal_type == "LOW MARGIN"
 
     # Scenario 4: Contrarian — council goes against market, strict criteria met
     # Market: NO=80% (yes=20%), Council: YES≈72% with high confidence
     m4 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
-    r4 = CouncilResult.from_council_verdicts(market=m4, verdicts=_make_verdicts(0.72, 0.85, 0.50))
-    print(f"  S4 (CONTRARIAN):  rec={r4.recommendation:<10} signal={r4.signal_type:<12} "
-          f"council_yes={r4.final_score:.0%} market_yes={m4.yes_price:.0%}")
+    r4 = CouncilResult.from_council_verdicts(
+        market=m4, verdicts=_make_verdicts(0.72, 0.85, 0.50)
+    )
+    print(
+        f"  S4 (CONTRARIAN):  rec={r4.recommendation:<10} signal={r4.signal_type:<12} "
+        f"council_yes={r4.final_score:.0%} market_yes={m4.yes_price:.0%}"
+    )
     assert r4.recommendation == "BUY YES" and r4.signal_type == "CONTRARIAN"
 
     # Scenario 5: PASS — council near 50/50
     m5 = MarketData(**{**market.model_dump(), "yes_price": 0.60})
-    r5 = CouncilResult.from_council_verdicts(market=m5, verdicts=_make_verdicts(0.52, 0.70, 0.70))
-    print(f"  S5 (PASS 50/50):  rec={r5.recommendation:<10} signal={str(r5.signal_type):<12} "
-          f"council_yes={r5.final_score:.0%} reason={r5.pass_reason[:50]}")
+    r5 = CouncilResult.from_council_verdicts(
+        market=m5, verdicts=_make_verdicts(0.52, 0.70, 0.70)
+    )
+    print(
+        f"  S5 (PASS 50/50):  rec={r5.recommendation:<10} signal={str(r5.signal_type):<12} "
+        f"council_yes={r5.final_score:.0%} reason={r5.pass_reason[:50]}"
+    )
     assert r5.recommendation == "PASS"
 
     # Scenario 6: PASS — contrarian but doesn't meet strict criteria
     m6 = MarketData(**{**market.model_dump(), "yes_price": 0.20})
-    r6 = CouncilResult.from_council_verdicts(market=m6, verdicts=_make_verdicts(0.62, 0.65, 0.50))
-    print(f"  S6 (PASS contra): rec={r6.recommendation:<10} signal={str(r6.signal_type):<12} "
-          f"council_yes={r6.final_score:.0%} reason={r6.pass_reason[:60]}")
+    r6 = CouncilResult.from_council_verdicts(
+        market=m6, verdicts=_make_verdicts(0.62, 0.65, 0.50)
+    )
+    print(
+        f"  S6 (PASS contra): rec={r6.recommendation:<10} signal={str(r6.signal_type):<12} "
+        f"council_yes={r6.final_score:.0%} reason={r6.pass_reason[:60]}"
+    )
     assert r6.recommendation == "PASS"
 
     # Scenario 7: PASS — price ceiling. Side priced above MAX_TRADEABLE_PRICE.
     # Market YES=0.95, Council YES≈0.95 → side_price 0.95 > 0.90 → PASS
     m7 = MarketData(**{**market.model_dump(), "yes_price": 0.95})
-    r7 = CouncilResult.from_council_verdicts(market=m7, verdicts=_make_verdicts(0.95, 0.90, 0.40))
-    print(f"  S7 (PASS ceil):   rec={r7.recommendation:<10} signal={str(r7.signal_type):<12} "
-          f"price={m7.yes_price:.0%} reason={r7.pass_reason[:60]}")
+    r7 = CouncilResult.from_council_verdicts(
+        market=m7, verdicts=_make_verdicts(0.95, 0.90, 0.40)
+    )
+    print(
+        f"  S7 (PASS ceil):   rec={r7.recommendation:<10} signal={str(r7.signal_type):<12} "
+        f"price={m7.yes_price:.0%} reason={r7.pass_reason[:60]}"
+    )
     assert r7.recommendation == "PASS" and "too high" in r7.pass_reason
 
     # Scenario 8: PASS — ROI gate. Market-aligned with conviction but side too expensive.
     # Market YES=0.88, Council YES≈0.75 → side_price 0.88, ROI = 13.6% < 15% → PASS
     m8 = MarketData(**{**market.model_dump(), "yes_price": 0.88})
-    r8 = CouncilResult.from_council_verdicts(market=m8, verdicts=_make_verdicts(0.75, 0.80, 0.50))
-    print(f"  S8 (PASS ROI):    rec={r8.recommendation:<10} signal={str(r8.signal_type):<12} "
-          f"council_yes={r8.final_score:.0%} price={m8.yes_price:.0%} reason={r8.pass_reason[:60]}")
+    r8 = CouncilResult.from_council_verdicts(
+        market=m8, verdicts=_make_verdicts(0.75, 0.80, 0.50)
+    )
+    print(
+        f"  S8 (PASS ROI):    rec={r8.recommendation:<10} signal={str(r8.signal_type):<12} "
+        f"council_yes={r8.final_score:.0%} price={m8.yes_price:.0%} reason={r8.pass_reason[:60]}"
+    )
     assert r8.recommendation == "PASS" and "ROI too low" in r8.pass_reason
 
     print("  ✓ All 8 scenarios passed")
@@ -508,12 +670,16 @@ if __name__ == "__main__":
     # Invalid recommendation literal — Pydantic should reject
     try:
         CouncilResult(
-            market=market, verdicts=verdicts,
-            final_score=0.7, edge=0.08,
-            recommendation="YOLO",   # type: ignore[arg-type]
+            market=market,
+            verdicts=verdicts,
+            final_score=0.7,
+            edge=0.08,
+            recommendation="YOLO",  # type: ignore[arg-type]
             confidence_level="HIGH",
         )
-        raise AssertionError("Should have raised ValidationError for bad recommendation")
+        raise AssertionError(
+            "Should have raised ValidationError for bad recommendation"
+        )
     except Exception as e:
         print(f"  ✓ Invalid recommendation rejected: {type(e).__name__}")
 

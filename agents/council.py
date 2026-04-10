@@ -37,18 +37,19 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
 # The first key found in the parsed JSON wins.
 _KEY_FACTOR_FIELDS: dict[str, list[str]] = {
     "rules_lawyer": ["key_technical_risk"],
-    "bull":         ["primary_catalyst"],
-    "bear":         ["primary_upset_factor"],
+    "bull": ["primary_catalyst"],
+    "bear": ["primary_upset_factor"],
     "statistician": ["historical_baseline"],
-    "sentiment":    ["market_vibe"],
-    "specialist":   ["technical_nuance", "domain_identified"],
-    "contrarian":   ["black_swan_event"],
+    "sentiment": ["market_vibe"],
+    "specialist": ["technical_nuance", "domain_identified"],
+    "contrarian": ["black_swan_event"],
 }
 
 
 # ---------------------------------------------------------------------------
 # Message builders
 # ---------------------------------------------------------------------------
+
 
 def _compute_event_timing(end_date: datetime) -> str:
     """
@@ -117,7 +118,7 @@ def _extract_outcome_labels(question: str, resolution_criteria: str) -> str:
         # Strip common prefixes like "Will", "Valorant:", etc.
         for prefix in ["Will ", "Can ", "Does "]:
             if entity_a.startswith(prefix):
-                entity_a = entity_a[len(prefix):]
+                entity_a = entity_a[len(prefix) :]
         # Strip category prefixes like "Valorant: "
         if ": " in entity_a:
             entity_a = entity_a.split(": ", 1)[1]
@@ -141,9 +142,9 @@ def _format_briefing(briefing: BriefingDocument) -> str:
     Used as the body of the user message for every agent.
     """
     m = briefing.market
-    facts_block   = "\n".join(f"- {f}" for f in briefing.key_facts) or "- (none)"
-    yes_block     = "\n".join(f"- {f}" for f in briefing.side_yes_case) or "- (none)"
-    no_block      = "\n".join(f"- {f}" for f in briefing.side_no_case) or "- (none)"
+    facts_block = "\n".join(f"- {f}" for f in briefing.key_facts) or "- (none)"
+    yes_block = "\n".join(f"- {f}" for f in briefing.side_yes_case) or "- (none)"
+    no_block = "\n".join(f"- {f}" for f in briefing.side_no_case) or "- (none)"
     context_block = "\n".join(f"- {f}" for f in briefing.key_context) or "- (none)"
 
     no_price = 1.0 - m.yes_price
@@ -151,6 +152,25 @@ def _format_briefing(briefing: BriefingDocument) -> str:
 
     # Extract outcome labels from resolution criteria for explicit clarity
     outcome_labels = _extract_outcome_labels(m.question, m.resolution_criteria)
+
+    # Price history block (conditional — only if CLOB data was fetched)
+    price_history_block = ""
+    if briefing.price_history is not None:
+        ph = briefing.price_history
+        lines = [
+            f"\nMARKET PRICE HISTORY (last {config.PRICE_HISTORY_INTERVAL}, hourly):",
+            f"  Weighted Avg (EMA): YES = {ph.weighted_avg:.0%}",
+            f"  7-Day Change:       {ph.change_1w_pp:+.1f}pp ({ph.direction})",
+            f"  24-Hour Change:     {ph.change_24h_pp:+.1f}pp",
+            f"  24-Hour Volatility: {ph.volatility_24h:.1f}pp/hr",
+        ]
+        if ph.sharp_moves:
+            moves_str = "; ".join(
+                f"{sm.timestamp.strftime('%b %d %H:%M UTC')} {sm.delta_pp:+.1f}pp"
+                for sm in ph.sharp_moves
+            )
+            lines.append(f"  Sharp Moves:        {moves_str}")
+        price_history_block = "\n".join(lines) + "\n"
 
     return (
         f"MARKET QUESTION: {m.question}\n"
@@ -160,6 +180,7 @@ def _format_briefing(briefing: BriefingDocument) -> str:
         f"CATEGORY: {m.category}\n"
         f"END DATE: {m.end_date.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"{timing_block}\n"
+        f"{price_history_block}"
         f"VOLUME (USD): ${m.volume_usd:,.0f}\n"
         f"\nRESOLUTION CRITERIA:\n{m.resolution_criteria}\n"
         f"\nKEY FACTS:\n{facts_block}\n"
@@ -238,6 +259,7 @@ def _build_user_message(briefing: BriefingDocument, agent_key: str) -> str:
 # Response parser
 # ---------------------------------------------------------------------------
 
+
 def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
     """
     Parse an AgentVerdict from a raw LLM response.
@@ -275,9 +297,15 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
         elif "confidence_level" in data:
             conf_yes_raw = int(data["confidence_level"])
             conf_no_raw = conf_yes_raw
-            logger.debug("[%s] Legacy confidence_level fallback → both sides = %d", agent_key, conf_yes_raw)
+            logger.debug(
+                "[%s] Legacy confidence_level fallback → both sides = %d",
+                agent_key,
+                conf_yes_raw,
+            )
         else:
-            raise KeyError("Neither confidence_yes/confidence_no nor confidence_level found")
+            raise KeyError(
+                "Neither confidence_yes/confidence_no nor confidence_level found"
+            )
 
         confidence_yes = max(0.0, min(1.0, conf_yes_raw / 100))
         confidence_no = max(0.0, min(1.0, conf_no_raw / 100))
@@ -354,9 +382,9 @@ async def _run_single_agent(
     Returns None only after all retries are exhausted.
     """
     system_prompt = AGENT_PERSONAS[agent_key]
-    user_msg      = _build_user_message(briefing, agent_key)
-    max_retries   = config.AGENT_MAX_RETRIES
-    max_backoff   = 30.0  # seconds cap
+    user_msg = _build_user_message(briefing, agent_key)
+    max_retries = config.AGENT_MAX_RETRIES
+    max_backoff = 30.0  # seconds cap
 
     for attempt in range(1 + max_retries):
         # --- LLM call ---
@@ -365,16 +393,22 @@ async def _run_single_agent(
             logger.debug("[%s] raw response length=%d", agent_key, len(raw))
         except Exception as exc:
             if attempt < max_retries:
-                delay = min(2 ** attempt, max_backoff)
+                delay = min(2**attempt, max_backoff)
                 logger.warning(
                     "[%s] LLM call failed (attempt %d/%d): %s — retrying in %.0fs",
-                    agent_key, attempt + 1, 1 + max_retries, exc, delay,
+                    agent_key,
+                    attempt + 1,
+                    1 + max_retries,
+                    exc,
+                    delay,
                 )
                 await asyncio.sleep(delay)
                 continue
             logger.error(
                 "[%s] LLM call failed after %d attempts: %s — agent dropped",
-                agent_key, 1 + max_retries, exc,
+                agent_key,
+                1 + max_retries,
+                exc,
             )
             return None
 
@@ -383,22 +417,29 @@ async def _run_single_agent(
         if verdict is not None:
             logger.debug(
                 "[%s] verdict: p=%.2f cy=%.2f cn=%.2f",
-                agent_key, verdict.probability, verdict.confidence_yes, verdict.confidence_no,
+                agent_key,
+                verdict.probability,
+                verdict.confidence_yes,
+                verdict.confidence_no,
             )
             return verdict
 
         # Parse failed — retry with backoff
         if attempt < max_retries:
-            delay = min(2 ** attempt, max_backoff)
+            delay = min(2**attempt, max_backoff)
             logger.warning(
                 "[%s] Parse failed (attempt %d/%d) — retrying in %.0fs",
-                agent_key, attempt + 1, 1 + max_retries, delay,
+                agent_key,
+                attempt + 1,
+                1 + max_retries,
+                delay,
             )
             await asyncio.sleep(delay)
         else:
             logger.error(
                 "[%s] Parse failed after %d attempts — agent dropped",
-                agent_key, 1 + max_retries,
+                agent_key,
+                1 + max_retries,
             )
 
     return None
@@ -407,6 +448,7 @@ async def _run_single_agent(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 async def run_council(briefing: BriefingDocument) -> list[AgentVerdict]:
     """
@@ -419,7 +461,8 @@ async def run_council(briefing: BriefingDocument) -> list[AgentVerdict]:
     min_verdicts = config.MIN_COUNCIL_VERDICTS
     logger.info(
         "Council starting for market: %s (min verdicts: %d/7)",
-        briefing.market.question[:60], min_verdicts,
+        briefing.market.question[:60],
+        min_verdicts,
     )
 
     coroutines = [_run_single_agent(key, briefing) for key in AGENT_NAMES]
@@ -442,7 +485,9 @@ async def run_council(briefing: BriefingDocument) -> list[AgentVerdict]:
     if failed > 0:
         logger.warning(
             "%d/7 agents failed but quorum met (%d ≥ %d) — proceeding",
-            failed, len(verdicts), min_verdicts,
+            failed,
+            len(verdicts),
+            min_verdicts,
         )
 
     logger.info("Council complete: %d/7 agents returned verdicts", len(verdicts))
@@ -526,15 +571,13 @@ if __name__ == "__main__":
                 f" {v.confidence_no:>5.0%}  {v.key_factor[:40]}"
             )
 
-        assert len(verdicts) >= 5, (
-            f"Expected at least 5 verdicts, got {len(verdicts)}"
-        )
+        assert len(verdicts) >= 5, f"Expected at least 5 verdicts, got {len(verdicts)}"
         for v in verdicts:
             assert 0.0 <= v.probability <= 1.0, f"probability out of range: {v}"
-            assert 0.0 <= v.confidence_yes  <= 1.0, f"confidence_yes out of range: {v}"
-            assert 0.0 <= v.confidence_no   <= 1.0, f"confidence_no out of range: {v}"
+            assert 0.0 <= v.confidence_yes <= 1.0, f"confidence_yes out of range: {v}"
+            assert 0.0 <= v.confidence_no <= 1.0, f"confidence_no out of range: {v}"
             assert v.agent_name, "agent_name is empty"
-            assert v.rationale,  "rationale is empty"
+            assert v.rationale, "rationale is empty"
             assert v.key_factor, "key_factor is empty"
 
         print(f"\n✓ council.py smoke test complete — {len(verdicts)}/7 verdicts.")

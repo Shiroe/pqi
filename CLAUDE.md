@@ -17,18 +17,19 @@ Polymarket Gamma API → Synthesizer Agent (Briefing Doc) → Council of Seven
 
 ## Tech Stack
 
-| Layer        | Choice                 | Why                                     |
-| ------------ | ---------------------- | --------------------------------------- |
-| Language     | Python 3.11+           | LLM ecosystem, dev speed                |
-| Package mgr  | `uv` (or pip)          | Fast, lockfile-based                    |
-| CLI          | `typer` + `rich`       | Beautiful terminal output               |
-| LLM client   | Abstracted (see below) | Swap Ollama ↔ Anthropic via env var    |
-| Dev LLM      | Ollama `llama3.1:8b`   | Free, local, RTX 2070 Super             |
-| Prod LLM     | `claude-haiku-3-5`     | ~$0.015/council run, stays under $20/mo |
-| Market data  | Polymarket Gamma API   | Free, public, no auth needed            |
-| News/search  | Tavily API             | Free tier 1k searches/mo                |
-| Validation   | Pydantic v2            | All inter-module data                   |
-| DB (Phase 2) | SQLite via `aiosqlite` | Local price history cache               |
+| Layer         | Choice                 | Why                                     |
+| ------------- | ---------------------- | --------------------------------------- |
+| Language      | Python 3.11+           | LLM ecosystem, dev speed                |
+| Package mgr   | `uv` (or pip)          | Fast, lockfile-based                    |
+| CLI           | `typer` + `rich`       | Beautiful terminal output               |
+| LLM client    | Abstracted (see below) | Swap Ollama ↔ Anthropic via env var    |
+| Dev LLM       | Ollama `llama3.1:8b`   | Free, local, RTX 2070 Super             |
+| Prod LLM      | `claude-haiku-3-5`     | ~$0.015/council run, stays under $20/mo |
+| Market data   | Polymarket Gamma API   | Free, public, no auth needed            |
+| Price history | Polymarket CLOB API    | Free, public, no auth for read-only     |
+| News/search   | Tavily API             | Free tier 1k searches/mo                |
+| Validation    | Pydantic v2            | All inter-module data                   |
+| DB (Phase 2)  | SQLite via `aiosqlite` | Local price history cache               |
 
 ---
 
@@ -55,16 +56,20 @@ Default model per backend set in `pqi/config.py`.
 
 [main.py] User runs: python -m pqi.main analyze
 [polymarket.py] Fetch top N active markets from Gamma API
-→ returns List[MarketData]
+→ returns List[MarketData] (includes clob_token_ids from clobTokenIds field)
 [main.py] Display market list → user picks one (or top by volume)
 [synthesizer.py] Given MarketData, run Tavily searches on the event
 → produces BriefingDocument (structured Pydantic model)
+[clob.py] Fetch YES-token price history from CLOB API (1w hourly)
+→ compute PriceHistory: weighted avg, direction, volatility, sharp moves
+→ inject into BriefingDocument.price_history (non-fatal; None if unavailable)
 [council.py] Send BriefingDocument to ALL 7 agents in parallel (asyncio)
+→ agents see MARKET PRICE HISTORY block with trend data
 → each returns AgentVerdict(probability, confidence, rationale)
 [scoring.py] Apply confidence-weighted formula:
 score = Σ(prob × conf) / Σ(conf)
 → returns CouncilResult with final_score + ranked verdicts
-[main.py] Rich table printout of recommendation
+[main.py] Rich table printout of recommendation (includes 7d trend line)
 
 ---
 
@@ -82,6 +87,18 @@ class MarketData(BaseModel):
     yes_price: float          # 0.0–1.0 (current market implied prob)
     volume_usd: float
     category: str
+    clob_token_ids: list[str] # CLOB token IDs for YES/NO (from Gamma clobTokenIds)
+
+class PriceHistory(BaseModel):
+    token_id: str             # CLOB YES token ID
+    data_points: int          # number of hourly observations
+    weighted_avg: float       # EMA weighted average (half-life 2 days)
+    change_1w_pp: float       # net pp change over retrieval window
+    change_24h_pp: float      # net pp change last 24h
+    volatility_24h: float     # stddev of hourly deltas (pp/hr)
+    direction: str            # "RISING" | "FALLING" | "STABLE"
+    sharp_moves: list[SharpMove]  # up to 3 recent single-hour moves > 5pp
+    fetched_at: datetime
 
 class BriefingDocument(BaseModel):
     market: MarketData
@@ -91,6 +108,7 @@ class BriefingDocument(BaseModel):
     side_no_case: list[str]   # evidence/arguments favoring NO outcome
     key_context: list[str]    # format, stakes, head-to-head, venue, etc.
     data_freshness: datetime
+    price_history: PriceHistory | None  # CLOB trend data (None if fetch failed)
 
 class AgentVerdict(BaseModel):
     agent_name: str           # e.g. "Rules Lawyer"
@@ -281,6 +299,53 @@ Key tag IDs: esports=64, sports=1, valorant=101672, counter-strike-2=100780, vid
 
 ---
 
+## Polymarket CLOB API (`pqi/market/clob.py`)
+
+Base URL: `https://clob.polymarket.com` (code constant in `config.py`)
+
+**Official docs:** `https://docs.polymarket.com/trading/orderbook`
+
+Used for **read-only price history** — no auth needed. The `py-clob-client` SDK
+is installed for future trading phases but the price history fetch uses raw
+`httpx.AsyncClient` (async-native, consistent with the project's pattern).
+
+**Key endpoint:**
+
+- `GET /prices-history?market=TOKEN_ID&interval=1w&fidelity=60`
+  - `market` param takes a CLOB token ID (NOT the Gamma market ID)
+  - Response: `{"history": [{"t": unix_timestamp, "p": price_float}, ...]}`
+  - `interval`: `1d`, `1w`, `1m`, `max` (relative to now)
+  - `fidelity`: minutes between data points (60 = hourly)
+
+**Token ID resolution:** Gamma API markets have a `clobTokenIds` field (JSON
+string like `["YES_TOKEN", "NO_TOKEN"]`). Extracted during `_parse_market()`
+and stored as `MarketData.clob_token_ids`. Index 0 = YES token.
+
+**Computed metrics (`PriceHistory` model):**
+
+- `weighted_avg`: exponential-decay weighted average, half-life 2 days.
+  Formula: `Σ(price × e^(-λ × age_hours)) / Σ(e^(-λ × age_hours))` where λ = ln(2)/48.
+- `direction`: linear regression slope × window hours, thresholded at ±2pp.
+  RISING / FALLING / STABLE.
+- `change_1w_pp` / `change_24h_pp`: net price change in percentage points.
+- `volatility_24h`: stddev of hourly price deltas over last 24h (pp/hr).
+- `sharp_moves`: single-hour moves exceeding 5pp, last 3.
+
+**Non-fatal:** `fetch_price_history()` returns `None` on any failure (no token
+IDs, HTTP error, insufficient data < 2 points). The pipeline continues without
+trend data. Warning logged.
+
+**Briefing injection:** After briefing build, before council summon. The
+`BriefingDocument.price_history` field carries the structured data. In
+`_format_briefing()`, a conditional `MARKET PRICE HISTORY` block is rendered
+between EVENT TIMING and VOLUME. Agents see trend direction, weighted avg,
+changes, volatility, and sharp moves.
+
+**Display:** Recommendation panel shows a `7d Trend` line with pp change,
+direction, 24h change, and volatility when price history is available.
+
+---
+
 ## Environment Variables (`.env`)
 
 LLM_BACKEND=ollama # or "anthropic"
@@ -292,6 +357,8 @@ ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 TAVILY_API_KEY=tvly-...
 TAVILY_SEARCHES_PER_MARKET=5 # number of Tavily queries per market (3–5)
 TAVILY_SNIPPET_CAP=5000 # max chars of search snippets sent to LLM
+PRICE_HISTORY_INTERVAL=1w # CLOB price history time window (1d, 1w, 1m)
+PRICE_HISTORY_FIDELITY=60 # CLOB price history resolution in minutes (60 = hourly)
 LOG_LEVEL=INFO
 MAX_MARKETS_TO_FETCH=20
 MIN_VOLUME_USD=10000 # ignore illiquid markets
@@ -330,6 +397,8 @@ MIN_VOLUME_SHORT_WINDOW_USD=500 # volume floor for short-window queries
       (list/show/sync/stats)
 - [x] Shared briefing for sibling markets (skip synthesizer when analyzing
       siblings from the same event)
+- [x] CLOB price history enrichment (trend data in briefings, `py-clob-client`
+      SDK installed for future trading)
 
 ---
 
@@ -390,7 +459,41 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 20 — Bear prompt remediation, council quorum gate, agent retry]
+**Last updated:** [session 21 — CLOB price history enrichment]
+
+### Session 21 additions
+
+- `models.py` — **New models:** `PricePoint` (timestamp + price), `SharpMove`
+  (timestamp + delta_pp), `PriceHistory` (computed trend metrics: weighted_avg,
+  change_1w_pp, change_24h_pp, volatility_24h, direction, sharp_moves,
+  fetched_at). `MarketData` gains `clob_token_ids: list[str]` (default empty).
+  `BriefingDocument` gains `price_history: PriceHistory | None` (default None).
+- `market/clob.py` — **NEW.** CLOB API client for price history enrichment.
+  `fetch_price_history(market)` fetches YES-token hourly prices via
+  `GET /prices-history?market=TOKEN_ID&interval=1w&fidelity=60`. Response format:
+  `{"history": [{t: unix_int, p: float}, ...]}`. `_compute_metrics()` pure
+  function: EMA weighted average (half-life 2 days, λ=ln(2)/48), direction
+  via linear regression slope (±2pp threshold), volatility (stddev of hourly
+  deltas over 24h), sharp moves (>5pp, last 3). Non-fatal: returns None on
+  any failure.
+- `market/polymarket.py` — `_parse_market()` now extracts `clobTokenIds` JSON
+  string field from Gamma API response into `MarketData.clob_token_ids`.
+- `config.py` — **New section: Polymarket CLOB API.** `CLOB_BASE_URL` code
+  constant (`https://clob.polymarket.com`). Tunables: `PRICE_HISTORY_INTERVAL`
+  (default `1w`), `PRICE_HISTORY_FIDELITY` (default `60` minutes).
+- `.env.example` — added CLOB price history section with `PRICE_HISTORY_INTERVAL`
+  and `PRICE_HISTORY_FIDELITY`.
+- `agents/council.py` — `_format_briefing()` renders conditional
+  `MARKET PRICE HISTORY` block between EVENT TIMING and VOLUME. Shows weighted
+  avg, 7d/24h change, direction, volatility, and sharp moves. Omitted when
+  `price_history` is None.
+- `main.py` — `_run_analysis()` fetches CLOB price history between briefing
+  build and council summon. On success: injects into briefing via `model_copy()`.
+  On failure: prints dim notice, proceeds without. `display_council_result()`
+  shows conditional `7d Trend` line in recommendation panel between Market Prices
+  and YES Edge.
+- `requirements.txt` — added `py-clob-client>=0.1` (SDK for future trading;
+  price history uses raw httpx).
 
 ### Session 20 additions
 
@@ -665,6 +768,13 @@ result, resolution, analysis}`. `result` is the entire CouncilResult.
   `--live/-l`, `--starts-within/-s`, `--resolve-within/-r` all composable.
   `MarketData.event_start_time` parsed from `eventStartTime` field.
   Market list table shows "Starts" column when event_start_time is available.
+- `market/clob.py` — **NEW (session 21).** CLOB API price history client.
+  `fetch_price_history()` fetches hourly YES-token prices via httpx (async).
+  `_compute_metrics()` computes EMA weighted average (half-life 2d), direction
+  (linear regression, ±2pp threshold), volatility (stddev hourly deltas 24h),
+  sharp moves (>5pp, last 3). Non-fatal on all error paths. Response format
+  confirmed: `{"history": [{t: int, p: float}]}`. `py-clob-client` SDK installed
+  for future trading phases.
 
 ### Not started ✗
 
@@ -723,6 +833,14 @@ result, resolution, analysis}`. `result` is the entire CouncilResult.
 - Gamma API field notes: `outcomePrices` is JSON string `'["0.73", "0.27"]'`;
   `volumeNum` is float USD; must pass `closed=false` + `active=true`.
 - Council JSON parser: Pass 1 direct json.loads(), Pass 2 strip control chars.
+- **CLOB price history:** Response format is `{"history": [{t, p}]}` (dict with
+  `history` key, not a bare list). `t` is unix timestamp (int), `p` is float
+  (not string). Very short-lived markets (5-min crypto windows) may return only
+  1 data point — handled by the <2 guard. `clobTokenIds` on the Gamma API is a
+  JSON string (needs `json.loads()`), index 0 = YES token.
+- **Price history is informational only:** The weighted average and trend data
+  enrich the briefing for agents. Scoring gates (ROI, price floor/ceiling) still
+  use the real `yes_price` snapshot since that's the actual tradeable price.
 
 ### Environment
 
@@ -739,20 +857,18 @@ result, resolution, analysis}`. `result` is the entire CouncilResult.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 
-Session 20: Bear prompt remediation + council reliability improvements.
-- Bear persona rewritten: removed "aggressively skeptical" + "Murphy's Law"
-  bias phrases, added evidence-binding guards + hard confidence floor (≤30
-  when <2 underdog data points). Role/objective/output format unchanged.
-- BEAR_WEIGHT pre-wired at 1.0 in config/scoring (no effect yet). Tune via
-  .env to 0.7 if prompt fix is insufficient after 20+ resolved entries.
-- Dead code removed: CONSENSUS_YES_FLOOR / CONSENSUS_NO_CEILING (unused since
-  session 15 probability-first rewrite).
-- Council quorum gate: MIN_COUNCIL_VERDICTS=5 (configurable). Aborts if <5/7
-  agents succeed.
-- Agent retry: AGENT_MAX_RETRIES=5 with exponential backoff (1s→30s cap).
-  Retries on both LLM errors and parse failures. Failed API calls not billed.
+Session 21: CLOB price history enrichment.
+- New module `market/clob.py`: fetches hourly YES-token price history from
+  Polymarket CLOB API (`/prices-history`), computes trend metrics (EMA weighted
+  avg, direction, volatility, sharp moves). Non-fatal on failure.
+- MarketData gains `clob_token_ids` (extracted from Gamma `clobTokenIds` field).
+- BriefingDocument gains `price_history: PriceHistory | None`.
+- Council agents see a conditional MARKET PRICE HISTORY block in their briefing.
+- Recommendation panel shows a 7d Trend line.
+- Scoring gates still use snapshot `yes_price` — trend data is informational.
+- `py-clob-client` SDK installed for future trading phases.
 
-## PRIORITY: Bear accuracy monitoring
+## PRIORITY: Bear accuracy monitoring (ongoing from session 20)
 After accumulating 15-20 new resolved entries, run `pqi history stats` and
 check Bear agent metrics:
 - NO-lean frequency: should drop from 81% toward 50-65%
@@ -790,6 +906,17 @@ not persist (only `show` does). Consider eager persistence.
 ### 7. Auto-sync race condition
 Two consecutive `pqi history list` calls in <2s could spawn two background
 syncs. Low impact (atomic rename), but a lockfile would be cleaner.
+
+### 8. Price history → scoring integration (DEFERRED)
+Once enough data accumulates to validate that trend-aware council verdicts
+improve accuracy, consider using weighted_avg or trend direction as a soft
+input to scoring gates (e.g. tighter ROI threshold when trend opposes
+the recommendation).
+
+### 9. CLOB trading integration (future phase)
+`py-clob-client` SDK is installed. Use it for order placement, position
+management, and portfolio tracking when the project moves from Advisor
+to Auto-trader.
 
 ## Instructions
 - Pick the next priority with the user before starting

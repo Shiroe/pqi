@@ -11,8 +11,9 @@ Polymarket Gamma API (/events endpoint)
     → Parallel enrichment (GET /events/{id} for reliable live/ended/start time)
       → User selects event → picks specific market
         → Synthesizer (5 Tavily searches → BriefingDocument)
-          → Council of Seven (7 parallel LLM calls, two-sided confidence)
-            → Probability-first recommendation: BUY YES / BUY NO / PASS
+          → CLOB price history (1w hourly → trend, volatility, sharp moves)
+            → Council of Seven (7 parallel LLM calls, two-sided confidence)
+              → Probability-first recommendation: BUY YES / BUY NO / PASS
 ```
 
 The council computes two independent scores: a YES-side and NO-side weighted average,
@@ -82,24 +83,24 @@ python3 -m pqi.main [COMMAND] [OPTIONS]
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
-| `analyze` (default) | Fetch events, run the council, print recommendations |
-| `categories` | List available tags and series slugs for `--category` |
-| `history` | History sub-app: `list`, `show`, `sync`, `stats` (see below) |
+| Command             | Description                                                  |
+| ------------------- | ------------------------------------------------------------ |
+| `analyze` (default) | Fetch events, run the council, print recommendations         |
+| `categories`        | List available tags and series slugs for `--category`        |
+| `history`           | History sub-app: `list`, `show`, `sync`, `stats` (see below) |
 
 ### Flags (analyze command)
 
-| Flag | Short | Type | Default | Description |
-|------|-------|------|---------|-------------|
-| `--top-n` | `-n` | `INT` | `10` | Number of events to show in the selection list |
-| `--category` | `-c` | `TEXT` | _(all)_ | Filter by broad tag (e.g. `esports`) or specific series slug (e.g. `counter-strike`) |
-| `--top` | `-t` | flag | off | Skip the selection prompt — auto-pick the highest-volume event |
-| `--starts-within` | `-s` | `INT` | _(all)_ | Only show events starting within this many hours. Includes live events. Best for sports/esports |
-| `--resolve-within` | `-r` | `INT` | _(all)_ | Only show events with markets resolving within this many hours |
-| `--live` | `-l` | flag | off | Only show live events (already started, not yet resolved). Composable with `--starts-within` |
-| `--min-volume` | `-v` | `FLOAT` | _(config)_ | Override minimum volume floor in USD (use `-v 0` to see all) |
-| `--no-cache` | | flag | off | Force a fresh council run, ignoring any cached result |
+| Flag               | Short | Type    | Default    | Description                                                                                     |
+| ------------------ | ----- | ------- | ---------- | ----------------------------------------------------------------------------------------------- |
+| `--top-n`          | `-n`  | `INT`   | `10`       | Number of events to show in the selection list                                                  |
+| `--category`       | `-c`  | `TEXT`  | _(all)_    | Filter by broad tag (e.g. `esports`) or specific series slug (e.g. `counter-strike`)            |
+| `--top`            | `-t`  | flag    | off        | Skip the selection prompt — auto-pick the highest-volume event                                  |
+| `--starts-within`  | `-s`  | `INT`   | _(all)_    | Only show events starting within this many hours. Includes live events. Best for sports/esports |
+| `--resolve-within` | `-r`  | `INT`   | _(all)_    | Only show events with markets resolving within this many hours                                  |
+| `--live`           | `-l`  | flag    | off        | Only show live events (already started, not yet resolved). Composable with `--starts-within`    |
+| `--min-volume`     | `-v`  | `FLOAT` | _(config)_ | Override minimum volume floor in USD (use `-v 0` to see all)                                    |
+| `--no-cache`       |       | flag    | off        | Force a fresh council run, ignoring any cached result                                           |
 
 All flags can be freely combined. For example, `--live -c esports -v 0` shows all
 live esports events regardless of volume.
@@ -108,24 +109,24 @@ live esports events regardless of volume.
 
 `pqi history` is a sub-app — running it bare prints help.
 
-| Sub-command | Description |
-|-------------|-------------|
-| `pqi history list [flags]` | Overview table: market YES/NO, council YES/NO, **lean** (council's directional read), **lean✓** (was the read right?), **vs Mkt** (↕ when council disagreed with market), recommendation, **outcome** (✓/✗/MISS/pass/⏳), winning side, postmortem tagline |
-| `pqi history show <#\|run_id>` | Detailed view: header, recommendation panel, **per-agent verdict table** (with hit/✗ + Brier when resolved), postmortem panel, briefing recap |
-| `pqi history sync [--auto]` | Fetch resolutions for unresolved entries from the Gamma API. `--auto` mode is used by the background sync subprocess and only touches entries past their `end_date` |
-| `pqi history stats` | Council overview (totals, outcome counts, **council-level lean accuracy** computed across all resolved entries with the same dead band as the `list` view) + per-agent leaderboard (n, hit %, weighted hit %, **lean %**, Brier, high-conf accuracy %) with an **Average** footer row of micro-averaged totals |
+| Sub-command                    | Description                                                                                                                                                                                                                                                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pqi history list [flags]`     | Overview table: market YES/NO, council YES/NO, **lean** (council's directional read), **lean✓** (was the read right?), **vs Mkt** (↕ when council disagreed with market), recommendation, **outcome** (✓/✗/MISS/pass/⏳), winning side, postmortem tagline                                                    |
+| `pqi history show <#\|run_id>` | Detailed view: header, recommendation panel, **per-agent verdict table** (with hit/✗ + Brier when resolved), postmortem panel, briefing recap                                                                                                                                                                  |
+| `pqi history sync [--auto]`    | Fetch resolutions for unresolved entries from the Gamma API. `--auto` mode is used by the background sync subprocess and only touches entries past their `end_date`                                                                                                                                            |
+| `pqi history stats`            | Council overview (totals, outcome counts, **council-level lean accuracy** computed across all resolved entries with the same dead band as the `list` view) + per-agent leaderboard (n, hit %, weighted hit %, **lean %**, Brier, high-conf accuracy %) with an **Average** footer row of micro-averaged totals |
 
 #### `history list` flags
 
-| Flag | Short | Type | Default | Description |
-|------|-------|------|---------|-------------|
-| `--last` | `-n` | `INT` | `20` | Page size — number of most recent entries to show. Ignored when `--all` is set |
-| `--offset` | `-o` | `INT` | `0` | Skip this many of the most recent entries (paginate backwards through history) |
-| `--all` | `-a` | flag | off | Show every entry in history. Numbering still starts at `#1` (oldest) and goes up to total |
-| `--no-auto-sync` | | flag | off | Skip the background `history sync` subprocess that auto-resolves entries past their `end_date` |
-| `--outcome` | | `TEXT` | _(none)_ | Filter by outcome class (see values below) |
-| `--rec` | | `TEXT` | _(none)_ | Filter by recommendation type (see values below) |
-| `--conf` | | `TEXT` | _(none)_ | Filter by overall confidence label (see values below) |
+| Flag             | Short | Type   | Default  | Description                                                                                    |
+| ---------------- | ----- | ------ | -------- | ---------------------------------------------------------------------------------------------- |
+| `--last`         | `-n`  | `INT`  | `20`     | Page size — number of most recent entries to show. Ignored when `--all` is set                 |
+| `--offset`       | `-o`  | `INT`  | `0`      | Skip this many of the most recent entries (paginate backwards through history)                 |
+| `--all`          | `-a`  | flag   | off      | Show every entry in history. Numbering still starts at `#1` (oldest) and goes up to total      |
+| `--no-auto-sync` |       | flag   | off      | Skip the background `history sync` subprocess that auto-resolves entries past their `end_date` |
+| `--outcome`      |       | `TEXT` | _(none)_ | Filter by outcome class (see values below)                                                     |
+| `--rec`          |       | `TEXT` | _(none)_ | Filter by recommendation type (see values below)                                               |
+| `--conf`         |       | `TEXT` | _(none)_ | Filter by overall confidence label (see values below)                                          |
 
 All filter flags are independent and freely combinable — e.g.
 `pqi history list --all --conf high --rec pass` shows every HIGH-confidence run
@@ -143,57 +144,57 @@ These return an empty result rather than being blocked.
 Each row is a question you might want to answer about the council's behavior,
 the command that surfaces it, and how to read the result.
 
-| Question | Command | How to interpret |
-|----------|---------|------------------|
-| **Where are my gates too tight?** Show every PASS where the council was actually confident enough that something should have triggered. | `pqi history list --all --conf high --rec pass` | Each row is a HIGH-confidence PASS — the council was sure but a gate (price floor/ceiling, ROI, contrarian threshold) blocked the bet. Cross-reference the `Lean✓` column: if most are `✓`, the gates are leaving money on the table and `MIN_EXPECTED_ROI` / `MAX_TRADEABLE_PRICE` likely need loosening. If most are `✗`, the gates are correctly catching overconfident reads. |
-| **Were my "missed opportunities" actually missed?** | `pqi history list --all --outcome miss` | Every row here is a PASS where the council favored the eventual winner with prob ≥ 65%. Read the `pass_reason` (visible via `history show <#>`) to spot the dominant blocker. If one reason ("Council prob too low", "ROI too low") repeats across many rows, that's the lever to tune. |
-| **When the council is HIGH and bets, how often is it right?** | `pqi history list --all --conf high --rec buy` | The hit-rate of `✓` vs `✗` outcomes in this slice is your *actionable accuracy* — this is the population that real trading would have touched. Compare against the broader `history stats` per-agent leaderboard to see if HIGH-conviction buys actually outperform the agents' raw averages. |
-| **Is the council brave enough?** | `pqi history list --all --rec pass --outcome miss` followed by `pqi history list --all --rec buy --outcome correct_buy` | Compare row counts. Many missed opportunities + few correct buys = council is too cautious. Few missed + many correct = gates are well-calibrated. Few of either = the council is rarely producing actionable reads (look at `--conf` distribution next). |
-| **Where does the council blow up loudly?** | `pqi history list --all --outcome wrong_buy --conf high` | These are the worst-case rows: confident BUYs that lost. Open each with `history show <#>` and read the postmortem — it lists the loudest agents on the wrong side. Repeated agent names point at a bias in a specific persona that needs prompt tuning. |
-| **Does HIGH confidence mean anything?** | Run `pqi history list --all --conf high` and `pqi history list --all --conf medium` | Tally `Lean✓` rates in each. If HIGH and MEDIUM have the same accuracy, the confidence label is noise — `CONFIDENCE_HIGH_THRESHOLD` may be too low or the agents are over-claiming. HIGH should clearly outperform MEDIUM. |
-| **Are LOW-confidence PASSes correctly cautious?** | `pqi history list --all --conf low --rec pass` | This *should* be the council's "I don't know" pile. The `Lean✓` column should be near 50% (coin-flip). If it's much higher, the council is being too humble — its own uncertainty estimate underrates a real signal. If much lower, LOW is correctly catching cases where the council is wrong. |
-| **Did the council's lean disagree with the market and win?** | `pqi history list --all --rec buy_no` (and `--rec buy_yes`) and look at the `vs Mkt` column for `↕` markers | These are contrarian wins — cases worth studying. Use `history show <#>` to inspect *which* agents drove the contrarian read. Repeated contributors are your highest-signal voices. |
-| **What does the recent picture look like vs all-time?** | `pqi history list -n 20` then `pqi history stats` | The first shows the last 20 entries with their outcomes — eyeball recent performance. The stats panel's *council lean accuracy* line uses the same formula but across all resolved entries, so a divergence between recent `Lean✓` density and the global rate is a drift signal (the council is getting better/worse, or category mix has shifted). |
-| **Per-outcome breakdown for one period** | `pqi history list -n 50 --outcome correct_pass` | Useful when you've added 50+ runs since last review and want to confirm the correct-pass pile is genuinely uncertain markets, not actionable signals the council bottled. Pair with `--conf high` to flag suspicious "correct passes" that were actually high-conviction reads. |
+| Question                                                                                                                                | Command                                                                                                                 | How to interpret                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Where are my gates too tight?** Show every PASS where the council was actually confident enough that something should have triggered. | `pqi history list --all --conf high --rec pass`                                                                         | Each row is a HIGH-confidence PASS — the council was sure but a gate (price floor/ceiling, ROI, contrarian threshold) blocked the bet. Cross-reference the `Lean✓` column: if most are `✓`, the gates are leaving money on the table and `MIN_EXPECTED_ROI` / `MAX_TRADEABLE_PRICE` likely need loosening. If most are `✗`, the gates are correctly catching overconfident reads. |
+| **Were my "missed opportunities" actually missed?**                                                                                     | `pqi history list --all --outcome miss`                                                                                 | Every row here is a PASS where the council favored the eventual winner with prob ≥ 65%. Read the `pass_reason` (visible via `history show <#>`) to spot the dominant blocker. If one reason ("Council prob too low", "ROI too low") repeats across many rows, that's the lever to tune.                                                                                           |
+| **When the council is HIGH and bets, how often is it right?**                                                                           | `pqi history list --all --conf high --rec buy`                                                                          | The hit-rate of `✓` vs `✗` outcomes in this slice is your _actionable accuracy_ — this is the population that real trading would have touched. Compare against the broader `history stats` per-agent leaderboard to see if HIGH-conviction buys actually outperform the agents' raw averages.                                                                                     |
+| **Is the council brave enough?**                                                                                                        | `pqi history list --all --rec pass --outcome miss` followed by `pqi history list --all --rec buy --outcome correct_buy` | Compare row counts. Many missed opportunities + few correct buys = council is too cautious. Few missed + many correct = gates are well-calibrated. Few of either = the council is rarely producing actionable reads (look at `--conf` distribution next).                                                                                                                         |
+| **Where does the council blow up loudly?**                                                                                              | `pqi history list --all --outcome wrong_buy --conf high`                                                                | These are the worst-case rows: confident BUYs that lost. Open each with `history show <#>` and read the postmortem — it lists the loudest agents on the wrong side. Repeated agent names point at a bias in a specific persona that needs prompt tuning.                                                                                                                          |
+| **Does HIGH confidence mean anything?**                                                                                                 | Run `pqi history list --all --conf high` and `pqi history list --all --conf medium`                                     | Tally `Lean✓` rates in each. If HIGH and MEDIUM have the same accuracy, the confidence label is noise — `CONFIDENCE_HIGH_THRESHOLD` may be too low or the agents are over-claiming. HIGH should clearly outperform MEDIUM.                                                                                                                                                        |
+| **Are LOW-confidence PASSes correctly cautious?**                                                                                       | `pqi history list --all --conf low --rec pass`                                                                          | This _should_ be the council's "I don't know" pile. The `Lean✓` column should be near 50% (coin-flip). If it's much higher, the council is being too humble — its own uncertainty estimate underrates a real signal. If much lower, LOW is correctly catching cases where the council is wrong.                                                                                   |
+| **Did the council's lean disagree with the market and win?**                                                                            | `pqi history list --all --rec buy_no` (and `--rec buy_yes`) and look at the `vs Mkt` column for `↕` markers            | These are contrarian wins — cases worth studying. Use `history show <#>` to inspect _which_ agents drove the contrarian read. Repeated contributors are your highest-signal voices.                                                                                                                                                                                               |
+| **What does the recent picture look like vs all-time?**                                                                                 | `pqi history list -n 20` then `pqi history stats`                                                                       | The first shows the last 20 entries with their outcomes — eyeball recent performance. The stats panel's _council lean accuracy_ line uses the same formula but across all resolved entries, so a divergence between recent `Lean✓` density and the global rate is a drift signal (the council is getting better/worse, or category mix has shifted).                              |
+| **Per-outcome breakdown for one period**                                                                                                | `pqi history list -n 50 --outcome correct_pass`                                                                         | Useful when you've added 50+ runs since last review and want to confirm the correct-pass pile is genuinely uncertain markets, not actionable signals the council bottled. Pair with `--conf high` to flag suspicious "correct passes" that were actually high-conviction reads.                                                                                                   |
 
 **General reading tips:**
 
 - The `Lean✓` column is **independent of recommendation gates** — it tells you whether the raw council read was right, regardless of whether it converted to a BUY. This is the most direct measure of council intelligence.
-- The `outcome` column is **gate-aware** — it tells you whether the *system as a whole* (council + gates) made the right call.
+- The `outcome` column is **gate-aware** — it tells you whether the _system as a whole_ (council + gates) made the right call.
 - A row where `Lean✓` is `✓` but the outcome is `MISS` is a system failure: the council saw it correctly, the gates blocked it. Several of these in a row → relax gates.
 - A row where `Lean✓` is `✗` but the outcome is `pass` is a system success: the council was wrong, the gates correctly stopped you from acting on it.
 - Always pair filter views with `history show <#>` on a few sample rows — the postmortem panel lists which agents called the winner and which called against, which is where prompt-tuning leverage lives.
 
 ##### `--outcome` values
 
-| Value (and aliases) | Matches |
-|---------------------|---------|
-| `correct_buy` (`buy`, `win`) | BUY recommendation that matched the winning side |
-| `wrong_buy` (`wrong`, `loss`) | BUY recommendation against the winning side |
+| Value (and aliases)                     | Matches                                                                                              |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `correct_buy` (`buy`, `win`)            | BUY recommendation that matched the winning side                                                     |
+| `wrong_buy` (`wrong`, `loss`)           | BUY recommendation against the winning side                                                          |
 | `missed_opportunity` (`miss`, `missed`) | PASS where the council favored the winning side with prob ≥ 65% (gates blocked an actionable signal) |
-| `correct_pass` (`pass`) | PASS where the council was correctly unsure or wrong about the winner |
-| `voided` (`void`) | Market closed without a clean YES/NO winner |
-| `unresolved` (`pending`) | Resolution not yet fetched from the Gamma API |
+| `correct_pass` (`pass`)                 | PASS where the council was correctly unsure or wrong about the winner                                |
+| `voided` (`void`)                       | Market closed without a clean YES/NO winner                                                          |
+| `unresolved` (`pending`)                | Resolution not yet fetched from the Gamma API                                                        |
 
 ##### `--rec` values
 
-| Value (and aliases) | Matches |
-|---------------------|---------|
-| `pass` | `PASS` recommendations |
-| `buy` | Both `BUY YES` and `BUY NO` (any actionable BUY) |
-| `buy_yes` (`yes`) | `BUY YES` only |
-| `buy_no` (`no`) | `BUY NO` only |
+| Value (and aliases) | Matches                                          |
+| ------------------- | ------------------------------------------------ |
+| `pass`              | `PASS` recommendations                           |
+| `buy`               | Both `BUY YES` and `BUY NO` (any actionable BUY) |
+| `buy_yes` (`yes`)   | `BUY YES` only                                   |
+| `buy_no` (`no`)     | `BUY NO` only                                    |
 
 ##### `--conf` values
 
 Filters by `CouncilResult.confidence_level`, which is the higher of the two
 per-side mean confidences.
 
-| Value (and aliases) | Matches |
-|---------------------|---------|
-| `high` (`h`) | `HIGH` — mean confidence ≥ `CONFIDENCE_HIGH_THRESHOLD` (default 0.67) on the favored side |
-| `medium` (`med`, `m`) | `MEDIUM` — middle band |
-| `low` (`l`) | `LOW` — below the medium floor |
+| Value (and aliases)   | Matches                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `high` (`h`)          | `HIGH` — mean confidence ≥ `CONFIDENCE_HIGH_THRESHOLD` (default 0.67) on the favored side |
+| `medium` (`med`, `m`) | `MEDIUM` — middle band                                                                    |
+| `low` (`l`)           | `LOW` — below the medium floor                                                            |
 
 `list` and `stats` automatically spawn a background sync subprocess for any
 unresolved entries past their `end_date` (suppress with `--no-auto-sync`).
@@ -208,14 +209,14 @@ distinct entries because the key is market id, not event id.
 
 #### Outcome classification
 
-| Outcome | Meaning |
-|---------|---------|
-| `correct_buy` | BUY recommendation matched the winning side |
-| `wrong_buy` | BUY recommendation against the winning side |
+| Outcome              | Meaning                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `correct_buy`        | BUY recommendation matched the winning side                                                                |
+| `wrong_buy`          | BUY recommendation against the winning side                                                                |
 | `missed_opportunity` | PASS, but council favored the winning side with prob ≥ 65% — confidence gates blocked an actionable signal |
-| `correct_pass` | PASS, council was unsure or wrong (correctly avoided) |
-| `voided` | Market closed without a clean YES/NO winner |
-| `unresolved` | Resolution not yet fetched |
+| `correct_pass`       | PASS, council was unsure or wrong (correctly avoided)                                                      |
+| `voided`             | Market closed without a clean YES/NO winner                                                                |
+| `unresolved`         | Resolution not yet fetched                                                                                 |
 
 #### Per-agent accuracy
 
@@ -228,8 +229,8 @@ non-legacy runs:
 - **HiConf %** — accuracy when the agent committed with confidence ≥ 70%
 - **HiConf ✓ / ✗** — raw counts of correct vs wrong high-conviction calls
 
-This surfaces *which agents identify the right side most confidently*, *who is
-loudest when wrong*, and lets you weight individual voices in your own judgment.
+This surfaces _which agents identify the right side most confidently_, _who is
+loudest when wrong_, and lets you weight individual voices in your own judgment.
 
 ### Examples
 
@@ -353,25 +354,27 @@ Council of Seven — Verdicts
   The Domain Specialist             72%      70%      60%   ...
   The Contrarian                    30%      40%      50%   ...
 
-╭─────────────── Recommendation ───────────────╮
-│ Council YES:    75.2%  |  Council NO:  24.3% │
-│ Market Prices:  YES = 66.0%  |  NO = 34.0%   │
-│ YES Edge:       +9.2%  |  NO Edge:  -9.7%    │
-│ Confidence:     HIGH                         │
-│                                              │
-│ >>> BUY YES @ $0.66/share — HIGH VALUE <<<    │
-╰──────────────────────────────────────────────╯
+╭──────────────────── Recommendation ────────────────────╮
+│ Council YES:    75.2%  |  Council NO:  24.3%          │
+│ Market Prices:  YES = 66.0%  |  NO = 34.0%            │
+│ 7d Trend:       +5.2pp RISING  |  24h: +1.8pp  |  Vol: 0.9pp/hr │
+│ YES Edge:       +9.2%  |  NO Edge:  -9.7%             │
+│ Max ROI (YES):  +51.5%  (if that side wins)            │
+│ Confidence:     HIGH                                   │
+│                                                        │
+│ >>> BUY YES @ $0.66/share — HIGH VALUE <<<             │
+╰────────────────────────────────────────────────────────╯
 ```
 
 ### Recommendation types
 
-| Recommendation | Meaning |
-|----------------|---------|
-| **BUY YES — HIGH VALUE** | Cheap side, max ROI ≥ 50% (price ≤ ~0.667) |
-| **BUY YES — MODERATE VALUE** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80) |
-| **BUY YES — LOW MARGIN** | Pricey side, max ROI 10%–25% (price ~0.80–0.91) — still above the ROI gate but close to the ceiling |
-| **BUY NO — CONTRARIAN** | Council disagrees with market — stricter probability, confidence, and ROI gates required |
-| **PASS** | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92") |
+| Recommendation               | Meaning                                                                                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **BUY YES — HIGH VALUE**     | Cheap side, max ROI ≥ 50% (price ≤ ~0.667)                                                                                              |
+| **BUY YES — MODERATE VALUE** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80)                                                                                     |
+| **BUY YES — LOW MARGIN**     | Pricey side, max ROI 10%–25% (price ~0.80–0.91) — still above the ROI gate but close to the ceiling                                     |
+| **BUY NO — CONTRARIAN**      | Council disagrees with market — stricter probability, confidence, and ROI gates required                                                |
+| **PASS**                     | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92") |
 
 The same labels apply symmetrically to BUY NO.
 
@@ -380,6 +383,7 @@ The same labels apply symmetrically to BUY NO.
 ## Category filter (`--category`)
 
 Two-tier resolution:
+
 1. **Specific series** — exact or partial slug match (e.g. `counter-strike`, `valorant`, `atp`). Server-side filter via Gamma API `series_id`.
 2. **Broad tag** — matches event tags across all series (e.g. `esports`, `sports`, `crypto`, `politics`). Server-side filter via Gamma API `tag_id`.
 
@@ -422,28 +426,30 @@ windows (< 4h), live events, or `--starts-within` queries, the floor drops to
 
 All thresholds are set in `.env` (see `.env.example` for full documentation):
 
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `MIN_COUNCIL_PROBABILITY` | `0.60` | Minimum council probability to issue a market-aligned BUY |
-| `MIN_CONTRARIAN_PROBABILITY` | `0.70` | Minimum council probability for a contrarian BUY (against market) |
-| `MIN_CONTRARIAN_CONFIDENCE` | `0.80` | Minimum per-side confidence for a contrarian BUY |
-| `CONFIDENCE_HIGH_THRESHOLD` | `0.67` | Mean confidence required for HIGH label |
-| `EDGE_THRESHOLD` | `0.07` | **Deprecated** — informational only; no longer gates recommendations |
-| `MIN_TRADEABLE_PRICE` | `0.05` | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals) |
-| `MAX_TRADEABLE_PRICE` | `0.90` | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk) |
-| `MIN_EXPECTED_ROI` | `0.15` | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.87) |
-| `MIN_CONTRARIAN_ROI` | `0.20` | Stricter ROI floor for contrarian BUYs (≈ price ≤ 0.833) |
-| `MIN_VOLUME_USD` | `10000` | Volume floor for general queries |
-| `MIN_VOLUME_SHORT_WINDOW_USD` | `500` | Volume floor for short time-window / live queries |
-| `RULES_LAWYER_WEIGHT` | `2` | Rules Lawyer counts as N agents in weighted scoring |
-| `BEAR_WEIGHT` | `1.0` | Bear agent weight in scoring (lower to reduce drag on confidence; try 0.7 if needed) |
-| `MIN_COUNCIL_VERDICTS` | `5` | Minimum agents (of 7) that must return valid verdicts; aborts if below |
-| `AGENT_MAX_RETRIES` | `5` | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap) |
-| `LOCAL_LLM_CONCURRENCY` | `1` | Max parallel Ollama calls (no effect on Anthropic) |
-| `TAVILY_SEARCHES_PER_MARKET` | `5` | Tavily queries per analysis (3-5) |
-| `TAVILY_SNIPPET_CAP` | `5000` | Max chars of search snippets sent to LLM |
-| `EVENT_ENRICHMENT_MAX` | `30` | Max parallel /events/{id} detail calls for enrichment |
-| `CACHE_PRICE_DELTA` | `0.02` | Price movement threshold to invalidate cached results |
+| Variable                      | Default | Effect                                                                               |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------------ |
+| `MIN_COUNCIL_PROBABILITY`     | `0.60`  | Minimum council probability to issue a market-aligned BUY                            |
+| `MIN_CONTRARIAN_PROBABILITY`  | `0.70`  | Minimum council probability for a contrarian BUY (against market)                    |
+| `MIN_CONTRARIAN_CONFIDENCE`   | `0.80`  | Minimum per-side confidence for a contrarian BUY                                     |
+| `CONFIDENCE_HIGH_THRESHOLD`   | `0.67`  | Mean confidence required for HIGH label                                              |
+| `EDGE_THRESHOLD`              | `0.07`  | **Deprecated** — informational only; no longer gates recommendations                 |
+| `MIN_TRADEABLE_PRICE`         | `0.05`  | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals)                 |
+| `MAX_TRADEABLE_PRICE`         | `0.90`  | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk)  |
+| `MIN_EXPECTED_ROI`            | `0.15`  | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.87)      |
+| `MIN_CONTRARIAN_ROI`          | `0.20`  | Stricter ROI floor for contrarian BUYs (≈ price ≤ 0.833)                             |
+| `MIN_VOLUME_USD`              | `10000` | Volume floor for general queries                                                     |
+| `MIN_VOLUME_SHORT_WINDOW_USD` | `500`   | Volume floor for short time-window / live queries                                    |
+| `RULES_LAWYER_WEIGHT`         | `2`     | Rules Lawyer counts as N agents in weighted scoring                                  |
+| `BEAR_WEIGHT`                 | `1.0`   | Bear agent weight in scoring (lower to reduce drag on confidence; try 0.7 if needed) |
+| `MIN_COUNCIL_VERDICTS`        | `5`     | Minimum agents (of 7) that must return valid verdicts; aborts if below               |
+| `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
+| `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |
+| `TAVILY_SEARCHES_PER_MARKET`  | `5`     | Tavily queries per analysis (3-5)                                                    |
+| `TAVILY_SNIPPET_CAP`          | `5000`  | Max chars of search snippets sent to LLM                                             |
+| `EVENT_ENRICHMENT_MAX`        | `30`    | Max parallel /events/{id} detail calls for enrichment                                |
+| `CACHE_PRICE_DELTA`           | `0.02`  | Price movement threshold to invalidate cached results                                |
+| `PRICE_HISTORY_INTERVAL`      | `1w`    | CLOB price history window (1d, 1w, 1m)                                               |
+| `PRICE_HISTORY_FIDELITY`      | `60`    | Price history resolution in minutes (60 = hourly)                                    |
 
 ---
 
@@ -477,8 +483,9 @@ pqi/
 ├── llm/
 │   └── client.py        # Ollama / Anthropic abstraction (single chat() entrypoint)
 ├── market/
-│   └── polymarket.py    # Gamma API client — event-centric fetch, category resolution,
-│                        #   parallel enrichment, client-side timing filters
+│   ├── polymarket.py    # Gamma API client — event-centric fetch, category resolution,
+│   │                    #   parallel enrichment, client-side timing filters
+│   └── clob.py          # CLOB API client — price history fetch + trend metrics
 └── ingestion/
     └── synthesizer.py   # LLM Search Architect → 5 Tavily queries → BriefingDocument
 ```
@@ -487,15 +494,15 @@ pqi/
 
 ## The Council of Seven
 
-| Agent | Bias |
-|-------|------|
-| **The Rules Lawyer** (2x weight) | Resolution condition analysis — focuses on whether the specific outcome condition will be met |
-| **The Bull (Favorite's Advocate)** | Builds the strongest case for the market-favored side (price-aware, dynamic) |
-| **The Bear (Underdog's Advocate)** | Builds the strongest case for the underdog side (price-aware, dynamic) |
-| **The Base-Rate Statistician** | Historical base rate, ignores current hype |
-| **The Sentiment Analyst** | Crowd psychology vs. current market price |
-| **The Domain Specialist** | Field-specific technical nuance (e.g. game meta, matchup history) |
-| **The Contrarian** | Competitively plausible disruptions (roster changes, form, morale) — not infrastructure failures |
+| Agent                              | Bias                                                                                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **The Rules Lawyer** (2x weight)   | Resolution condition analysis — focuses on whether the specific outcome condition will be met    |
+| **The Bull (Favorite's Advocate)** | Builds the strongest case for the market-favored side (price-aware, dynamic)                     |
+| **The Bear (Underdog's Advocate)** | Builds the strongest case for the underdog side (price-aware, dynamic)                           |
+| **The Base-Rate Statistician**     | Historical base rate, ignores current hype                                                       |
+| **The Sentiment Analyst**          | Crowd psychology vs. current market price                                                        |
+| **The Domain Specialist**          | Field-specific technical nuance (e.g. game meta, matchup history)                                |
+| **The Contrarian**                 | Competitively plausible disruptions (roster changes, form, morale) — not infrastructure failures |
 
 Each agent outputs a probability (P(YES), 0-100) with **two separate confidence scores**:
 `confidence_yes` (how sure about the YES estimate) and `confidence_no` (how sure about
@@ -503,7 +510,9 @@ the NO estimate). These can differ when data quality is asymmetric — e.g. stro
 on the favorite but insufficient data on the underdog.
 
 Agents deliberate **in parallel**, not sequentially. Each sees the briefing document
-with an EVENT TIMING block indicating urgency (LIVE/IMMINENT, TODAY, THIS WEEK, FUTURE).
+with an EVENT TIMING block indicating urgency (LIVE/IMMINENT, TODAY, THIS WEEK, FUTURE)
+and a MARKET PRICE HISTORY block showing the 7-day trend (direction, weighted average,
+volatility, sharp moves) fetched from the Polymarket CLOB API.
 
 The Rules Lawyer receives an additional injection of the market's resolution criteria
 at the top of its briefing, marked as the source of truth.
@@ -516,6 +525,7 @@ NO-side score  = sum(prob_no  * conf_no  * weight) / sum(conf_no  * weight)
 ```
 
 The recommendation is probability-first:
+
 1. Identify which side the council favors (>50% probability)
 2. If council agrees with market: BUY if council prob >= 60% and confidence HIGH
 3. If council disagrees with market (contrarian): BUY if council prob >= 70% and confidence >= 80%
@@ -525,10 +535,10 @@ The recommendation is probability-first:
 
 ## Backends
 
-| Backend | When to use | Cost |
-|---------|-------------|------|
-| `ollama` (default) | Local dev, RTX 2070+ | Free |
-| `anthropic` | Production / accuracy | ~$0.015/council run with claude-haiku-4-5 |
+| Backend            | When to use           | Cost                                      |
+| ------------------ | --------------------- | ----------------------------------------- |
+| `ollama` (default) | Local dev, RTX 2070+  | Free                                      |
+| `anthropic`        | Production / accuracy | ~$0.015/council run with claude-haiku-4-5 |
 
 Switch by setting `LLM_BACKEND=anthropic` in `.env`. Anthropic runs all 7 agents
 fully in parallel (no concurrency throttle needed). Ollama is throttled by

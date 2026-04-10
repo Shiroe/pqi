@@ -146,6 +146,15 @@ def _parse_market(
             except (ValueError, TypeError):
                 pass
 
+        # Extract CLOB token IDs for price history fetching
+        clob_token_ids: list[str] = []
+        clob_raw = raw.get("clobTokenIds")
+        if clob_raw:
+            try:
+                clob_token_ids = json.loads(clob_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         return MarketData(
             id=market_id,
             question=question,
@@ -155,6 +164,7 @@ def _parse_market(
             yes_price=yes_price,
             volume_usd=volume_usd,
             category=category,
+            clob_token_ids=clob_token_ids,
         )
 
     except (KeyError, IndexError, ValueError, TypeError) as exc:

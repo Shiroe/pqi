@@ -65,6 +65,19 @@ EVENT_ENRICHMENT_MAX: int = int(os.getenv("EVENT_ENRICHMENT_MAX", "30"))
 """Max parallel GET /events/{id} detail calls during event enrichment."""
 
 # ---------------------------------------------------------------------------
+# Polymarket CLOB API
+# ---------------------------------------------------------------------------
+
+# Code constant — the public CLOB endpoint. No auth needed for read-only.
+CLOB_BASE_URL: str = "https://clob.polymarket.com"
+
+PRICE_HISTORY_INTERVAL: str = os.getenv("PRICE_HISTORY_INTERVAL", "1w")
+"""Time window for price history fetch. Valid: 1d, 1w, 1m."""
+
+PRICE_HISTORY_FIDELITY: int = int(os.getenv("PRICE_HISTORY_FIDELITY", "60"))
+"""Resolution in minutes. 60 = hourly data points."""
+
+# ---------------------------------------------------------------------------
 # Market filtering
 # ---------------------------------------------------------------------------
 

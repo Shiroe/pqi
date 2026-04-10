@@ -157,10 +157,21 @@ def display_council_result(result: CouncilResult) -> None:
     roi_line = (
         f"[bold]Max ROI ({roi_label}):[/bold]  +{roi_val:.1%}  (if that side wins)\n"
     )
+    # Trend line (conditional — only if price history was fetched)
+    trend_line = ""
+    if result.briefing and result.briefing.price_history:
+        ph = result.briefing.price_history
+        trend_line = (
+            f"[bold]7d Trend:[/bold]       {ph.change_1w_pp:+.1f}pp {ph.direction}  |  "
+            f"24h: {ph.change_24h_pp:+.1f}pp  |  "
+            f"Vol: {ph.volatility_24h:.1f}pp/hr\n"
+        )
+
     summary = (
         f"[bold]Council YES:[/bold]    {result.final_score:.1%}  |  "
         f"[bold]Council NO:[/bold]  {result.no_score:.1%}\n"
         f"[bold]Market Prices:[/bold]  YES = {yes_price:.1%}  |  NO = {no_price:.1%}\n"
+        f"{trend_line}"
         f"[bold]YES Edge:[/bold]       {yes_edge_sign}{result.edge:.1%}  |  "
         f"[bold]NO Edge:[/bold]  {no_edge_sign}{result.no_edge:.1%}\n"
         f"{roi_line}"
@@ -196,6 +207,7 @@ def _analyzed_market_ids() -> set[str]:
     """
     try:
         from pqi.history import load_history
+
         ids: set[str] = set()
         for e in load_history():
             if e.get("legacy"):
@@ -269,11 +281,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
             f"{pm.yes_price:.0%}",
             f"{1.0 - pm.yes_price:.0%}",
             _signal_glyph(pm.yes_price),
-            (
-                "[cyan]●[/cyan]"
-                if any(str(m.id) in analyzed for m in g.markets)
-                else ""
-            ),
+            ("[cyan]●[/cyan]" if any(str(m.id) in analyzed for m in g.markets) else ""),
             f"${g.total_volume:,.0f}",
         )
 
@@ -390,6 +398,27 @@ async def _run_analysis(
         console.print(f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}")
         briefing = await build_briefing(market)
     console.print(f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]")
+
+    # Enrich briefing with CLOB price history (non-fatal)
+    from pqi.market.clob import fetch_price_history
+
+    try:
+        price_history = await fetch_price_history(market)
+        if price_history:
+            briefing = briefing.model_copy(update={"price_history": price_history})
+            console.print(
+                f"[cyan]Price history: {price_history.data_points} hourly points, "
+                f"trend {price_history.direction} ({price_history.change_1w_pp:+.1f}pp/wk)[/cyan]"
+            )
+        else:
+            console.print(
+                "[dim]Price history unavailable — proceeding without trend data.[/dim]"
+            )
+    except Exception as exc:
+        logger.warning("Price history enrichment failed: %s", exc)
+        console.print(
+            "[dim]Price history fetch failed — proceeding without trend data.[/dim]"
+        )
 
     concurrency_info = (
         f"concurrency={config.LOCAL_LLM_CONCURRENCY}"
@@ -664,26 +693,40 @@ def _outcome_glyph(kind: str) -> str:
 
 
 _OUTCOME_ALIASES = {
-    "correct_buy": "correct_buy", "buy": "correct_buy", "win": "correct_buy",
-    "wrong_buy": "wrong_buy", "wrong": "wrong_buy", "loss": "wrong_buy",
-    "missed_opportunity": "missed_opportunity", "miss": "missed_opportunity",
+    "correct_buy": "correct_buy",
+    "buy": "correct_buy",
+    "win": "correct_buy",
+    "wrong_buy": "wrong_buy",
+    "wrong": "wrong_buy",
+    "loss": "wrong_buy",
+    "missed_opportunity": "missed_opportunity",
+    "miss": "missed_opportunity",
     "missed": "missed_opportunity",
-    "correct_pass": "correct_pass", "pass": "correct_pass",
-    "voided": "voided", "void": "voided",
-    "unresolved": "unresolved", "pending": "unresolved",
+    "correct_pass": "correct_pass",
+    "pass": "correct_pass",
+    "voided": "voided",
+    "void": "voided",
+    "unresolved": "unresolved",
+    "pending": "unresolved",
 }
 
 _REC_ALIASES = {
     "pass": {"PASS"},
     "buy": {"BUY YES", "BUY NO"},
-    "buy_yes": {"BUY YES"}, "yes": {"BUY YES"},
-    "buy_no": {"BUY NO"}, "no": {"BUY NO"},
+    "buy_yes": {"BUY YES"},
+    "yes": {"BUY YES"},
+    "buy_no": {"BUY NO"},
+    "no": {"BUY NO"},
 }
 
 _CONF_ALIASES = {
-    "high": "HIGH", "h": "HIGH",
-    "medium": "MEDIUM", "med": "MEDIUM", "m": "MEDIUM",
-    "low": "LOW", "l": "LOW",
+    "high": "HIGH",
+    "h": "HIGH",
+    "medium": "MEDIUM",
+    "med": "MEDIUM",
+    "m": "MEDIUM",
+    "low": "LOW",
+    "l": "LOW",
 }
 
 
@@ -703,15 +746,18 @@ def history_list(
         False, "--all", "-a", help="Show all results without pagination"
     ),
     outcome_filter: Optional[str] = typer.Option(
-        None, "--outcome",
+        None,
+        "--outcome",
         help="Filter by outcome: correct_buy|wrong_buy|miss|correct_pass|voided|unresolved",
     ),
     rec_filter: Optional[str] = typer.Option(
-        None, "--rec",
+        None,
+        "--rec",
         help="Filter by recommendation: pass|buy|buy_yes|buy_no",
     ),
     conf_filter: Optional[str] = typer.Option(
-        None, "--conf",
+        None,
+        "--conf",
         help="Filter by confidence level: high|medium|low",
     ),
 ) -> None:
@@ -732,21 +778,27 @@ def history_list(
     if outcome_filter:
         want_outcome = _OUTCOME_ALIASES.get(outcome_filter.lower())
         if want_outcome is None:
-            console.print(f"[red]Unknown --outcome '{outcome_filter}'. Valid: {sorted(set(_OUTCOME_ALIASES))}[/red]")
+            console.print(
+                f"[red]Unknown --outcome '{outcome_filter}'. Valid: {sorted(set(_OUTCOME_ALIASES))}[/red]"
+            )
             raise typer.Exit(1)
 
     want_recs: Optional[set[str]] = None
     if rec_filter:
         want_recs = _REC_ALIASES.get(rec_filter.lower())
         if want_recs is None:
-            console.print(f"[red]Unknown --rec '{rec_filter}'. Valid: {sorted(_REC_ALIASES)}[/red]")
+            console.print(
+                f"[red]Unknown --rec '{rec_filter}'. Valid: {sorted(_REC_ALIASES)}[/red]"
+            )
             raise typer.Exit(1)
 
     want_conf: Optional[str] = None
     if conf_filter:
         want_conf = _CONF_ALIASES.get(conf_filter.lower())
         if want_conf is None:
-            console.print(f"[red]Unknown --conf '{conf_filter}'. Valid: high|medium|low[/red]")
+            console.print(
+                f"[red]Unknown --conf '{conf_filter}'. Valid: high|medium|low[/red]"
+            )
             raise typer.Exit(1)
 
     total = len(entries)
@@ -1137,11 +1189,13 @@ def history_stats(
     )
 
     resolved_total = sum(
-        1 for e in entries
+        1
+        for e in entries
         if (e.get("resolution") or {}).get("winning_side") in ("YES", "NO")
     )
     nonlegacy_resolved = sum(
-        1 for e in entries
+        1
+        for e in entries
         if not e.get("legacy")
         and (e.get("resolution") or {}).get("winning_side") in ("YES", "NO")
     )

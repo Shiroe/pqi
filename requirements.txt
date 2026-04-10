@@ -19,5 +19,8 @@ tavily-python>=0.3
 # Environment
 python-dotenv>=1.0
 
+# Polymarket CLOB SDK (read-only price history now; trading in future phase)
+py-clob-client>=0.1
+
 # Cache
 aiosqlite>=0.20
