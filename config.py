@@ -96,6 +96,9 @@ MIN_COUNCIL_VERDICTS: int = int(os.getenv("MIN_COUNCIL_VERDICTS", "5"))
 AGENT_MAX_RETRIES: int = int(os.getenv("AGENT_MAX_RETRIES", "5"))
 """Max retries per agent on LLM/parse failure. Exponential backoff, 30s cap."""
 RULES_LAWYER_WEIGHT: float = float(os.getenv("RULES_LAWYER_WEIGHT", "1"))
+BEAR_WEIGHT: float = float(os.getenv("BEAR_WEIGHT", "1.0"))
+"""Bear agent weight in scoring. Default 1.0 (equal). Lower to reduce Bear's
+drag on council confidence if prompt fix is insufficient (try 0.7 first)."""
 
 # Probability-first recommendation gates
 MIN_COUNCIL_PROBABILITY: float = float(os.getenv("MIN_COUNCIL_PROBABILITY", "0.60"))
@@ -198,6 +201,7 @@ if __name__ == "__main__":
         ("MIN_COUNCIL_VERDICTS", str(MIN_COUNCIL_VERDICTS)),
         ("AGENT_MAX_RETRIES", str(AGENT_MAX_RETRIES)),
         ("RULES_LAWYER_WEIGHT", str(RULES_LAWYER_WEIGHT)),
+        ("BEAR_WEIGHT", str(BEAR_WEIGHT)),
         ("CACHE_DB_PATH", CACHE_DB_PATH),
         ("CACHE_PRICE_DELTA", str(CACHE_PRICE_DELTA)),
         ("LOG_LEVEL", LOG_LEVEL),

@@ -50,7 +50,10 @@ def build_council_result(
     Orchestrate the full scoring pipeline and return a CouncilResult.
     Delegates to CouncilResult.from_council_verdicts() which owns the logic.
     """
-    agent_weights = {"The Rules Lawyer": config.RULES_LAWYER_WEIGHT}
+    agent_weights = {
+        "The Rules Lawyer": config.RULES_LAWYER_WEIGHT,
+        "The Bear": config.BEAR_WEIGHT,
+    }
 
     return CouncilResult.from_council_verdicts(
         market=market,

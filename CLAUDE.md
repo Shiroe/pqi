@@ -390,7 +390,46 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 19 — gate retrospective, Tier 1 ROI 0.15→0.10, Bear bias audit]
+**Last updated:** [session 20 — Bear prompt remediation, council quorum gate, agent retry]
+
+### Session 20 additions
+
+- `agents/personas.py` — **Bear prompt rewrite.** Removed two structural-bias
+  phrases: "Apply Murphy's Law to the favorite: assume overconfidence creates
+  blind spots" and "Be aggressively skeptical of the narrative supporting the
+  favorite." Replaced with evidence-binding guards: "Do not assume the favorite
+  is fragile without evidence" + data-grounding clause that forces probability
+  to reflect the favorite's likely win when briefing data supports it. Added
+  hard confidence floor: if fewer than 2 concrete underdog data points, underdog-
+  side confidence must be ≤30. Role, objective, output format unchanged.
+  Root cause: audit showed 38% hit rate, 81% NO-lean, 70% high-conf miss rate.
+  See docs/retrospectives/eval_tier1_roi_2026_04.md Section 6d.
+- `config.py` — **Dead code removed:** `CONSENSUS_YES_FLOOR` and
+  `CONSENSUS_NO_CEILING` deleted (were accepted as params in
+  `from_council_verdicts()` but never consumed in the method body since session
+  15 probability-first rewrite). **New vars:**
+  - `MIN_COUNCIL_VERDICTS` (default 5): minimum agents that must return valid
+    verdicts for the council result to be accepted.
+  - `AGENT_MAX_RETRIES` (default 5): per-agent retry count on LLM/parse failure.
+    Exponential backoff: 1s→2s→4s→...→30s cap.
+  - `BEAR_WEIGHT` (default 1.0): pre-wired weight multiplier for the Bear agent
+    in scoring. At 1.0 = no behavioral change. Tunable via .env if prompt fix
+    is insufficient (try 0.7 before going lower).
+- `.env.example` — removed consensus gate section. Added `MIN_COUNCIL_VERDICTS`,
+  `AGENT_MAX_RETRIES`, `BEAR_WEIGHT` with comments.
+- `models.py` — removed `consensus_yes_floor` and `consensus_no_ceiling` params
+  from `from_council_verdicts()` signature.
+- `agents/council.py` — **Council quorum gate:** `run_council()` now requires
+  `MIN_COUNCIL_VERDICTS` (default 5/7) successful verdicts. Raises RuntimeError
+  listing failed agents if quorum not met. **Agent retry with exponential
+  backoff:** `_run_single_agent()` retries up to `AGENT_MAX_RETRIES` times on
+  both LLM call errors (timeouts, rate limits, 500s) and parse failures
+  (malformed JSON). Backoff: 1s, 2s, 4s, 8s, 16s capped at 30s. Failed API
+  calls are not billed.
+- `scoring.py` — Bear weight wired into `agent_weights` dict alongside Rules
+  Lawyer weight. Both flow through `_w()` in `from_council_verdicts()`.
+- `CLAUDE.md` — removed stale consensus gate references (Known Issues +
+  CouncilResult description). Replaced with council quorum gate documentation.
 
 ### Session 19 additions
 
@@ -686,47 +725,55 @@ result, resolution, analysis}`. `result` is the entire CouncilResult.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 
-Session 19: gate retrospective analysis and Tier 1 optimization.
-- MIN_EXPECTED_ROI default changed 0.15 → 0.10 in config.py + .env.example
-- Full retrospective report: docs/retrospectives/eval_tier1_roi_2026_04.md
-- Bear agent audit: 38% hit rate, 81% NO-lean bias, 43% loudest-wrong-voice.
-  4 remediation options documented but not implemented.
+Session 20: Bear prompt remediation + council reliability improvements.
+- Bear persona rewritten: removed "aggressively skeptical" + "Murphy's Law"
+  bias phrases, added evidence-binding guards + hard confidence floor (≤30
+  when <2 underdog data points). Role/objective/output format unchanged.
+- BEAR_WEIGHT pre-wired at 1.0 in config/scoring (no effect yet). Tune via
+  .env to 0.7 if prompt fix is insufficient after 20+ resolved entries.
+- Dead code removed: CONSENSUS_YES_FLOOR / CONSENSUS_NO_CEILING (unused since
+  session 15 probability-first rewrite).
+- Council quorum gate: MIN_COUNCIL_VERDICTS=5 (configurable). Aborts if <5/7
+  agents succeed.
+- Agent retry: AGENT_MAX_RETRIES=5 with exponential backoff (1s→30s cap).
+  Retries on both LLM errors and parse failures. Failed API calls not billed.
+
+## PRIORITY: Bear accuracy monitoring
+After accumulating 15-20 new resolved entries, run `pqi history stats` and
+check Bear agent metrics:
+- NO-lean frequency: should drop from 81% toward 50-65%
+- Hit rate: should rise from 38% toward 50%+
+- Brier score: should improve from 0.302 toward 0.24-0.27
+- High-conf miss rate: should drop from 70%
+If Bear hit rate is still below 50%, lower BEAR_WEIGHT to 0.7 in .env.
 
 ## Remaining ideas / future work
 
-### 1. Bear prompt engineering (HIGH PRIORITY from session 19 audit)
-The Bear has the worst accuracy of all 7 agents (38% hit rate, 0.302 Brier).
-It leans NO 81% of the time and was the sole cause of 2 missed opportunities
-(#82 MANA, #87 T1 Academy) by dragging mean confidence below the 67% gate.
-See docs/retrospectives/eval_tier1_roi_2026_04.md Section 6d for 4 options.
-Recommended: soften "aggressively skeptical" language + add confidence floor
-for data-poor underdogs.
-
-### 2. Tier 2 gate evaluation (DEFERRED)
+### 1. Tier 2 gate evaluation (DEFERRED)
 Lowering CONFIDENCE_HIGH_THRESHOLD 0.67 → 0.65 would recover 4 wins at cost
 of 2 new losses (net +2). Wait for 100+ non-legacy entries for statistical
 confidence. See retrospective Section 5.
 
-### 3. Cache TTL / expiry
+### 2. Cache TTL / expiry
 Add time-based expiry to cached council results (e.g. 24h max age). Currently
 cache only invalidates on price movement > 2%.
 
-### 4. /public-search integration
+### 3. /public-search integration
 Use `/public-search?q=TEXT` as supplementary fetch for ghost events that don't
 appear in /events list queries.
 
-### 5. Multi-market batch analysis
+### 4. Multi-market batch analysis
 Allow `pqi analyze --top 3` to analyze top N markets sequentially.
 
-### 6. Per-category accuracy slicing
+### 5. Per-category accuracy slicing
 `pqi history stats --category esports` would let us see which agents are
 strong in which domains.
 
-### 7. Postmortem persistence on `list`
+### 6. Postmortem persistence on `list`
 `pqi history list` currently calls `signal_postmortem()` for each row but does
 not persist (only `show` does). Consider eager persistence.
 
-### 8. Auto-sync race condition
+### 7. Auto-sync race condition
 Two consecutive `pqi history list` calls in <2s could spawn two background
 syncs. Low impact (atomic rename), but a lockfile would be cleaner.
 

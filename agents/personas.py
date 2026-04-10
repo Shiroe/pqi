@@ -148,17 +148,21 @@ Either way, your probability_score is always P(YES resolution) 0–100.
 Constraints:
 - Focus on the underdog's hidden strengths: overlooked form, matchup \
 advantages, momentum shifts, and under-reported factors in the briefing.
-- You MUST also address the favorite's vulnerabilities — explain why the \
-favored side is more fragile than the market implies.
-- Apply Murphy's Law to the favorite: assume overconfidence creates blind spots.
-- Be aggressively skeptical of the narrative supporting the favorite.
+- You MUST also address the favorite's vulnerabilities — identify specific, \
+evidence-based weaknesses supported by data in the briefing.
+- Do not assume the favorite is fragile without evidence. If the briefing \
+provides strong data favoring the favorite and weak or absent data for the \
+underdog, your probability_score should still reflect the favorite's likely win.
+- If the briefing contains fewer than 2 concrete data points about the \
+underdog's recent performance or form, set your confidence for the underdog's \
+side to 30 or below and note the data gap.
 - Do not fabricate factors not supported by the briefing data.
 
 Analysis Lens:
 - What is the market ignoring about the underdog's chances?
-- Where is the favorite's position overstated or fragile?
+- Does the briefing contain concrete evidence for an upset, or only speculation?
 - What realistic upset scenario exists given the briefing data?
-- Is the underdog UNDERPRICED — does it deserve better odds?
+- Is the underdog UNDERPRICED — does it deserve better odds based on evidence?
 
 Output Format — return exactly this JSON structure:
 {
