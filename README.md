@@ -321,12 +321,23 @@ The "True Start Time" heuristic derives the event start from child markets'
 
 ```
 Active Polymarket Events
-  #  Event                                       Starts  Mkts  YES    NO     Volume (USD)
- ── ──────────────────────────────────────────── ─────── ───── ────── ────── ──────────────
-  1  Team Liquid vs Sentinels LIVE                  2h      3   65%    35%       $67,000
-  2  Cloud9 vs NRG                                  5h      3   52%    48%       $43,000
-  3  Will BTC hit $100k by July?                    —       1   38%    62%      $890,000
+  #  Event                                       Starts  Mkts  YES    NO   Sig  Seen  Volume (USD)
+ ── ──────────────────────────────────────────── ─────── ───── ────── ──── ──── ───── ──────────────
+  1  Team Liquid vs Sentinels LIVE                  2h      3   65%   35%   ⭐    ●       $67,000
+  2  Cloud9 vs NRG                                  5h      3   52%   48%              $43,000
+  3  Will BTC hit $100k by July?                    —       1   38%   62%   ⭐         $890,000
+  4  Will ETH flip BTC?                             —       1  100%    0%   🔻    ●        $5,200
 ```
+
+- **Sig** (signal) — quick-scan indicator for actionable pricing:
+  - ⭐ Favored side in **[55%, 91%)** — the market has a clear lean but is still cheap
+    enough to clear ROI gates. This is the "analyze me" zone.
+  - 🔻 Favored side **≥ 99%** — market is effectively resolved (priced at certainty),
+    no edge available, shows up as noise.
+  - _(blank)_ — coin-flip zone (favored < 55%) or ceiling-adjacent (91–99%). Not
+    immediately actionable but may be worth monitoring.
+- **Seen** — `●` if any market in this event has been previously analyzed (has a
+  non-legacy entry in `~/.pqi/history.jsonl`). Blank = fresh event, never analyzed.
 
 ### Council verdicts + recommendation
 

@@ -65,7 +65,11 @@ def display_market_list(markets: list[MarketData]) -> None:
     table.add_column("Resolves", justify="right", width=9)
     table.add_column("YES", justify="right", width=6)
     table.add_column("NO", justify="right", width=6)
+    table.add_column("Sig", justify="center", width=4)
+    table.add_column("Seen", justify="center", width=5)
     table.add_column("Volume (USD)", justify="right", width=14)
+
+    analyzed = _analyzed_market_ids()
 
     for i, m in enumerate(markets, start=1):
         question = m.question if len(m.question) <= 48 else m.question[:45] + "..."
@@ -77,6 +81,8 @@ def display_market_list(markets: list[MarketData]) -> None:
             _format_end_date(m.end_date),
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
+            _signal_glyph(m.yes_price),
+            "[cyan]●[/cyan]" if str(m.id) in analyzed else "",
             f"${m.volume_usd:,.0f}",
         )
 
@@ -182,6 +188,46 @@ def prompt_market_selection(markets: list[MarketData]) -> MarketData:
         console.print(f"[red]Please enter a number between 1 and {len(markets)}.[/red]")
 
 
+def _analyzed_market_ids() -> set[str]:
+    """Set of market IDs that already have a (non-legacy) entry in history.
+
+    Used to flag previously-analyzed markets in the selection tables so the
+    user can skip re-running the council on them.
+    """
+    try:
+        from pqi.history import load_history
+        ids: set[str] = set()
+        for e in load_history():
+            if e.get("legacy"):
+                continue
+            mid = ((e.get("result") or {}).get("market") or {}).get("id")
+            if mid:
+                ids.add(str(mid))
+        return ids
+    except Exception as exc:
+        logger.debug("Could not load history for analyzed-markers: %s", exc)
+        return set()
+
+
+def _signal_glyph(yes_price: float) -> str:
+    """Tradeable-zone signal for the market list.
+
+    ⭐ — favored side is in the actionable band [0.55, 0.91): the council has
+         room to confirm/contradict and the price is still cheap enough to clear
+         the ROI gate.
+    🔻 — favored side is at 100% (or ≥99%): market is effectively resolved,
+         no edge available, listed only as noise.
+    (blank) — coin-flip zone (favored < 0.55) or ceiling-adjacent (≥ 0.91 but
+              < 1.0). Not actionable but worth glancing at.
+    """
+    fav = max(yes_price, 1.0 - yes_price)
+    if fav >= 0.99:
+        return "🔻"
+    if 0.55 <= fav < 0.91:
+        return "⭐"
+    return ""
+
+
 def display_event_list(groups: list[EventGroup]) -> None:
     """Render a numbered Rich table of event groups."""
     table = Table(
@@ -195,7 +241,11 @@ def display_event_list(groups: list[EventGroup]) -> None:
     table.add_column("Mkts", justify="center", width=5)
     table.add_column("YES", justify="right", width=6)
     table.add_column("NO", justify="right", width=6)
+    table.add_column("Sig", justify="center", width=4)
+    table.add_column("Seen", justify="center", width=5)
     table.add_column("Volume (USD)", justify="right", width=14)
+
+    analyzed = _analyzed_market_ids()
 
     for i, g in enumerate(groups, start=1):
         # Single-market events show the market question; multi-market show event title
@@ -218,6 +268,12 @@ def display_event_list(groups: list[EventGroup]) -> None:
             str(len(g.markets)),
             f"{pm.yes_price:.0%}",
             f"{1.0 - pm.yes_price:.0%}",
+            _signal_glyph(pm.yes_price),
+            (
+                "[cyan]●[/cyan]"
+                if any(str(m.id) in analyzed for m in g.markets)
+                else ""
+            ),
             f"${g.total_volume:,.0f}",
         )
 
@@ -261,7 +317,11 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
     sub_table.add_column("Market", style="white", max_width=50)
     sub_table.add_column("YES", justify="right", width=6)
     sub_table.add_column("NO", justify="right", width=6)
+    sub_table.add_column("Sig", justify="center", width=4)
+    sub_table.add_column("Seen", justify="center", width=5)
     sub_table.add_column("Volume", justify="right", width=12)
+
+    analyzed = _analyzed_market_ids()
 
     for i, m in enumerate(group.markets, start=1):
         q = m.question if len(m.question) <= 50 else m.question[:47] + "..."
@@ -270,6 +330,8 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
             q,
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
+            _signal_glyph(m.yes_price),
+            "[cyan]●[/cyan]" if str(m.id) in analyzed else "",
             f"${m.volume_usd:,.0f}",
         )
 

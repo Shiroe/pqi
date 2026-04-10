@@ -328,41 +328,80 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
 _llm_semaphore = asyncio.Semaphore(config.LOCAL_LLM_CONCURRENCY)
 
 
+async def _call_llm(agent_key: str, system_prompt: str, user_msg: str) -> str:
+    """
+    Call the LLM for a single agent. Ollama uses the semaphore; Anthropic runs free.
+    """
+    if config.LLM_BACKEND == "ollama":
+        async with _llm_semaphore:
+            logger.debug("[%s] semaphore acquired — calling LLM", agent_key)
+            return await chat(system=system_prompt, user=user_msg, json_mode=True)
+    else:
+        logger.debug("[%s] calling LLM (no semaphore — API backend)", agent_key)
+        return await chat(system=system_prompt, user=user_msg, json_mode=True)
+
+
 async def _run_single_agent(
     agent_key: str,
     briefing: BriefingDocument,
 ) -> AgentVerdict | None:
     """
-    Run one agent: build its message, call chat(), parse the response.
-    For Ollama, acquires _llm_semaphore to cap concurrent calls and avoid OOM.
-    For API backends (Anthropic), runs without the semaphore — fully parallel.
-    Returns None if the LLM call or parse step raises — council continues.
+    Run one agent with retry + exponential backoff on failure.
+
+    Retries on both LLM call errors (timeouts, rate limits, 500s) and parse
+    failures (malformed JSON). Failed API calls are not billed.
+
+    Returns None only after all retries are exhausted.
     """
     system_prompt = AGENT_PERSONAS[agent_key]
     user_msg      = _build_user_message(briefing, agent_key)
+    max_retries   = config.AGENT_MAX_RETRIES
+    max_backoff   = 30.0  # seconds cap
 
-    try:
-        if config.LLM_BACKEND == "ollama":
-            async with _llm_semaphore:
-                logger.debug("[%s] semaphore acquired — calling LLM", agent_key)
-                raw = await chat(system=system_prompt, user=user_msg, json_mode=True)
+    for attempt in range(1 + max_retries):
+        # --- LLM call ---
+        try:
+            raw = await _call_llm(agent_key, system_prompt, user_msg)
+            logger.debug("[%s] raw response length=%d", agent_key, len(raw))
+        except Exception as exc:
+            if attempt < max_retries:
+                delay = min(2 ** attempt, max_backoff)
+                logger.warning(
+                    "[%s] LLM call failed (attempt %d/%d): %s — retrying in %.0fs",
+                    agent_key, attempt + 1, 1 + max_retries, exc, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            logger.error(
+                "[%s] LLM call failed after %d attempts: %s — agent dropped",
+                agent_key, 1 + max_retries, exc,
+            )
+            return None
+
+        # --- Parse ---
+        verdict = _parse_verdict(raw, agent_key)
+        if verdict is not None:
+            logger.debug(
+                "[%s] verdict: p=%.2f cy=%.2f cn=%.2f",
+                agent_key, verdict.probability, verdict.confidence_yes, verdict.confidence_no,
+            )
+            return verdict
+
+        # Parse failed — retry with backoff
+        if attempt < max_retries:
+            delay = min(2 ** attempt, max_backoff)
+            logger.warning(
+                "[%s] Parse failed (attempt %d/%d) — retrying in %.0fs",
+                agent_key, attempt + 1, 1 + max_retries, delay,
+            )
+            await asyncio.sleep(delay)
         else:
-            logger.debug("[%s] calling LLM (no semaphore — API backend)", agent_key)
-            raw = await chat(system=system_prompt, user=user_msg, json_mode=True)
-        logger.debug("[%s] raw response length=%d", agent_key, len(raw))
-    except Exception as exc:
-        logger.warning("[%s] LLM call failed: %s", agent_key, exc)
-        return None
+            logger.error(
+                "[%s] Parse failed after %d attempts — agent dropped",
+                agent_key, 1 + max_retries,
+            )
 
-    verdict = _parse_verdict(raw, agent_key)
-    if verdict is None:
-        logger.warning("[%s] Verdict parse failed — agent skipped", agent_key)
-    else:
-        logger.debug(
-            "[%s] verdict: p=%.2f cy=%.2f cn=%.2f",
-            agent_key, verdict.probability, verdict.confidence_yes, verdict.confidence_no,
-        )
-    return verdict
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -373,28 +412,37 @@ async def run_council(briefing: BriefingDocument) -> list[AgentVerdict]:
     """
     Run all 7 agents concurrently via asyncio.gather() and return their verdicts.
 
-    Filters out None results (agents that failed).
-    Logs a warning if fewer than 4 verdicts are returned (unreliable council).
-    Raises RuntimeError if no verdicts at all.
+    Each agent retries up to AGENT_MAX_RETRIES times with exponential backoff.
+    After all retries, requires at least MIN_COUNCIL_VERDICTS (default 5)
+    successful verdicts. Raises RuntimeError if the quorum is not met.
     """
+    min_verdicts = config.MIN_COUNCIL_VERDICTS
     logger.info(
-        "Council starting for market: %s", briefing.market.question[:60]
+        "Council starting for market: %s (min verdicts: %d/7)",
+        briefing.market.question[:60], min_verdicts,
     )
 
     coroutines = [_run_single_agent(key, briefing) for key in AGENT_NAMES]
     results = await asyncio.gather(*coroutines)
 
     verdicts: list[AgentVerdict] = [v for v in results if v is not None]
+    failed = len(AGENT_NAMES) - len(verdicts)
 
-    if not verdicts:
+    if len(verdicts) < min_verdicts:
+        failed_keys = [
+            AGENT_DISPLAY_NAMES.get(k, k)
+            for k, r in zip(AGENT_NAMES, results)
+            if r is None
+        ]
         raise RuntimeError(
-            f"Council produced zero verdicts for market: {briefing.market.question!r}"
+            f"Council quorum not met: {len(verdicts)}/7 verdicts "
+            f"(need {min_verdicts}). Failed agents: {', '.join(failed_keys)}"
         )
 
-    if len(verdicts) < 4:
+    if failed > 0:
         logger.warning(
-            "Only %d/7 agents returned verdicts — council result is unreliable",
-            len(verdicts),
+            "%d/7 agents failed but quorum met (%d ≥ %d) — proceeding",
+            failed, len(verdicts), min_verdicts,
         )
 
     logger.info("Council complete: %d/7 agents returned verdicts", len(verdicts))

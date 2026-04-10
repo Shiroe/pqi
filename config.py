@@ -68,7 +68,7 @@ EVENT_ENRICHMENT_MAX: int = int(os.getenv("EVENT_ENRICHMENT_MAX", "30"))
 # Market filtering
 # ---------------------------------------------------------------------------
 
-MAX_MARKETS_TO_FETCH: int = int(os.getenv("MAX_MARKETS_TO_FETCH", "20"))
+MAX_MARKETS_TO_FETCH: int = int(os.getenv("MAX_MARKETS_TO_FETCH", "30"))
 MIN_VOLUME_USD: float = float(os.getenv("MIN_VOLUME_USD", "10000"))
 SHORT_WINDOW_HOURS: int = int(os.getenv("SHORT_WINDOW_HOURS", "4"))
 MIN_VOLUME_SHORT_WINDOW_USD: float = float(
@@ -79,29 +79,36 @@ MIN_VOLUME_SHORT_WINDOW_USD: float = float(
 # Scoring & recommendation gates
 # ---------------------------------------------------------------------------
 
-EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.09"))  # deprecated — informational only
-MIN_TRADEABLE_PRICE: float = float(os.getenv("MIN_TRADEABLE_PRICE", "0.05"))
+EDGE_THRESHOLD: float = float(
+    os.getenv("EDGE_THRESHOLD", "0.09")
+)  # deprecated — informational only
+MIN_TRADEABLE_PRICE: float = float(os.getenv("MIN_TRADEABLE_PRICE", "0.09"))
 MAX_TRADEABLE_PRICE: float = float(os.getenv("MAX_TRADEABLE_PRICE", "0.90"))
-MIN_EXPECTED_ROI: float = float(os.getenv("MIN_EXPECTED_ROI", "0.15"))
+MIN_EXPECTED_ROI: float = float(os.getenv("MIN_EXPECTED_ROI", "0.10"))
 MIN_CONTRARIAN_ROI: float = float(os.getenv("MIN_CONTRARIAN_ROI", "0.20"))
 CONFIDENCE_HIGH_THRESHOLD: float = float(os.getenv("CONFIDENCE_HIGH_THRESHOLD", "0.67"))
-CONFIDENCE_MEDIUM_THRESHOLD: float = float(os.getenv("CONFIDENCE_MEDIUM_THRESHOLD", "0.40"))
-CONSENSUS_YES_FLOOR: float = float(os.getenv("CONSENSUS_YES_FLOOR", "0.40"))
-CONSENSUS_NO_CEILING: float = float(os.getenv("CONSENSUS_NO_CEILING", "0.60"))
-RULES_LAWYER_WEIGHT: float = float(os.getenv("RULES_LAWYER_WEIGHT", "2"))
+CONFIDENCE_MEDIUM_THRESHOLD: float = float(
+    os.getenv("CONFIDENCE_MEDIUM_THRESHOLD", "0.40")
+)
+MIN_COUNCIL_VERDICTS: int = int(os.getenv("MIN_COUNCIL_VERDICTS", "5"))
+"""Minimum agents (of 7) that must return valid verdicts. Below this → abort."""
+
+AGENT_MAX_RETRIES: int = int(os.getenv("AGENT_MAX_RETRIES", "5"))
+"""Max retries per agent on LLM/parse failure. Exponential backoff, 30s cap."""
+RULES_LAWYER_WEIGHT: float = float(os.getenv("RULES_LAWYER_WEIGHT", "1"))
 
 # Probability-first recommendation gates
 MIN_COUNCIL_PROBABILITY: float = float(os.getenv("MIN_COUNCIL_PROBABILITY", "0.60"))
-MIN_CONTRARIAN_PROBABILITY: float = float(os.getenv("MIN_CONTRARIAN_PROBABILITY", "0.70"))
+MIN_CONTRARIAN_PROBABILITY: float = float(
+    os.getenv("MIN_CONTRARIAN_PROBABILITY", "0.70")
+)
 MIN_CONTRARIAN_CONFIDENCE: float = float(os.getenv("MIN_CONTRARIAN_CONFIDENCE", "0.80"))
 
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
 
-CACHE_DB_PATH: str = os.getenv(
-    "CACHE_DB_PATH", str(Path.home() / ".pqi" / "cache.db")
-)
+CACHE_DB_PATH: str = os.getenv("CACHE_DB_PATH", str(Path.home() / ".pqi" / "cache.db"))
 CACHE_PRICE_DELTA: float = float(os.getenv("CACHE_PRICE_DELTA", "0.02"))
 
 # ---------------------------------------------------------------------------
@@ -169,31 +176,31 @@ if __name__ == "__main__":
         return val[:8] + "..." if len(val) > 8 else "***"
 
     rows = [
-        ("LLM_BACKEND",                LLM_BACKEND),
-        ("OLLAMA_MODEL",               OLLAMA_MODEL),
-        ("OLLAMA_BASE_URL",            OLLAMA_BASE_URL),
-        ("LOCAL_LLM_CONCURRENCY",      str(LOCAL_LLM_CONCURRENCY)),
-        ("ANTHROPIC_API_KEY",          _mask(ANTHROPIC_API_KEY)),
-        ("ANTHROPIC_MODEL",            ANTHROPIC_MODEL),
-        ("TAVILY_API_KEY",             _mask(TAVILY_API_KEY)),
-        ("GAMMA_RATE_LIMIT_DELAY",     str(GAMMA_RATE_LIMIT_DELAY)),
-        ("MAX_MARKETS_TO_FETCH",       str(MAX_MARKETS_TO_FETCH)),
-        ("MIN_VOLUME_USD",             str(MIN_VOLUME_USD)),
-        ("SHORT_WINDOW_HOURS",         str(SHORT_WINDOW_HOURS)),
-        ("MIN_VOLUME_SHORT_WINDOW_USD",str(MIN_VOLUME_SHORT_WINDOW_USD)),
-        ("EDGE_THRESHOLD",             str(EDGE_THRESHOLD)),
-        ("MIN_TRADEABLE_PRICE",        str(MIN_TRADEABLE_PRICE)),
-        ("MAX_TRADEABLE_PRICE",        str(MAX_TRADEABLE_PRICE)),
-        ("MIN_EXPECTED_ROI",           str(MIN_EXPECTED_ROI)),
-        ("MIN_CONTRARIAN_ROI",         str(MIN_CONTRARIAN_ROI)),
-        ("CONFIDENCE_HIGH_THRESHOLD",  str(CONFIDENCE_HIGH_THRESHOLD)),
-        ("CONFIDENCE_MEDIUM_THRESHOLD",str(CONFIDENCE_MEDIUM_THRESHOLD)),
-        ("CONSENSUS_YES_FLOOR",        str(CONSENSUS_YES_FLOOR)),
-        ("CONSENSUS_NO_CEILING",       str(CONSENSUS_NO_CEILING)),
-        ("RULES_LAWYER_WEIGHT",        str(RULES_LAWYER_WEIGHT)),
-        ("CACHE_DB_PATH",             CACHE_DB_PATH),
-        ("CACHE_PRICE_DELTA",         str(CACHE_PRICE_DELTA)),
-        ("LOG_LEVEL",                  LOG_LEVEL),
+        ("LLM_BACKEND", LLM_BACKEND),
+        ("OLLAMA_MODEL", OLLAMA_MODEL),
+        ("OLLAMA_BASE_URL", OLLAMA_BASE_URL),
+        ("LOCAL_LLM_CONCURRENCY", str(LOCAL_LLM_CONCURRENCY)),
+        ("ANTHROPIC_API_KEY", _mask(ANTHROPIC_API_KEY)),
+        ("ANTHROPIC_MODEL", ANTHROPIC_MODEL),
+        ("TAVILY_API_KEY", _mask(TAVILY_API_KEY)),
+        ("GAMMA_RATE_LIMIT_DELAY", str(GAMMA_RATE_LIMIT_DELAY)),
+        ("MAX_MARKETS_TO_FETCH", str(MAX_MARKETS_TO_FETCH)),
+        ("MIN_VOLUME_USD", str(MIN_VOLUME_USD)),
+        ("SHORT_WINDOW_HOURS", str(SHORT_WINDOW_HOURS)),
+        ("MIN_VOLUME_SHORT_WINDOW_USD", str(MIN_VOLUME_SHORT_WINDOW_USD)),
+        ("EDGE_THRESHOLD", str(EDGE_THRESHOLD)),
+        ("MIN_TRADEABLE_PRICE", str(MIN_TRADEABLE_PRICE)),
+        ("MAX_TRADEABLE_PRICE", str(MAX_TRADEABLE_PRICE)),
+        ("MIN_EXPECTED_ROI", str(MIN_EXPECTED_ROI)),
+        ("MIN_CONTRARIAN_ROI", str(MIN_CONTRARIAN_ROI)),
+        ("CONFIDENCE_HIGH_THRESHOLD", str(CONFIDENCE_HIGH_THRESHOLD)),
+        ("CONFIDENCE_MEDIUM_THRESHOLD", str(CONFIDENCE_MEDIUM_THRESHOLD)),
+        ("MIN_COUNCIL_VERDICTS", str(MIN_COUNCIL_VERDICTS)),
+        ("AGENT_MAX_RETRIES", str(AGENT_MAX_RETRIES)),
+        ("RULES_LAWYER_WEIGHT", str(RULES_LAWYER_WEIGHT)),
+        ("CACHE_DB_PATH", CACHE_DB_PATH),
+        ("CACHE_PRICE_DELTA", str(CACHE_PRICE_DELTA)),
+        ("LOG_LEVEL", LOG_LEVEL),
     ]
     col = max(len(k) for k, _ in rows) + 2
     for key, val in rows:
@@ -210,21 +217,26 @@ if __name__ == "__main__":
     assert isinstance(EDGE_THRESHOLD, float)
     assert isinstance(MIN_TRADEABLE_PRICE, float)
     assert isinstance(CONFIDENCE_HIGH_THRESHOLD, float)
-    assert isinstance(CONSENSUS_YES_FLOOR, float)
+    assert isinstance(MIN_COUNCIL_VERDICTS, int)
     assert LLM_BACKEND in VALID_BACKENDS
     print("  All type checks passed.")
 
     print("\n--- Validation error simulation ---")
     import subprocess
+
     result = subprocess.run(
-        [sys.executable, "-c",
-         "import os; os.environ.pop('TAVILY_API_KEY', None); "
-         "os.environ['LLM_BACKEND'] = 'ollama'; "
-         "from unittest.mock import patch; "
-         "with patch('dotenv.load_dotenv'): "
-         "    import importlib, pqi.config as c; "
-         "    importlib.reload(c)"],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            "-c",
+            "import os; os.environ.pop('TAVILY_API_KEY', None); "
+            "os.environ['LLM_BACKEND'] = 'ollama'; "
+            "from unittest.mock import patch; "
+            "with patch('dotenv.load_dotenv'): "
+            "    import importlib, pqi.config as c; "
+            "    importlib.reload(c)",
+        ],
+        capture_output=True,
+        text=True,
     )
     if "EnvironmentError" in result.stderr or "Missing required" in result.stderr:
         print("  ✓ EnvironmentError raised correctly for missing TAVILY_API_KEY")

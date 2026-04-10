@@ -131,15 +131,15 @@ The shared preamble enforces across ALL agents:
 - Scale: all scores are integers 0–100
 - Dual-perspective: must reason about BOTH sides before setting probability
 
-| Key            | Agent                      | Core Bias                                                                       |
-| -------------- | -------------------------- | ------------------------------------------------------------------------------- |
-| `rules_lawyer` | The Rules Lawyer           | Resolution criteria only — ignores real-world outcome if oracle condition unmet |
-| `bull`         | The Bull (Favorite's Advocate) | Strongest case for the FAVORED side (price-aware, dynamic)                  |
-| `bear`         | The Bear (Underdog's Advocate) | Strongest case for the UNDERDOG side (price-aware, dynamic)                 |
-| `statistician` | The Base-Rate Statistician | Historical base rate, ignores current hype                                      |
-| `sentiment`    | The Sentiment Analyst      | Crowd psychology vs current price                                               |
-| `specialist`   | The Domain Specialist      | Field-specific technical nuance                                                 |
-| `contrarian`   | The Contrarian             | Black swan — what flips the board                                               |
+| Key            | Agent                          | Core Bias                                                                       |
+| -------------- | ------------------------------ | ------------------------------------------------------------------------------- |
+| `rules_lawyer` | The Rules Lawyer               | Resolution criteria only — ignores real-world outcome if oracle condition unmet |
+| `bull`         | The Bull (Favorite's Advocate) | Strongest case for the FAVORED side (price-aware, dynamic)                      |
+| `bear`         | The Bear (Underdog's Advocate) | Strongest case for the UNDERDOG side (price-aware, dynamic)                     |
+| `statistician` | The Base-Rate Statistician     | Historical base rate, ignores current hype                                      |
+| `sentiment`    | The Sentiment Analyst          | Crowd psychology vs current price                                               |
+| `specialist`   | The Domain Specialist          | Field-specific technical nuance                                                 |
+| `contrarian`   | The Contrarian                 | Black swan — what flips the board                                               |
 
 **Scale rule (critical):** Agent prompts use integer 0–100.
 Parser in `council.py` divides by 100 before storing in `AgentVerdict` (0.0–1.0).
@@ -195,15 +195,16 @@ Gate order inside `from_council_verdicts()`:
    `side_conf >= MIN_CONTRARIAN_CONFIDENCE` (0.80),
    `expected_roi >= MIN_CONTRARIAN_ROI` (0.20). Label: `CONTRARIAN`.
 4. **Market-aligned**: requires
-   `council_prob >= MIN_COUNCIL_PROBABILITY` (0.60),
+   `council_prob >= MIN_COUNCIL_PROBABILITY` (0.57),
    `side_conf >= CONFIDENCE_HIGH_THRESHOLD` (0.67),
-   `expected_roi >= MIN_EXPECTED_ROI` (0.15).
+   `expected_roi >= MIN_EXPECTED_ROI` (0.10).
 5. Otherwise → PASS with dynamic pass_reason.
 
 Signal type on market-aligned BUYs is ROI-banded:
+
 - `STRONG` — expected_roi ≥ 50% (cheap side; price ≤ ~0.667)
 - `CONFIRMED` — 25% ≤ expected_roi < 50% (price ~0.667–0.80)
-- `CAUTIOUS` — 15% ≤ expected_roi < 25% (price ~0.80–0.87)
+- `CAUTIOUS` — 10% ≤ expected_roi < 25% (price ~0.80–0.91)
 
 `EDGE_THRESHOLD` is **deprecated** — `edge` is still computed and displayed
 for historical continuity but is no longer consumed as a gate or label.
@@ -240,16 +241,18 @@ Key endpoints:
 No auth required. Use `httpx.AsyncClient`. Respect rate limits — 0.5s delay.
 
 **Category resolution (three-pass, parallelized):**
+
 - `resolve_category(query)` tries:
   1. Exact series slug match via `/series?slug=<query>`
   2. (parallel) Partial series slug/title match via `/series?limit=200`
-     + Exact tag slug match via `/tags/slug/<query>`
+     - Exact tag slug match via `/tags/slug/<query>`
   3. Partial tag match via paginated `/tags` (fallback, caps at 600 tags)
 - Series match → `series_id` param on `/events` (server-side filter)
 - Tag match → `tag_id` param on `/events` (server-side filter)
 - `/markets` endpoint has `tag_id` but NOT `series_id`. `/events` has both.
 
 **Event-level live/ended fields:**
+
 - `live: bool`, `ended: bool`, `gameStatus`, `score`, `elapsed`, `period`
 - These are populated on `/public-search` and direct `/events/{id}` fetches
 - They are always `None` on the `/events` list endpoint (not populated in list responses)
@@ -343,11 +346,11 @@ MIN_VOLUME_SHORT_WINDOW_USD=500 # volume floor for short-window queries
 
 Every value a user might tune without touching code must follow this pattern:
 
-| Where | What goes there |
-|---|---|
-| `.env.example` | Every tunable key, its default, and a plain-English comment explaining what it does |
-| `.env` | User's actual values (not committed) |
-| `config.py` | `os.getenv("KEY", "default")` — the Python default matches `.env.example`'s shown value |
+| Where          | What goes there                                                                         |
+| -------------- | --------------------------------------------------------------------------------------- |
+| `.env.example` | Every tunable key, its default, and a plain-English comment explaining what it does     |
+| `.env`         | User's actual values (not committed)                                                    |
+| `config.py`    | `os.getenv("KEY", "default")` — the Python default matches `.env.example`'s shown value |
 
 **True code constants** (API base URLs, valid enum sets) stay as Python literals in
 `config.py` and do NOT appear in `.env.example`.
@@ -357,6 +360,7 @@ it belongs in `.env`. If it would only make sense to change in a code edit, it s
 as a literal.
 
 **When adding any new configurable value:**
+
 1. Add `VAR: type = os.getenv("VAR", "default")` to `config.py`
 2. Add the key to `.env.example` with a `# comment` explaining what it does
 
@@ -386,14 +390,53 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 17 — history validation overhaul, resolution sync, per-agent accuracy, postmortem, shared sibling briefing]
+**Last updated:** [session 19 — gate retrospective, Tier 1 ROI 0.15→0.10, Bear bias audit]
+
+### Session 19 additions
+
+- `config.py` — `MIN_EXPECTED_ROI` code default changed from 0.15 to 0.10.
+  `.env.example` updated to match. `.env` already had 0.10 from prior adjustment.
+  Widens the eligible price band for CAUTIOUS signals from ≤$0.87 to ≤$0.91.
+  Zero historical wrong buys added (replayed all 60 non-legacy entries).
+- `docs/retrospectives/eval_tier1_roi_2026_04.md` — **NEW.** Full retrospective
+  report covering: dataset context (88 runs, 60 non-legacy), command log,
+  all 4 non-legacy missed opportunities with root cause breakdown, financial
+  impact analysis, Tier 2 simulation results (deferred), and Bear agent
+  performance/bias audit.
+- **Bear audit findings (documented, not acted on):** The Bear has 38% hit rate
+  (worst of all 7 agents), leans NO 81% of the time, and is the "loudest wrong
+  voice" on 43% of its contested leans. Root cause: persona wording ("aggressively
+  skeptical", "apply Murphy's Law") creates structural NO-bias. 4 remediation
+  options documented in retrospective; prompt change not yet implemented.
+
+### Session 18 additions
+
+- `main.py` — `history list` filter flags: `--outcome`, `--rec`, `--conf` with
+  alias maps (`_OUTCOME_ALIASES`, `_REC_ALIASES`, `_CONF_ALIASES`). Filters
+  apply after numbering so absolute `#` IDs stay stable across filtered views.
+  Loud failure on typos (prints valid set). `--all` flag default changed from
+  True → False (was a bug, `--all` is now opt-in). Numbering bug fixed: when
+  `--all` is set, IDs go 1..total (was incorrectly starting at total-1).
+- `main.py` — `_signal_glyph(yes_price)`: ⭐ when favored side is in [55%, 91%)
+  (actionable band), 🔻 when favored ≥ 99% (effectively resolved, noise).
+  New `Sig` column added to all three market/event selection tables: event list,
+  single-market list, and sibling sub-table.
+- `main.py` — `_analyzed_market_ids()`: loads history once per render, returns
+  set of non-legacy market IDs. New `Seen` column (cyan `●`) in all three
+  selection tables. Event-level table shows `●` if _any_ sibling market has
+  been analyzed. Failure is non-fatal (logs debug, returns empty set).
+- `main.py` — `history stats` overview panel now shows **council-level lean
+  accuracy** across all resolved entries (same formula as list's Lean✓ column:
+  `final_score` with 0.45–0.55 dead band). Also shows explicit `(M resolved,
+K non-legacy)` counts so it's clear what each downstream stat covers.
+  Per-agent Lean % (per-verdict) unchanged and still shown separately.
 
 ### Session 17 additions
 
 - `models.py` — `CouncilResult.briefing: BriefingDocument | None` field added so
   the full briefing handed to the council is persisted with each result.
 - `history.py` — full rewrite. Each entry is now `{run_id, timestamp, legacy,
-  result, resolution, analysis}`. `result` is the entire CouncilResult.
+result, resolution, analysis}`. `result` is the entire CouncilResult.
   Legacy flat-schema entries are migrated in-memory by `_migrate_legacy_entry()`
   and tagged `legacy: True` so analytics can exclude them. New helpers:
   `iter_unresolved(past_end_only=False)`, `update_resolution(run_id, ...)`,
@@ -488,7 +531,7 @@ as a literal.
   When provided, multiplies agent confidence by weight in the weighted sum (e.g.
   Rules Lawyer at 2× counts double). Two-sided scoring: YES-side and NO-side
   weighted independently. Gates: edge threshold, per-side HIGH confidence,
-  median consensus, min_tradeable_price.
+  min_tradeable_price, min_council_probability.
   `pass_reason: str` field (session 14): when recommendation is PASS, explains
   which gate(s) blocked the signal. Empty string for BUY YES/BUY NO.
   `signal_type` field (session 15): conviction label for BUY recommendations:
@@ -536,7 +579,7 @@ as a literal.
   delta < `CACHE_PRICE_DELTA` (default 2%). `store_result()` upserts.
   DB at `~/.pqi/cache.db` (configurable via `CACHE_DB_PATH`).
 - `main.py` — Typer CLI: `analyze` + `categories` + `history` commands.
-  Flags: `--category/-c`, `--top-n/-n`, `--top/-t`, `--starts-within/-s`,
+  Analyze flags: `--category/-c`, `--top-n/-n`, `--top/-t`, `--starts-within/-s`,
   `--resolve-within/-r`, `--live/-l`, `--min-volume/-v`, `--no-cache`.
   `analyze` checks cache before running council; stores result after.
   `--no-cache` forces a fresh council run. Result appended to history after every run.
@@ -544,7 +587,15 @@ as a literal.
   Sibling market discovery (session 14): after market selection, fetches parent
   event via `fetch_event_markets()`, shows all sibling markets, offers to analyze
   them too. Useful for BO3 events with map 1/map 2/moneyline sub-markets.
-  `history` command shows past runs in a Rich table.
+  Market/event selection tables include `Sig` column (⭐ actionable band, 🔻
+  resolved noise) and `Seen` column (cyan ● if any market in the event has a
+  non-legacy history entry). `_signal_glyph()` and `_analyzed_market_ids()` helpers.
+  History list flags (session 18): `--all/-a` (opt-in, shows all entries 1..N),
+  `--outcome` (filter by outcome class with aliases), `--rec` (filter by
+  recommendation type), `--conf` (filter by confidence level). Filters apply
+  after absolute numbering so `#` IDs are stable. History stats (session 18):
+  overview panel shows council-level lean accuracy (all resolved entries,
+  dead band 0.45–0.55) alongside the existing per-agent leaderboard.
 - `market/polymarket.py` — **Refactored session 16.** Architecture:
   `fetch_markets()` → `_fetch_and_filter()` → `_build_api_params()` +
   `_parse_events_to_markets()` + `_apply_client_filters()`.
@@ -604,8 +655,9 @@ as a literal.
   `MIN_VOLUME_SHORT_WINDOW_USD` ($500 default). `--min-volume 0` disables all filtering.
 - **Min-tradeable-price gate:** Recommended side must cost ≥ MIN_TRADEABLE_PRICE
   (default 5¢). Prevents "BUY NO at $0.01" on near-over events.
-- **Consensus gate:** Median probability must pass (>0.40 for BUY YES, <0.60 for
-  BUY NO). Blocks outlier-driven false signals.
+- **Council quorum gate:** At least `MIN_COUNCIL_VERDICTS` (default 5) of 7 agents
+  must return valid verdicts. Below this the analysis aborts. Agents retry up to
+  `AGENT_MAX_RETRIES` times with exponential backoff (cap 30s) before being dropped.
 - **Two-sided confidence:** Agents output separate confidence_yes and confidence_no.
   Parser falls back to legacy confidence_level (both sides equal) if agent doesn't
   produce the new fields. Scoring evaluates BUY YES from yes_edge + yes-side
@@ -634,48 +686,49 @@ as a literal.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 
-Session 17 delivered the history validation system: full-fidelity persistence,
-resolution sync from the Gamma API, per-agent accuracy stats, and a postmortem
-layer that explains why each call was right/wrong/missed. CLI was reshaped into
-a `pqi history` sub-app (list/show/sync/stats). Shared sibling briefing also
-landed (one Tavily call per event).
+Session 19: gate retrospective analysis and Tier 1 optimization.
+- MIN_EXPECTED_ROI default changed 0.15 → 0.10 in config.py + .env.example
+- Full retrospective report: docs/retrospectives/eval_tier1_roi_2026_04.md
+- Bear agent audit: 38% hit rate, 81% NO-lean bias, 43% loudest-wrong-voice.
+  4 remediation options documented but not implemented.
 
 ## Remaining ideas / future work
 
-### 1. Cache TTL / expiry
+### 1. Bear prompt engineering (HIGH PRIORITY from session 19 audit)
+The Bear has the worst accuracy of all 7 agents (38% hit rate, 0.302 Brier).
+It leans NO 81% of the time and was the sole cause of 2 missed opportunities
+(#82 MANA, #87 T1 Academy) by dragging mean confidence below the 67% gate.
+See docs/retrospectives/eval_tier1_roi_2026_04.md Section 6d for 4 options.
+Recommended: soften "aggressively skeptical" language + add confidence floor
+for data-poor underdogs.
+
+### 2. Tier 2 gate evaluation (DEFERRED)
+Lowering CONFIDENCE_HIGH_THRESHOLD 0.67 → 0.65 would recover 4 wins at cost
+of 2 new losses (net +2). Wait for 100+ non-legacy entries for statistical
+confidence. See retrospective Section 5.
+
+### 3. Cache TTL / expiry
 Add time-based expiry to cached council results (e.g. 24h max age). Currently
 cache only invalidates on price movement > 2%.
 
-### 2. /public-search integration
+### 4. /public-search integration
 Use `/public-search?q=TEXT` as supplementary fetch for ghost events that don't
 appear in /events list queries.
 
-### 3. Multi-market batch analysis
+### 5. Multi-market batch analysis
 Allow `pqi analyze --top 3` to analyze top N markets sequentially.
 
-### 4. Use tag_slug for simpler category resolution
-The /events endpoint accepts `tag_slug` directly — could simplify
-resolve_category() by skipping the tag_id lookup step for exact slug matches.
-
-### 5. Per-category accuracy slicing
+### 6. Per-category accuracy slicing
 `pqi history stats --category esports` would let us see which agents are
-strong in which domains (Domain Specialist should excel in technical fields,
-Statistician on base-rate-driven sports, etc).
-
-### 6. Resolution voided handling
-Currently `voided` markets (closed but no clean YES/NO winner) are counted
-separately. Consider whether they should affect agent accuracy or be silently
-excluded.
+strong in which domains.
 
 ### 7. Postmortem persistence on `list`
 `pqi history list` currently calls `signal_postmortem()` for each row but does
-not persist (only `show` does). Consider eager persistence so the list view
-gets faster on repeat calls.
+not persist (only `show` does). Consider eager persistence.
 
 ### 8. Auto-sync race condition
 Two consecutive `pqi history list` calls in <2s could spawn two background
-syncs that both try to rewrite history.jsonl. Low impact (atomic rename), but
-a lockfile would be cleaner.
+syncs. Low impact (atomic rename), but a lockfile would be cleaner.
 
 ## Instructions
 - Pick the next priority with the user before starting

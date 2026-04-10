@@ -157,9 +157,6 @@ class CouncilResult(BaseModel):
         min_contrarian_probability: float = 0.70,
         min_contrarian_confidence: float = 0.80,
         agent_weights: dict[str, float] | None = None,
-        # Legacy params kept for backward compat but no longer used as gates
-        consensus_yes_floor: float = 0.40,
-        consensus_no_ceiling: float = 0.60,
     ) -> CouncilResult:
         """
         Compute all derived fields from raw verdicts and assemble a CouncilResult.
