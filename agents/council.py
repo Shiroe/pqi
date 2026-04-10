@@ -159,17 +159,34 @@ def _format_briefing(briefing: BriefingDocument) -> str:
         ph = briefing.price_history
         lines = [
             f"\nMARKET PRICE HISTORY (last {config.PRICE_HISTORY_INTERVAL}, hourly):",
-            f"  Weighted Avg (EMA): YES = {ph.weighted_avg:.0%}",
-            f"  7-Day Change:       {ph.change_1w_pp:+.1f}pp ({ph.direction})",
-            f"  24-Hour Change:     {ph.change_24h_pp:+.1f}pp",
-            f"  24-Hour Volatility: {ph.volatility_24h:.1f}pp/hr",
+            f"  YES side ({ph.yes.data_points} points):",
+            f"    Weighted Avg (EMA): {ph.yes.weighted_avg:.0%}",
+            f"    7-Day Change:       {ph.yes.change_1w_pp:+.1f}pp ({ph.yes.direction})",
+            f"    24-Hour Change:     {ph.yes.change_24h_pp:+.1f}pp",
+            f"    24-Hour Volatility: {ph.yes.volatility_24h:.1f}pp/hr",
         ]
-        if ph.sharp_moves:
+        if ph.yes.sharp_moves:
             moves_str = "; ".join(
                 f"{sm.timestamp.strftime('%b %d %H:%M UTC')} {sm.delta_pp:+.1f}pp"
-                for sm in ph.sharp_moves
+                for sm in ph.yes.sharp_moves
             )
-            lines.append(f"  Sharp Moves:        {moves_str}")
+            lines.append(f"    Sharp Moves:        {moves_str}")
+        lines += [
+            f"  NO side ({ph.no.data_points} points):",
+            f"    Weighted Avg (EMA): {ph.no.weighted_avg:.0%}",
+            f"    7-Day Change:       {ph.no.change_1w_pp:+.1f}pp ({ph.no.direction})",
+            f"    24-Hour Change:     {ph.no.change_24h_pp:+.1f}pp",
+            f"    24-Hour Volatility: {ph.no.volatility_24h:.1f}pp/hr",
+        ]
+        if ph.no.sharp_moves:
+            moves_str = "; ".join(
+                f"{sm.timestamp.strftime('%b %d %H:%M UTC')} {sm.delta_pp:+.1f}pp"
+                for sm in ph.no.sharp_moves
+            )
+            lines.append(f"    Sharp Moves:        {moves_str}")
+        lines.append(
+            f"  NOTE: YES + NO prices may not sum to 100% (spread/vig in orderbook)"
+        )
         price_history_block = "\n".join(lines) + "\n"
 
     return (

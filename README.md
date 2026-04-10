@@ -357,7 +357,8 @@ Council of Seven — Verdicts
 ╭──────────────────── Recommendation ────────────────────╮
 │ Council YES:    75.2%  |  Council NO:  24.3%          │
 │ Market Prices:  YES = 66.0%  |  NO = 34.0%            │
-│ 7d Trend:       +5.2pp RISING  |  24h: +1.8pp  |  Vol: 0.9pp/hr │
+│ 7d Trend YES:   +5.2pp RISING  |  24h: +1.8pp  |  Vol: 0.9pp/hr │
+│ 7d Trend NO:    -4.8pp FALLING |  24h: -1.5pp  |  Vol: 0.8pp/hr │
 │ YES Edge:       +9.2%  |  NO Edge:  -9.7%             │
 │ Max ROI (YES):  +51.5%  (if that side wins)            │
 │ Confidence:     HIGH                                   │
@@ -511,8 +512,9 @@ on the favorite but insufficient data on the underdog.
 
 Agents deliberate **in parallel**, not sequentially. Each sees the briefing document
 with an EVENT TIMING block indicating urgency (LIVE/IMMINENT, TODAY, THIS WEEK, FUTURE)
-and a MARKET PRICE HISTORY block showing the 7-day trend (direction, weighted average,
-volatility, sharp moves) fetched from the Polymarket CLOB API.
+and a two-sided MARKET PRICE HISTORY block showing independent YES and NO token trends
+(direction, weighted average, volatility, sharp moves) fetched from the Polymarket CLOB
+API. YES + NO CLOB prices don't sum to 100% due to spread/vig in the orderbook.
 
 The Rules Lawyer receives an additional injection of the market's resolution criteria
 at the top of its briefing, marked as the source of truth.

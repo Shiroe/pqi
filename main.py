@@ -162,9 +162,12 @@ def display_council_result(result: CouncilResult) -> None:
     if result.briefing and result.briefing.price_history:
         ph = result.briefing.price_history
         trend_line = (
-            f"[bold]7d Trend:[/bold]       {ph.change_1w_pp:+.1f}pp {ph.direction}  |  "
-            f"24h: {ph.change_24h_pp:+.1f}pp  |  "
-            f"Vol: {ph.volatility_24h:.1f}pp/hr\n"
+            f"[bold]7d Trend YES:[/bold]   {ph.yes.change_1w_pp:+.1f}pp {ph.yes.direction}  |  "
+            f"24h: {ph.yes.change_24h_pp:+.1f}pp  |  "
+            f"Vol: {ph.yes.volatility_24h:.1f}pp/hr\n"
+            f"[bold]7d Trend NO:[/bold]    {ph.no.change_1w_pp:+.1f}pp {ph.no.direction}  |  "
+            f"24h: {ph.no.change_24h_pp:+.1f}pp  |  "
+            f"Vol: {ph.no.volatility_24h:.1f}pp/hr\n"
         )
 
     summary = (
@@ -407,8 +410,10 @@ async def _run_analysis(
         if price_history:
             briefing = briefing.model_copy(update={"price_history": price_history})
             console.print(
-                f"[cyan]Price history: {price_history.data_points} hourly points, "
-                f"trend {price_history.direction} ({price_history.change_1w_pp:+.1f}pp/wk)[/cyan]"
+                f"[cyan]Price history: YES {price_history.yes.data_points}pts "
+                f"{price_history.yes.direction} ({price_history.yes.change_1w_pp:+.1f}pp/wk)  |  "
+                f"NO {price_history.no.data_points}pts "
+                f"{price_history.no.direction} ({price_history.no.change_1w_pp:+.1f}pp/wk)[/cyan]"
             )
         else:
             console.print(

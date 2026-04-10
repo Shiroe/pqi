@@ -46,11 +46,11 @@ class SharpMove(BaseModel):
     """Signed change in percentage points."""
 
 
-class PriceHistory(BaseModel):
-    """Computed trend metrics from CLOB hourly price data."""
+class SidePriceHistory(BaseModel):
+    """Computed trend metrics for one side (YES or NO) from CLOB hourly price data."""
 
     token_id: str
-    """CLOB token ID used to fetch this history (YES token)."""
+    """CLOB token ID used to fetch this side's history."""
     data_points: int
     """Number of hourly observations retrieved."""
     weighted_avg: float = Field(..., ge=0.0, le=1.0)
@@ -65,6 +65,15 @@ class PriceHistory(BaseModel):
     """Trend direction based on linear regression slope (±2pp threshold)."""
     sharp_moves: list[SharpMove] = Field(default_factory=list)
     """Up to 3 most recent single-hour moves exceeding 5pp."""
+
+
+class PriceHistory(BaseModel):
+    """Two-sided price history from CLOB — YES and NO tracked independently."""
+
+    yes: SidePriceHistory
+    """YES-side trend metrics."""
+    no: SidePriceHistory
+    """NO-side trend metrics."""
     fetched_at: datetime
     """UTC timestamp when the CLOB data was fetched."""
 

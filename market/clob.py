@@ -2,15 +2,17 @@
 """
 Polymarket CLOB API client — price history enrichment.
 
-Fetches hourly YES-token price data and computes trend metrics
-(weighted average, direction, volatility, sharp moves).
+Fetches hourly price data for BOTH YES and NO tokens independently
+(they don't sum to 1.0 due to spread/vig) and computes per-side
+trend metrics (weighted average, direction, volatility, sharp moves).
 
-Uses httpx (async) for the HTTP call. py-clob-client is installed
+Uses httpx (async) for HTTP calls. py-clob-client is installed
 for future trading phases but not used here.
 
 Non-fatal: all public functions return None on failure and log warnings.
 """
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timezone
@@ -19,7 +21,7 @@ from statistics import stdev
 import httpx
 
 from pqi import config
-from pqi.models import MarketData, PriceHistory, PricePoint, SharpMove
+from pqi.models import MarketData, PriceHistory, PricePoint, SharpMove, SidePriceHistory
 
 logger = logging.getLogger(__name__)
 
@@ -40,22 +42,75 @@ _DIRECTION_THRESHOLD_PP: float = 2.0  # slope × window_hours must exceed ±2pp
 
 async def fetch_price_history(market: MarketData) -> PriceHistory | None:
     """
-    Fetch YES-token price history from the CLOB API and compute trend metrics.
+    Fetch YES and NO token price history from the CLOB API in parallel
+    and compute per-side trend metrics.
 
     Returns None (and logs a warning) if:
-      - market has no clob_token_ids
-      - the HTTP request fails
-      - the response contains insufficient data (< 2 points)
+      - market has fewer than 2 clob_token_ids
+      - both HTTP requests fail
+      - both sides have insufficient data (< 2 points)
     """
-    if not market.clob_token_ids:
+    if len(market.clob_token_ids) < 2:
         logger.warning(
-            "Market %s has no CLOB token IDs — cannot fetch price history",
+            "Market %s has <2 CLOB token IDs (%d) — cannot fetch price history",
             market.id,
+            len(market.clob_token_ids),
         )
         return None
 
-    token_id = market.clob_token_ids[0]  # YES token
+    yes_token = market.clob_token_ids[0]
+    no_token = market.clob_token_ids[1]
 
+    try:
+        # Fetch both sides in parallel
+        yes_points, no_points = await asyncio.gather(
+            _fetch_side(market.id, yes_token, "YES"),
+            _fetch_side(market.id, no_token, "NO"),
+        )
+
+        if yes_points is None or no_points is None:
+            # At least one side failed entirely
+            if yes_points is None and no_points is None:
+                logger.warning(
+                    "CLOB price history: both sides failed for market %s",
+                    market.id,
+                )
+                return None
+            logger.warning(
+                "CLOB price history: %s side failed for market %s — "
+                "cannot produce two-sided history",
+                "YES" if yes_points is None else "NO",
+                market.id,
+            )
+            return None
+
+        now = datetime.now(timezone.utc)
+        yes_side = _compute_side_metrics(yes_points, yes_token)
+        no_side = _compute_side_metrics(no_points, no_token)
+
+        return PriceHistory(yes=yes_side, no=no_side, fetched_at=now)
+
+    except Exception as exc:
+        logger.warning(
+            "CLOB price history fetch failed for %s: %s",
+            market.id,
+            exc,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Per-side fetch
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_side(
+    market_id: str, token_id: str, label: str
+) -> list[PricePoint] | None:
+    """
+    Fetch and parse price history for a single token.
+    Returns a sorted list of PricePoints, or None on failure / insufficient data.
+    """
     try:
         url = f"{config.CLOB_BASE_URL}/prices-history"
         params = {
@@ -80,13 +135,13 @@ async def fetch_price_history(market: MarketData) -> PriceHistory | None:
 
         if len(history_list) < 2:
             logger.warning(
-                "CLOB price history for %s returned %d points — need ≥2",
-                market.id,
+                "CLOB %s-side history for %s returned %d points — need ≥2",
+                label,
+                market_id,
                 len(history_list),
             )
             return None
 
-        # Parse [{t: unix_timestamp, p: price}, ...]
         points: list[PricePoint] = []
         for entry in history_list:
             try:
@@ -100,29 +155,30 @@ async def fetch_price_history(market: MarketData) -> PriceHistory | None:
 
         if len(points) < 2:
             logger.warning(
-                "CLOB price history for %s: only %d valid points after parsing",
-                market.id,
+                "CLOB %s-side history for %s: only %d valid points after parsing",
+                label,
+                market_id,
                 len(points),
             )
             return None
 
-        # Sort by timestamp ascending (should already be, but be safe)
         points.sort(key=lambda p: p.timestamp)
-
-        return _compute_metrics(points, token_id)
+        return points
 
     except httpx.HTTPStatusError as exc:
         logger.warning(
-            "CLOB price history HTTP error for %s: %s %s",
-            market.id,
+            "CLOB %s-side history HTTP error for %s: %s %s",
+            label,
+            market_id,
             exc.response.status_code,
             exc.response.text[:200],
         )
         return None
     except Exception as exc:
         logger.warning(
-            "CLOB price history fetch failed for %s: %s",
-            market.id,
+            "CLOB %s-side history fetch failed for %s: %s",
+            label,
+            market_id,
             exc,
         )
         return None
@@ -133,8 +189,10 @@ async def fetch_price_history(market: MarketData) -> PriceHistory | None:
 # ---------------------------------------------------------------------------
 
 
-def _compute_metrics(points: list[PricePoint], token_id: str) -> PriceHistory:
-    """Compute all trend metrics from a sorted list of price points."""
+def _compute_side_metrics(
+    points: list[PricePoint], token_id: str
+) -> SidePriceHistory:
+    """Compute all trend metrics for one side from a sorted list of price points."""
     now = datetime.now(timezone.utc)
     latest = points[-1]
     earliest = points[0]
@@ -182,7 +240,7 @@ def _compute_metrics(points: list[PricePoint], token_id: str) -> PriceHistory:
             )
     sharp_moves = sharp_moves[-SHARP_MOVES_MAX:]
 
-    return PriceHistory(
+    return SidePriceHistory(
         token_id=token_id,
         data_points=len(points),
         weighted_avg=weighted_avg,
@@ -191,7 +249,6 @@ def _compute_metrics(points: list[PricePoint], token_id: str) -> PriceHistory:
         volatility_24h=volatility_24h,
         direction=direction,
         sharp_moves=sharp_moves,
-        fetched_at=now,
     )
 
 
