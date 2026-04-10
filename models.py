@@ -125,7 +125,7 @@ class CouncilResult(BaseModel):
     """no_score − no_price.  Positive = underpriced NO."""
     recommendation: Literal["BUY YES", "BUY NO", "PASS"]
     confidence_level: Literal["HIGH", "MEDIUM", "LOW"]
-    signal_type: Literal["STRONG", "CONFIRMED", "CAUTIOUS", "CONTRARIAN"] | None = None
+    signal_type: Literal["HIGH VALUE", "MODERATE VALUE", "LOW MARGIN", "CONTRARIAN"] | None = None
     """Conviction label for BUY recommendations. None when PASS."""
     pass_reason: str = ""
     """Why the recommendation is PASS (empty for BUY YES / BUY NO)."""
@@ -167,7 +167,7 @@ class CouncilResult(BaseModel):
           3. Check if council agrees with market or goes contrarian
           4. Market-aligned: council prob >= min_council_probability + confidence HIGH
           5. Contrarian: council prob >= min_contrarian_probability + confidence >= min_contrarian_confidence
-          6. Signal type: STRONG (positive edge) / CONFIRMED (edge ~0) / CAUTIOUS (negative edge) / CONTRARIAN
+          6. Signal type: HIGH VALUE (ROI ≥50%) / MODERATE VALUE (25-50%) / LOW MARGIN (10-25%) / CONTRARIAN
         """
         if not verdicts:
             raise ValueError(
@@ -232,7 +232,7 @@ class CouncilResult(BaseModel):
 
         # Apply gates
         recommendation: Literal["BUY YES", "BUY NO", "PASS"]
-        signal_type: Literal["STRONG", "CONFIRMED", "CAUTIOUS", "CONTRARIAN"] | None
+        signal_type: Literal["HIGH VALUE", "MODERATE VALUE", "LOW MARGIN", "CONTRARIAN"] | None
         pass_reason = ""
 
         if side_price < min_tradeable_price:
@@ -285,11 +285,11 @@ class CouncilResult(BaseModel):
             recommendation = f"BUY {rec_side}"  # type: ignore[assignment]
             # Signal type based on max ROI bands
             if expected_roi >= 0.50:
-                signal_type = "STRONG"
+                signal_type = "HIGH VALUE"
             elif expected_roi >= 0.25:
-                signal_type = "CONFIRMED"
+                signal_type = "MODERATE VALUE"
             else:
-                signal_type = "CAUTIOUS"
+                signal_type = "LOW MARGIN"
         else:
             recommendation = "PASS"
             signal_type = None
@@ -440,7 +440,7 @@ if __name__ == "__main__":
     r1 = CouncilResult.from_council_verdicts(market=m1, verdicts=_make_verdicts(0.75, 0.80, 0.60))
     print(f"  S1 (STRONG):      rec={r1.recommendation:<10} signal={r1.signal_type:<12} "
           f"council_yes={r1.final_score:.0%} price={m1.yes_price:.0%} roi={r1.expected_roi:.1%}")
-    assert r1.recommendation == "BUY YES" and r1.signal_type == "STRONG"
+    assert r1.recommendation == "BUY YES" and r1.signal_type == "HIGH VALUE"
 
     # Scenario 2: Market-aligned CONFIRMED — mid-price, ROI 25%–50%
     # Market NO=0.72 (yes=0.28), Council NO≈0.72 → side_price 0.72, ROI = 38.9%
@@ -448,7 +448,7 @@ if __name__ == "__main__":
     r2 = CouncilResult.from_council_verdicts(market=m2, verdicts=_make_verdicts(0.28, 0.50, 0.70))
     print(f"  S2 (CONFIRMED):   rec={r2.recommendation:<10} signal={r2.signal_type:<12} "
           f"council_no={r2.no_score:.0%} price={1-m2.yes_price:.0%} roi={r2.expected_roi:.1%}")
-    assert r2.recommendation == "BUY NO" and r2.signal_type == "CONFIRMED"
+    assert r2.recommendation == "BUY NO" and r2.signal_type == "MODERATE VALUE"
 
     # Scenario 3: Market-aligned CAUTIOUS — pricey side, ROI 15%–25%
     # Market NO=0.82 (yes=0.18), Council NO≈0.75 → side_price 0.82, ROI = 22.0%
@@ -456,7 +456,7 @@ if __name__ == "__main__":
     r3 = CouncilResult.from_council_verdicts(market=m3, verdicts=_make_verdicts(0.25, 0.45, 0.70))
     print(f"  S3 (CAUTIOUS):    rec={r3.recommendation:<10} signal={r3.signal_type:<12} "
           f"council_no={r3.no_score:.0%} price={1-m3.yes_price:.0%} roi={r3.expected_roi:.1%}")
-    assert r3.recommendation == "BUY NO" and r3.signal_type == "CAUTIOUS"
+    assert r3.recommendation == "BUY NO" and r3.signal_type == "LOW MARGIN"
 
     # Scenario 4: Contrarian — council goes against market, strict criteria met
     # Market: NO=80% (yes=20%), Council: YES≈72% with high confidence

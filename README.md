@@ -18,8 +18,8 @@ Polymarket Gamma API (/events endpoint)
 The council computes two independent scores: a YES-side and NO-side weighted average,
 each using per-agent directional confidence. A recommendation is issued when the
 council's probability on its favored side clears the threshold and confidence is HIGH.
-Edge (council vs market price) determines the signal type (STRONG / CONFIRMED / CAUTIOUS),
-but is not a gate for recommendations.
+Max ROI of the recommended side determines the signal type (HIGH VALUE / MODERATE VALUE /
+LOW MARGIN), but is not a gate for recommendations.
 
 ---
 
@@ -359,7 +359,7 @@ Council of Seven — Verdicts
 │ YES Edge:       +9.2%  |  NO Edge:  -9.7%    │
 │ Confidence:     HIGH                         │
 │                                              │
-│ >>> BUY YES @ $0.66/share — STRONG <<<       │
+│ >>> BUY YES @ $0.66/share — HIGH VALUE <<<    │
 ╰──────────────────────────────────────────────╯
 ```
 
@@ -367,9 +367,9 @@ Council of Seven — Verdicts
 
 | Recommendation | Meaning |
 |----------------|---------|
-| **BUY YES — STRONG** | Cheap side, max ROI ≥ 50% (price ≤ ~0.667) |
-| **BUY YES — CONFIRMED** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80) |
-| **BUY YES — CAUTIOUS** | Pricey side, max ROI 15%–25% (price ~0.80–0.87) — still above the ROI gate but close to the ceiling |
+| **BUY YES — HIGH VALUE** | Cheap side, max ROI ≥ 50% (price ≤ ~0.667) |
+| **BUY YES — MODERATE VALUE** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80) |
+| **BUY YES — LOW MARGIN** | Pricey side, max ROI 10%–25% (price ~0.80–0.91) — still above the ROI gate but close to the ceiling |
 | **BUY NO — CONTRARIAN** | Council disagrees with market — stricter probability, confidence, and ROI gates required |
 | **PASS** | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92") |
 
@@ -436,6 +436,9 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MIN_VOLUME_USD` | `10000` | Volume floor for general queries |
 | `MIN_VOLUME_SHORT_WINDOW_USD` | `500` | Volume floor for short time-window / live queries |
 | `RULES_LAWYER_WEIGHT` | `2` | Rules Lawyer counts as N agents in weighted scoring |
+| `BEAR_WEIGHT` | `1.0` | Bear agent weight in scoring (lower to reduce drag on confidence; try 0.7 if needed) |
+| `MIN_COUNCIL_VERDICTS` | `5` | Minimum agents (of 7) that must return valid verdicts; aborts if below |
+| `AGENT_MAX_RETRIES` | `5` | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap) |
 | `LOCAL_LLM_CONCURRENCY` | `1` | Max parallel Ollama calls (no effect on Anthropic) |
 | `TAVILY_SEARCHES_PER_MARKET` | `5` | Tavily queries per analysis (3-5) |
 | `TAVILY_SNIPPET_CAP` | `5000` | Max chars of search snippets sent to LLM |

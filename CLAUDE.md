@@ -109,7 +109,7 @@ class CouncilResult(BaseModel):
     no_edge: float            # no_score - no_price (informational)
     recommendation: str       # "BUY YES" | "BUY NO" | "PASS"
     confidence_level: str     # "HIGH" | "MEDIUM" | "LOW"
-    signal_type: str | None   # "STRONG" | "CONFIRMED" | "CAUTIOUS" | "CONTRARIAN" | None
+    signal_type: str | None   # "HIGH VALUE" | "MODERATE VALUE" | "LOW MARGIN" | "CONTRARIAN" | None
     pass_reason: str          # why PASS (empty for BUY)
     expected_roi: float       # max ROI (1-price)/price of recommended side; 0.0 on PASS
 ```
@@ -202,9 +202,9 @@ Gate order inside `from_council_verdicts()`:
 
 Signal type on market-aligned BUYs is ROI-banded:
 
-- `STRONG` — expected_roi ≥ 50% (cheap side; price ≤ ~0.667)
-- `CONFIRMED` — 25% ≤ expected_roi < 50% (price ~0.667–0.80)
-- `CAUTIOUS` — 10% ≤ expected_roi < 25% (price ~0.80–0.91)
+- `HIGH VALUE` — expected_roi ≥ 50% (cheap side; price ≤ ~0.667)
+- `MODERATE VALUE` — 25% ≤ expected_roi < 50% (price ~0.667–0.80)
+- `LOW MARGIN` — 10% ≤ expected_roi < 25% (price ~0.80–0.91)
 
 `EDGE_THRESHOLD` is **deprecated** — `edge` is still computed and displayed
 for historical continuity but is no longer consumed as a gate or label.
@@ -430,12 +430,26 @@ as a literal.
   Lawyer weight. Both flow through `_w()` in `from_council_verdicts()`.
 - `CLAUDE.md` — removed stale consensus gate references (Known Issues +
   CouncilResult description). Replaced with council quorum gate documentation.
+- `models.py` + `main.py` — **Signal type rename:** STRONG→HIGH VALUE,
+  CONFIRMED→MODERATE VALUE, CAUTIOUS→LOW MARGIN. These are ROI-band labels,
+  not conviction labels — rename removes ambiguity with confidence_level.
+- `main.py` — **UX color overhaul:**
+  - All BUY actions (YES/NO) render in bold green (was: BUY NO was red).
+  - Signal label colors: HIGH VALUE=bold green, MODERATE VALUE=cyan,
+    LOW MARGIN=dim cyan, CONTRARIAN=bold magenta.
+  - PASS stays bold yellow. Panel border: green for BUY, yellow for PASS,
+    magenta for CONTRARIAN.
+  - History list: BUY YES/NO both bold green (was: BUY NO red).
+    MISS outcome glyph changed from yellow to bold cyan.
+- `README.md` — updated signal type names, recommendation types table,
+  example output, added new tuning vars (BEAR_WEIGHT, MIN_COUNCIL_VERDICTS,
+  AGENT_MAX_RETRIES) to tuning table.
 
 ### Session 19 additions
 
 - `config.py` — `MIN_EXPECTED_ROI` code default changed from 0.15 to 0.10.
   `.env.example` updated to match. `.env` already had 0.10 from prior adjustment.
-  Widens the eligible price band for CAUTIOUS signals from ≤$0.87 to ≤$0.91.
+  Widens the eligible price band for LOW MARGIN signals from ≤$0.87 to ≤$0.91.
   Zero historical wrong buys added (replayed all 60 non-legacy entries).
 - `docs/retrospectives/eval_tier1_roi_2026_04.md` — **NEW.** Full retrospective
   report covering: dataset context (88 runs, 60 non-legacy), command log,
@@ -574,7 +588,7 @@ result, resolution, analysis}`. `result` is the entire CouncilResult.
   `pass_reason: str` field (session 14): when recommendation is PASS, explains
   which gate(s) blocked the signal. Empty string for BUY YES/BUY NO.
   `signal_type` field (session 15): conviction label for BUY recommendations:
-  STRONG (positive edge), CONFIRMED (edge ~0), CAUTIOUS (negative edge),
+  HIGH VALUE (ROI ≥50%), MODERATE VALUE (25-50%), LOW MARGIN (10-25%),
   CONTRARIAN (council goes against market). None when PASS.
   Recommendation logic rewritten (session 15): probability-first instead of
   edge-gated. Council probability gates the recommendation; edge determines

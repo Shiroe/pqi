@@ -122,23 +122,23 @@ def display_council_result(result: CouncilResult) -> None:
     no_price = 1.0 - yes_price
     sig = result.signal_type or ""
 
-    # Signal type styling
-    _signal_colours = {
-        "STRONG": "bold green",
-        "CONFIRMED": "bold cyan",
-        "CAUTIOUS": "bold yellow",
+    # Signal label styling — only the signal label varies; BUY action is always bold green
+    _signal_label_style = {
+        "HIGH VALUE": "bold green",
+        "MODERATE VALUE": "cyan",
+        "LOW MARGIN": "dim cyan",
         "CONTRARIAN": "bold magenta",
     }
 
-    if rec == "BUY YES":
-        sig_style = _signal_colours.get(sig, "green")
-        colour = "magenta" if sig == "CONTRARIAN" else "green"
-        trade_line = f"[{sig_style}]>>> BUY YES @ ${yes_price:.2f}/share — {sig} <<<[/{sig_style}]"
-    elif rec == "BUY NO":
-        sig_style = _signal_colours.get(sig, "red")
+    if rec in ("BUY YES", "BUY NO"):
+        side = "YES" if rec == "BUY YES" else "NO"
+        price = yes_price if rec == "BUY YES" else no_price
+        sig_label_style = _signal_label_style.get(sig, "green")
         colour = "magenta" if sig == "CONTRARIAN" else "green"
         trade_line = (
-            f"[{sig_style}]>>> BUY NO @ ${no_price:.2f}/share — {sig} <<<[/{sig_style}]"
+            f"[bold green]>>> BUY {side} @ ${price:.2f}/share — "
+            f"[/bold green][{sig_label_style}]{sig}[/{sig_label_style}]"
+            f"[bold green] <<<[/bold green]"
         )
     else:
         colour = "yellow"
@@ -656,7 +656,7 @@ def _outcome_glyph(kind: str) -> str:
     return {
         "correct_buy": "[green]✓[/green]",
         "wrong_buy": "[red]✗[/red]",
-        "missed_opportunity": "[yellow]MISS[/yellow]",
+        "missed_opportunity": "[bold cyan]MISS[/bold cyan]",
         "correct_pass": "[dim]pass[/dim]",
         "voided": "[dim]void[/dim]",
         "unresolved": "[yellow]⏳[/yellow]",
@@ -818,10 +818,8 @@ def history_list(
         r = entry.get("result") or {}
         market = r.get("market") or {}
         rec = r.get("recommendation", "?")
-        if rec == "BUY YES":
-            rec_style = "[green]BUY YES[/green]"
-        elif rec == "BUY NO":
-            rec_style = "[red]BUY NO[/red]"
+        if rec in ("BUY YES", "BUY NO"):
+            rec_style = f"[bold green]{rec}[/bold green]"
         else:
             rec_style = "[yellow]PASS[/yellow]"
 
@@ -954,9 +952,7 @@ def history_show(
 
     # Recommendation panel
     rec = r.get("recommendation", "?")
-    rec_color = (
-        "green" if rec == "BUY YES" else ("red" if rec == "BUY NO" else "yellow")
-    )
+    rec_color = "green" if rec in ("BUY YES", "BUY NO") else "yellow"
     rec_lines = [
         f"[{rec_color}]{rec}[/{rec_color}]   "
         f"signal: [bold]{r.get('signal_type') or '—'}[/bold]   "
