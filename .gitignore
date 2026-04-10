@@ -54,5 +54,6 @@ Thumbs.db
 !.claude
 !.gitignore
 !.env.example
+!.pqi
 
 skills/
