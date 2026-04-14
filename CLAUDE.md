@@ -135,6 +135,17 @@ class CouncilResult(BaseModel):
     signal_type: str | None   # "HIGH VALUE" | "MODERATE VALUE" | "LOW MARGIN" | "CONTRARIAN" | None
     pass_reason: str          # why PASS (empty for BUY)
     expected_roi: float       # max ROI (1-price)/price of recommended side; 0.0 on PASS
+
+class PerceivedStats(BaseModel):
+    # Rolling stats derived from resolved history. Persisted to ~/.pqi/stats.json.
+    # Feeds the EV gate (true_win_rate) and the advisory Kelly stake.
+    computed_at: datetime
+    true_win_rate: float          # correct_buys / (correct_buys + wrong_buys)
+    sample_size: int              # denominator (resolved BUYs, non-legacy)
+    correct_buys: int
+    wrong_buys: int
+    kelly_fraction_at_p75: float  # reference Kelly stake at 75¢
+    below_min_samples: bool       # True → EV gate stays dormant
 ```
 
 ---
@@ -221,7 +232,12 @@ Gate order inside `from_council_verdicts()`:
    `council_prob >= MIN_COUNCIL_PROBABILITY` (0.57),
    `side_conf >= CONFIDENCE_HIGH_THRESHOLD` (0.67),
    `expected_roi >= MIN_EXPECTED_ROI` (0.10).
-5. Otherwise → PASS with dynamic pass_reason.
+5. **EV gate (final)**: after a BUY clears all prior gates, reject it if
+   `side_price >= PerceivedTrueWinRate` → PASS with reason "Big Drawdown
+   Risk (-EV)". The gate only fires when `EV_GATE_ENABLED=true` AND
+   `sample_size >= MIN_WIN_RATE_SAMPLES` (default 20). Below that
+   threshold the gate is dormant and behavior matches the pre-EV system.
+6. Otherwise → PASS with dynamic pass_reason.
 
 Signal type on market-aligned BUYs is ROI-banded:
 
@@ -233,6 +249,24 @@ Signal type on market-aligned BUYs is ROI-banded:
 for historical continuity but is no longer consumed as a gate or label.
 Overall `confidence_level` label uses the higher of the two per-side means.
 `CouncilResult.expected_roi` is persisted on every result (0.0 on PASS).
+
+### PerceivedTrueWinRate + Kelly (`pqi/stats.py`)
+
+`pqi/stats.py` owns the EV inputs. Three pure functions:
+
+- `recompute_from_history(min_samples)` — walks `history.jsonl`, counts
+  `correct_buy` vs `wrong_buy` (non-legacy, resolved), writes a fresh
+  `PerceivedStats` to `~/.pqi/stats.json` (atomic tmp+rename).
+- `load_perceived_stats()` — returns `PerceivedStats | None`; tolerates
+  missing/malformed file (cold-start safety).
+- `kelly_fraction(win_rate, price, multiplier=1.0)` — `f* = (bp - q) / b`.
+  Returns 0.0 when -EV, on degenerate prices, or when the scaled result is
+  ≤ 0. Apply `KELLY_MULTIPLIER` (default 0.5 = half-Kelly) for the UI stake.
+
+Recompute is triggered after every `history sync` (including `--auto`
+background) and at the top of `history stats`. `scoring.py` loads stats
+lazily at build time and passes `perceived_win_rate` to the model only
+when the gate is active — models.py stays pure.
 
 ---
 
@@ -306,7 +340,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 21 — CLOB price history enrichment (two-sided)]
+**Last updated:** [session 22 — dynamic EV gate + Kelly Criterion]
 
 All Phase 1 and Phase 2 features are complete. See [`docs/session-log.md`](docs/session-log.md)
 for per-session details and [`docs/roadmap.md`](docs/roadmap.md) for future work.
@@ -316,6 +350,10 @@ for per-session details and [`docs/roadmap.md`](docs/roadmap.md) for future work
 - Full analyze pipeline: Gamma fetch → Tavily briefing → CLOB price history → Council → Scoring → CLI output
 - 7-agent council with two-sided confidence, quorum gate, retry with exponential backoff
 - Probability-first recommendation: BUY YES / BUY NO / PASS with ROI-banded signal types
+- **Dynamic EV gate**: `PerceivedTrueWinRate` computed from resolved history
+  (`~/.pqi/stats.json`) rejects BUYs where `side_price ≥ win_rate` with reason
+  "Big Drawdown Risk (-EV)". Kelly stake surfaced in recommendation panel and
+  `history stats` overview. Gate gated by `MIN_WIN_RATE_SAMPLES`.
 - Two-sided CLOB price history enrichment (YES + NO independently, non-fatal)
 - History system: full-fidelity persistence, resolution sync, per-agent accuracy, postmortem
 - SQLite cache with price-delta invalidation
@@ -341,9 +379,15 @@ in docs/. Read the relevant partial file when working in a specific area:
 - docs/session-log.md — per-session changelog
 - docs/roadmap.md — future work priorities
 
-## PRIORITY: Bear accuracy monitoring (ongoing from session 20)
-After accumulating 15-20 new resolved entries, run `pqi history stats` and
-check Bear agent metrics. Details in docs/roadmap.md #10.
+## PRIORITY options (pick one with the user)
+- Bear accuracy monitoring (ongoing from session 20). After 15-20 new
+  resolved entries, run `pqi history stats` and check Bear metrics. See
+  docs/roadmap.md #10.
+- EV gate tuning / verification. As new resolutions land, the
+  `PerceivedTrueWinRate` in `~/.pqi/stats.json` will drift. Watch for
+  "Big Drawdown Risk" PASSes in history vs what the pre-gate system would
+  have done, and check whether `MIN_WIN_RATE_SAMPLES=20` is the right
+  activation floor.
 
 ## Instructions
 - Pick the next priority with the user before starting

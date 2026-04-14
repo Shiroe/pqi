@@ -361,6 +361,8 @@ Council of Seven — Verdicts
 │ 7d Trend NO:    -4.8pp FALLING |  24h: -1.5pp  |  Vol: 0.8pp/hr │
 │ YES Edge:       +9.2%  |  NO Edge:  -9.7%             │
 │ Max ROI (YES):  +51.5%  (if that side wins)            │
+│ True Win Rate:  74.4%  (n=43, EV ceiling)              │
+│ Kelly stake:    full 12.1% · @0.5x 6.0% of bankroll    │
 │ Confidence:     HIGH                                   │
 │                                                        │
 │ >>> BUY YES @ $0.66/share — HIGH VALUE <<<             │
@@ -375,7 +377,7 @@ Council of Seven — Verdicts
 | **BUY YES — MODERATE VALUE** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80)                                                                                     |
 | **BUY YES — LOW MARGIN**     | Pricey side, max ROI 10%–25% (price ~0.80–0.91) — still above the ROI gate but close to the ceiling                                     |
 | **BUY NO — CONTRARIAN**      | Council disagrees with market — stricter probability, confidence, and ROI gates required                                                |
-| **PASS**                     | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92") |
+| **PASS**                     | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92", "Big Drawdown Risk: YES price 80.0% ≥ PerceivedTrueWinRate 74.4% (-EV)") |
 
 The same labels apply symmetrically to BUY NO.
 
@@ -438,6 +440,9 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MAX_TRADEABLE_PRICE`         | `0.90`  | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk)  |
 | `MIN_EXPECTED_ROI`            | `0.15`  | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.87)      |
 | `MIN_CONTRARIAN_ROI`          | `0.20`  | Stricter ROI floor for contrarian BUYs (≈ price ≤ 0.833)                             |
+| `EV_GATE_ENABLED`             | `true`  | Master switch for the final EV gate (PerceivedTrueWinRate ceiling)                   |
+| `MIN_WIN_RATE_SAMPLES`        | `20`    | Resolved-BUY threshold before the EV gate activates                                  |
+| `KELLY_MULTIPLIER`            | `0.5`   | Advisory Kelly scaler (0.5 = half-Kelly; 1.0 = full)                                 |
 | `MIN_VOLUME_USD`              | `10000` | Volume floor for general queries                                                     |
 | `MIN_VOLUME_SHORT_WINDOW_USD` | `500`   | Volume floor for short time-window / live queries                                    |
 | `RULES_LAWYER_WEIGHT`         | `2`     | Rules Lawyer counts as N agents in weighted scoring                                  |
@@ -473,6 +478,7 @@ pqi/
 ├── models.py            # Pydantic contracts: MarketData, EventGroup, BriefingDocument,
 │                        #   AgentVerdict, CouncilResult
 ├── scoring.py           # two-sided confidence-weighted scoring + recommendation logic
+├── stats.py             # PerceivedTrueWinRate + Kelly helpers (~/.pqi/stats.json)
 ├── cache.py             # SQLite result cache (keyed by market_id + price delta)
 ├── history.py           # JSONL history logger (~/.pqi/history.jsonl) — full-fidelity
 │                        #   records with run_id, resolution, analysis blocks
@@ -531,7 +537,36 @@ The recommendation is probability-first:
 1. Identify which side the council favors (>50% probability)
 2. If council agrees with market: BUY if council prob >= 60% and confidence HIGH
 3. If council disagrees with market (contrarian): BUY if council prob >= 70% and confidence >= 80%
-4. Otherwise: PASS with explanation
+4. **EV gate (final)**: a would-be BUY is rejected with reason "Big Drawdown
+   Risk (-EV)" if `side_price >= PerceivedTrueWinRate` — your rolling
+   `correct_buys / total_resolved_buys` from history. The gate activates
+   once `MIN_WIN_RATE_SAMPLES` resolved BUYs have accumulated.
+5. Otherwise: PASS with explanation
+
+### PerceivedTrueWinRate + Kelly Criterion
+
+After every `history sync` (including the background auto-sync) and at the
+top of `history stats`, PQI recomputes a rolling `PerceivedTrueWinRate`
+from resolved, non-legacy BUY history and persists it to
+`~/.pqi/stats.json`. Two things use it:
+
+- **EV gate** — the final scoring gate described above. Stops you from
+  buying at a price the market already implies beats your historical hit rate.
+- **Kelly stake** — `f* = (b·p − q) / b` with `b = (1 − price) / price`,
+  `p = win_rate`, `q = 1 − p`. Shown in the recommendation panel for the
+  actual trade price (full + half-Kelly via `KELLY_MULTIPLIER`) and on the
+  `history stats` overview at a dynamic reference price (win_rate − 5pp)
+  plus a `$0.75` comparator. Pure advisory — it never blocks a trade.
+
+```
+╭────────────────── Council overview ──────────────────╮
+│ …existing totals + lean accuracy lines…              │
+│ PerceivedTrueWinRate: 74.4%  (32 correct / 11 wrong, │
+│                                n=43)  (EV gate active) │
+│ Kelly stake: @ $0.69 ref → full 16.3% · @0.5x 8.2%   │
+│                                       (@ $0.75: 0.0%) │
+╰──────────────────────────────────────────────────────╯
+```
 
 ---
 

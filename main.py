@@ -60,7 +60,7 @@ def display_market_list(markets: list[MarketData]) -> None:
         show_lines=True,
     )
     table.add_column("#", style="bold cyan", justify="right", width=4)
-    table.add_column("Question", style="white", max_width=48)
+    table.add_column("Question", style="white", no_wrap=False)
     table.add_column("Starts", justify="right", width=9)
     table.add_column("Resolves", justify="right", width=9)
     table.add_column("YES", justify="right", width=6)
@@ -72,7 +72,7 @@ def display_market_list(markets: list[MarketData]) -> None:
     analyzed = _analyzed_market_ids()
 
     for i, m in enumerate(markets, start=1):
-        question = m.question if len(m.question) <= 48 else m.question[:45] + "..."
+        question = m.question
         starts = _format_end_date(m.event_start_time) if m.event_start_time else "—"
         table.add_row(
             str(i),
@@ -157,6 +157,33 @@ def display_council_result(result: CouncilResult) -> None:
     roi_line = (
         f"[bold]Max ROI ({roi_label}):[/bold]  +{roi_val:.1%}  (if that side wins)\n"
     )
+
+    # EV / Kelly lines — shown when we have persisted stats. For BUY results
+    # the Kelly number is sized to the actual trade price; on PASS we still
+    # show the win rate ceiling so the user understands the drawdown guard.
+    ev_line = ""
+    from pqi.stats import load_perceived_stats, kelly_fraction as _kelly
+
+    perceived = load_perceived_stats()
+    if perceived is not None and perceived.sample_size > 0:
+        wr = perceived.true_win_rate
+        gate_note = (
+            " [dim](gate inactive — need more samples)[/dim]"
+            if perceived.below_min_samples
+            else ""
+        )
+        ev_line = (
+            f"[bold]True Win Rate:[/bold] {wr:.1%} "
+            f"[dim](n={perceived.sample_size}, EV ceiling)[/dim]{gate_note}\n"
+        )
+        if rec in ("BUY YES", "BUY NO"):
+            trade_price = yes_price if rec == "BUY YES" else no_price
+            full_k = _kelly(wr, trade_price)
+            safe_k = _kelly(wr, trade_price, config.KELLY_MULTIPLIER)
+            ev_line += (
+                f"[bold]Kelly stake:[/bold]   full {full_k:.1%} · "
+                f"@{config.KELLY_MULTIPLIER:g}x {safe_k:.1%} of bankroll\n"
+            )
     # Trend line (conditional — only if price history was fetched)
     trend_line = ""
     if result.briefing and result.briefing.price_history:
@@ -178,6 +205,7 @@ def display_council_result(result: CouncilResult) -> None:
         f"[bold]YES Edge:[/bold]       {yes_edge_sign}{result.edge:.1%}  |  "
         f"[bold]NO Edge:[/bold]  {no_edge_sign}{result.no_edge:.1%}\n"
         f"{roi_line}"
+        f"{ev_line}"
         f"[bold]Confidence:[/bold]     {result.confidence_level}\n\n"
         f"{trade_line}"
     )
@@ -243,6 +271,37 @@ def _signal_glyph(yes_price: float) -> str:
     return ""
 
 
+def _moneyline_score(question: str, event_title: str) -> float:
+    """Score how likely a market is the moneyline (overall outcome) market.
+
+    Higher score = more likely moneyline.  Uses word overlap between the market
+    question and the event title — moneyline questions typically restate the
+    event title as a question (e.g. "Will T1 beat Gen.G?").
+    """
+    q_words = set(question.lower().split())
+    t_words = set(event_title.lower().split())
+    if not t_words:
+        return 0.0
+    # Jaccard-like: fraction of event-title words present in the question
+    overlap = len(q_words & t_words)
+    return overlap / len(t_words)
+
+
+def _sort_moneyline_first(
+    markets: list[MarketData], event_title: str
+) -> list[MarketData]:
+    """Return markets sorted with the moneyline (overall outcome) first.
+
+    Primary sort: moneyline similarity score (desc).
+    Secondary sort: volume (desc) — preserves original order for ties.
+    """
+    return sorted(
+        markets,
+        key=lambda m: (_moneyline_score(m.question, event_title), m.volume_usd),
+        reverse=True,
+    )
+
+
 def display_event_list(groups: list[EventGroup]) -> None:
     """Render a numbered Rich table of event groups."""
     table = Table(
@@ -251,7 +310,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
         show_lines=True,
     )
     table.add_column("#", style="bold cyan", justify="right", width=4)
-    table.add_column("Event", style="white", max_width=44)
+    table.add_column("Event", style="white", no_wrap=False)
     table.add_column("Starts", justify="right", width=9)
     table.add_column("Mkts", justify="center", width=5)
     table.add_column("YES", justify="right", width=6)
@@ -268,8 +327,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
             label = g.primary_market.question
         else:
             label = g.event_title
-        if len(label) > 44:
-            label = label[:41] + "..."
+        # No truncation — let Rich wrap long labels naturally
 
         starts = _format_end_date(g.event_start_time) if g.event_start_time else "—"
         pm = g.primary_market
@@ -320,12 +378,16 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
         return group, group.markets[0]
 
     # Step 3: sub-select from sibling markets
+    # Sort moneyline (overall outcome) market first — highest similarity to event title,
+    # then by volume descending as tiebreaker.
+    sorted_markets = _sort_moneyline_first(group.markets, group.event_title)
+
     console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
-    console.print(f"[cyan]{len(group.markets)} markets in this event:[/cyan]")
+    console.print(f"[cyan]{len(sorted_markets)} markets in this event:[/cyan]")
 
     sub_table = Table(box=box.SIMPLE, show_lines=False)
     sub_table.add_column("#", style="bold cyan", justify="right", width=4)
-    sub_table.add_column("Market", style="white", max_width=50)
+    sub_table.add_column("Market", style="white", no_wrap=False)
     sub_table.add_column("YES", justify="right", width=6)
     sub_table.add_column("NO", justify="right", width=6)
     sub_table.add_column("Sig", justify="center", width=4)
@@ -334,11 +396,10 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
 
     analyzed = _analyzed_market_ids()
 
-    for i, m in enumerate(group.markets, start=1):
-        q = m.question if len(m.question) <= 50 else m.question[:47] + "..."
+    for i, m in enumerate(sorted_markets, start=1):
         sub_table.add_row(
             str(i),
-            q,
+            m.question,
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
             _signal_glyph(m.yes_price),
@@ -350,18 +411,18 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
 
     while True:
         raw = input(
-            f"\nSelect a market [1–{len(group.markets)}, Enter for #1]: "
+            f"\nSelect a market [1–{len(sorted_markets)}, Enter for #1]: "
         ).strip()
         if raw == "":
-            return group, group.markets[0]
+            return group, sorted_markets[0]
         try:
             idx = int(raw)
-            if 1 <= idx <= len(group.markets):
-                return group, group.markets[idx - 1]
+            if 1 <= idx <= len(sorted_markets):
+                return group, sorted_markets[idx - 1]
         except ValueError:
             pass
         console.print(
-            f"[red]Please enter a number between 1 and {len(group.markets)}.[/red]"
+            f"[red]Please enter a number between 1 and {len(sorted_markets)}.[/red]"
         )
 
 
@@ -1140,6 +1201,18 @@ def history_sync(
         return resolved, pending, errors
 
     resolved, pending, errors = asyncio.run(_run())
+
+    # Refresh PerceivedTrueWinRate whenever new resolutions might have landed.
+    # Cheap — it's a single pass over history.jsonl. Runs in auto mode too so
+    # the EV gate picks up new samples without the user running `history stats`.
+    if resolved > 0 or not auto:
+        from pqi.stats import recompute_from_history
+
+        try:
+            recompute_from_history(config.MIN_WIN_RATE_SAMPLES)
+        except Exception as exc:
+            logger.debug("PerceivedStats recompute failed: %s", exc)
+
     if not auto:
         console.print(
             f"[green]✓ {resolved} resolved[/green], "
@@ -1166,6 +1239,16 @@ def history_stats(
 
     if not no_auto_sync:
         _spawn_auto_sync()
+
+    # Recompute the EV-gate inputs up front so the numbers shown in the
+    # overview are the same ones the next `analyze` run will use.
+    from pqi.stats import recompute_from_history, kelly_fraction as _kelly
+
+    try:
+        perceived = recompute_from_history(config.MIN_WIN_RATE_SAMPLES)
+    except Exception as exc:
+        logger.debug("PerceivedStats recompute failed: %s", exc)
+        perceived = None
 
     counts = Counter(classify_outcome(e) for e in entries)
     stats = agent_accuracy(entries)
@@ -1217,6 +1300,32 @@ def history_stats(
         f"[bold]Council lean accuracy[/bold] (all resolved, dead band 0.45–0.55): "
         f"[cyan]{lean_pct_str}[/cyan]"
     )
+
+    if perceived is not None:
+        gate_state = (
+            f"[dim](gate inactive: need {config.MIN_WIN_RATE_SAMPLES} samples)[/dim]"
+            if perceived.below_min_samples
+            else "[bold green](EV gate active)[/bold green]"
+        )
+        # Reference price 5pp below the win rate — always +EV, so the number
+        # shown is the Kelly stake the user would actually take at their
+        # typical-edge price. $0.75 is a canonical comparator (roadmap spec).
+        ref_price = max(0.10, min(0.90, perceived.true_win_rate - 0.05))
+        k_ref_full = _kelly(perceived.true_win_rate, ref_price)
+        k_ref_half = _kelly(perceived.true_win_rate, ref_price, config.KELLY_MULTIPLIER)
+        k_75_full = _kelly(perceived.true_win_rate, 0.75)
+        summary += (
+            f"\n[bold]PerceivedTrueWinRate:[/bold] "
+            f"[magenta]{perceived.true_win_rate:.1%}[/magenta]  "
+            f"([green]{perceived.correct_buys}[/green] correct / "
+            f"[red]{perceived.wrong_buys}[/red] wrong, "
+            f"n={perceived.sample_size})  {gate_state}\n"
+            f"[bold]Kelly stake:[/bold] "
+            f"@ ${ref_price:.2f} ref → full {k_ref_full:.1%} · "
+            f"@{config.KELLY_MULTIPLIER:g}x {k_ref_half:.1%}  "
+            f"[dim](@ $0.75: {k_75_full:.1%})[/dim]"
+        )
+
     console.print(Panel(summary, title="Council overview", border_style="cyan"))
 
     if not stats:

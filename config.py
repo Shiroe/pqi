@@ -120,6 +120,16 @@ MIN_CONTRARIAN_PROBABILITY: float = float(
 )
 MIN_CONTRARIAN_CONFIDENCE: float = float(os.getenv("MIN_CONTRARIAN_CONFIDENCE", "0.80"))
 
+# EV gate — rejects BUYs where the side price is ≥ the historical win rate
+# (PerceivedTrueWinRate computed from resolved history). Activates only once
+# MIN_WIN_RATE_SAMPLES resolved BUYs have accumulated, so cold-start runs
+# behave identically to the pre-EV-gate system.
+EV_GATE_ENABLED: bool = os.getenv("EV_GATE_ENABLED", "true").lower() in {"1", "true", "yes"}
+MIN_WIN_RATE_SAMPLES: int = int(os.getenv("MIN_WIN_RATE_SAMPLES", "20"))
+KELLY_MULTIPLIER: float = float(os.getenv("KELLY_MULTIPLIER", "0.5"))
+"""Kelly safety scaler applied to the advisory stake shown in the UI.
+0.5 = half-Kelly (recommended), 1.0 = full Kelly."""
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------

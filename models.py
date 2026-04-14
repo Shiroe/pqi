@@ -210,6 +210,7 @@ class CouncilResult(BaseModel):
         min_contrarian_probability: float = 0.70,
         min_contrarian_confidence: float = 0.80,
         agent_weights: dict[str, float] | None = None,
+        perceived_win_rate: float | None = None,
     ) -> CouncilResult:
         """
         Compute all derived fields from raw verdicts and assemble a CouncilResult.
@@ -371,6 +372,19 @@ class CouncilResult(BaseModel):
                 )
             pass_reason = "; ".join(reasons) if reasons else "No side meets gates"
 
+        # Final gate — EV ceiling from PerceivedTrueWinRate.
+        # Applied only after all other gates have cleared a BUY. Rejects buys
+        # where the side price is ≥ the historical hit rate: at that price
+        # we're mathematically -EV even if every other signal lines up.
+        if recommendation != "PASS" and perceived_win_rate is not None:
+            if side_price >= perceived_win_rate:
+                recommendation = "PASS"
+                signal_type = None
+                pass_reason = (
+                    f"Big Drawdown Risk: {rec_side} price {side_price:.1%} "
+                    f"≥ PerceivedTrueWinRate {perceived_win_rate:.1%} (-EV)"
+                )
+
         # ROI is only meaningful for BUY signals — zero it on PASS.
         if recommendation == "PASS":
             expected_roi_final = 0.0
@@ -390,6 +404,31 @@ class CouncilResult(BaseModel):
             pass_reason=pass_reason,
             expected_roi=expected_roi_final,
         )
+
+
+class PerceivedStats(BaseModel):
+    """Rolling stats derived from resolved history — source of truth for
+    the EV gate (PerceivedTrueWinRate) and the advisory Kelly sizing.
+
+    Persisted to ~/.pqi/stats.json and refreshed after every history sync
+    or `history stats` invocation. `below_min_samples` is True until enough
+    resolved BUY outcomes have accumulated for the gate to activate.
+    """
+
+    computed_at: datetime
+    true_win_rate: float = Field(..., ge=0.0, le=1.0)
+    """correct_buys / (correct_buys + wrong_buys) across resolved non-legacy
+    BUY entries. 0.0 when no samples yet."""
+    sample_size: int = Field(..., ge=0)
+    """Total resolved BUYs (correct + wrong) — the denominator."""
+    correct_buys: int = Field(..., ge=0)
+    wrong_buys: int = Field(..., ge=0)
+    kelly_fraction_at_p75: float = Field(..., ge=0.0, le=1.0)
+    """Advisory Kelly stake at a reference price of $0.75 — lets the
+    history overview show a representative sizing number without binding
+    to any specific market. 0.0 when -EV at $0.75."""
+    below_min_samples: bool = True
+    """True when sample_size < MIN_WIN_RATE_SAMPLES — EV gate stays off."""
 
 
 # ---------------------------------------------------------------------------

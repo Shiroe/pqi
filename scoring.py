@@ -55,6 +55,16 @@ def build_council_result(
         "The Bear": config.BEAR_WEIGHT,
     }
 
+    # EV gate input — only fed in when enabled AND we have enough samples.
+    # Otherwise the gate stays dormant and behavior matches pre-EV scoring.
+    perceived_win_rate: float | None = None
+    if config.EV_GATE_ENABLED:
+        from pqi.stats import load_perceived_stats
+
+        stats = load_perceived_stats()
+        if stats is not None and not stats.below_min_samples:
+            perceived_win_rate = stats.true_win_rate
+
     return CouncilResult.from_council_verdicts(
         market=market,
         verdicts=verdicts,
@@ -69,6 +79,7 @@ def build_council_result(
         min_contrarian_probability=config.MIN_CONTRARIAN_PROBABILITY,
         min_contrarian_confidence=config.MIN_CONTRARIAN_CONFIDENCE,
         agent_weights=agent_weights,
+        perceived_win_rate=perceived_win_rate,
     )
 
 
