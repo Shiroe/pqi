@@ -29,6 +29,10 @@ class MarketData(BaseModel):
     category: str
     clob_token_ids: list[str] = Field(default_factory=list)
     """CLOB token IDs for YES and NO outcomes. Parsed from Gamma API clobTokenIds field."""
+    sports_market_type: str | None = None
+    """Gamma-API `sportsMarketType` field (e.g. "moneyline", "spread", "total").
+    None on non-sports markets or older entries. Used to identify the overall-
+    outcome market in a multi-market sports event without relying on title heuristics."""
 
 
 class PricePoint(BaseModel):
@@ -171,9 +175,15 @@ class CouncilResult(BaseModel):
     no_score: float = Field(..., ge=0.0, le=1.0)
     """Confidence-weighted probability of NO across all agents (NO-side)."""
     edge: float
-    """final_score − yes_price.  Positive = underpriced YES."""
+    """perceived_win_rate − yes_price (WR-based edge for the YES side).
+    Positive = YES price sits below the historical hit rate, so buying YES is
+    +EV at this price. 0.0 when PerceivedStats is unavailable or below the
+    sample-size threshold. On contrarian BUYs this is still a pure function
+    of price vs. the WR ceiling, not of council score."""
     no_edge: float
-    """no_score − no_price.  Positive = underpriced NO."""
+    """perceived_win_rate − no_price (WR-based edge for the NO side).
+    Same semantic as `edge` but for the NO price. 0.0 when PerceivedStats
+    is unavailable."""
     recommendation: Literal["BUY YES", "BUY NO", "PASS"]
     confidence_level: Literal["HIGH", "MEDIUM", "LOW"]
     signal_type: (
@@ -186,6 +196,21 @@ class CouncilResult(BaseModel):
     """Max ROI of the recommended side at run time: (1 - price) / price.
     0.0 when PASS. Independent of council conviction — conviction is gated
     separately by the probability/confidence thresholds."""
+    perceived_win_rate_at_run: float | None = None
+    """Snapshot of PerceivedTrueWinRate at the moment this run was scored.
+    Persisted so `history show` can render the WR ceiling and Kelly stake
+    that applied to this specific run, not the current rolling values.
+    None when the EV gate was disabled / below min samples at run time."""
+    kelly_stake_full: float = 0.0
+    """Full Kelly fraction for the recommended side, computed at run time
+    using `perceived_win_rate_at_run` and the recommended side's price.
+    0.0 on PASS, when no WR snapshot was captured, or when the bet is -EV."""
+    kelly_stake_scaled: float = 0.0
+    """Scaled Kelly fraction (`kelly_stake_full * kelly_multiplier`).
+    This is the advisory bankroll fraction surfaced to the user."""
+    kelly_multiplier: float = 0.0
+    """The half-Kelly (or other) safety scaler used for `kelly_stake_scaled`
+    at run time. 0.0 when no Kelly sizing was computed."""
     briefing: BriefingDocument | None = None
     """Full briefing document handed to the council. Optional for backward compat."""
 
@@ -211,6 +236,7 @@ class CouncilResult(BaseModel):
         min_contrarian_confidence: float = 0.80,
         agent_weights: dict[str, float] | None = None,
         perceived_win_rate: float | None = None,
+        kelly_multiplier: float = 0.5,
     ) -> CouncilResult:
         """
         Compute all derived fields from raw verdicts and assemble a CouncilResult.
@@ -243,10 +269,17 @@ class CouncilResult(BaseModel):
         no_den = sum(v.confidence_no * _w(v) for v in verdicts)
         no_score = no_num / no_den if no_den > 0 else 0.5
 
-        # Step 2 — edges (informational, not gates)
+        # Step 2 — WR-based edges (informational, not gates).
+        # Edge = PerceivedTrueWinRate − side_price: how much slack each side's
+        # price has below the historical hit rate. Zero for both sides when
+        # the EV gate is inactive (no samples yet, or gate disabled).
         no_price = 1.0 - market.yes_price
-        edge = final_score - market.yes_price
-        no_edge = no_score - no_price
+        if perceived_win_rate is not None:
+            edge = perceived_win_rate - market.yes_price
+            no_edge = perceived_win_rate - no_price
+        else:
+            edge = 0.0
+            no_edge = 0.0
 
         # Step 3 — confidence levels
         mean_conf_yes = sum(v.confidence_yes for v in verdicts) / len(verdicts)
@@ -391,6 +424,22 @@ class CouncilResult(BaseModel):
         else:
             expected_roi_final = expected_roi
 
+        # Kelly sizing — advisory only, applied to the recommended side's price.
+        # Zero on PASS (nothing to size) or when no WR snapshot is available.
+        kelly_full = 0.0
+        kelly_scaled = 0.0
+        kelly_mult_used = 0.0
+        if recommendation != "PASS" and perceived_win_rate is not None:
+            if 0.0 < side_price < 1.0 and perceived_win_rate > side_price:
+                b = (1.0 - side_price) / side_price
+                p = perceived_win_rate
+                q = 1.0 - p
+                f = (b * p - q) / b
+                if f > 0.0:
+                    kelly_full = min(1.0, f)
+                    kelly_scaled = min(1.0, kelly_full * kelly_multiplier)
+                    kelly_mult_used = kelly_multiplier
+
         return cls(
             market=market,
             verdicts=verdicts,
@@ -403,6 +452,10 @@ class CouncilResult(BaseModel):
             signal_type=signal_type,
             pass_reason=pass_reason,
             expected_roi=expected_roi_final,
+            perceived_win_rate_at_run=perceived_win_rate,
+            kelly_stake_full=kelly_full,
+            kelly_stake_scaled=kelly_scaled,
+            kelly_multiplier=kelly_mult_used,
         )
 
 
@@ -590,10 +643,22 @@ if __name__ == "__main__":
     den = sum(v.confidence_yes for v in verdicts)
     expected_score = num / den
     assert abs(result.final_score - expected_score) < 1e-9, "final_score mismatch"
-    assert abs(result.edge - (expected_score - market.yes_price)) < 1e-9, (
-        "edge mismatch"
+    # edge is now WR-based: 0.0 when no perceived_win_rate is fed in
+    assert result.edge == 0.0 and result.no_edge == 0.0, (
+        "edge/no_edge should default to 0.0 when perceived_win_rate is None"
     )
-    print("  ✓ final_score and edge match manual calculation")
+
+    # Feed a WR to exercise the new edge + Kelly semantics
+    result_wr = CouncilResult.from_council_verdicts(
+        market=market, verdicts=verdicts, perceived_win_rate=0.70
+    )
+    assert abs(result_wr.edge - (0.70 - market.yes_price)) < 1e-9, (
+        "WR-based YES edge mismatch"
+    )
+    assert abs(result_wr.no_edge - (0.70 - (1 - market.yes_price))) < 1e-9, (
+        "WR-based NO edge mismatch"
+    )
+    print("  ✓ final_score + WR-based edges match manual calculation")
 
     # ---- Scenario tests for probability-first logic ----------------------
     print("\n--- Probability-first recommendation scenarios ---")

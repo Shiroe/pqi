@@ -128,13 +128,20 @@ class CouncilResult(BaseModel):
     verdicts: list[AgentVerdict]
     final_score: float        # YES-side confidence-weighted score
     no_score: float           # NO-side confidence-weighted score
-    edge: float               # final_score - yes_price (informational)
-    no_edge: float            # no_score - no_price (informational)
+    edge: float               # perceived_win_rate - yes_price (WR-based; 0.0 if no WR snapshot)
+    no_edge: float            # perceived_win_rate - no_price  (WR-based; 0.0 if no WR snapshot)
     recommendation: str       # "BUY YES" | "BUY NO" | "PASS"
     confidence_level: str     # "HIGH" | "MEDIUM" | "LOW"
     signal_type: str | None   # "HIGH VALUE" | "MODERATE VALUE" | "LOW MARGIN" | "CONTRARIAN" | None
     pass_reason: str          # why PASS (empty for BUY)
     expected_roi: float       # max ROI (1-price)/price of recommended side; 0.0 on PASS
+
+    # Run-time snapshots (session 23) — captured on every result so
+    # `history show` can render the WR/Kelly that applied to that run.
+    perceived_win_rate_at_run: float | None  # PerceivedTrueWinRate at scoring time; None if EV gate dormant
+    kelly_stake_full: float                  # full-Kelly fraction at side_price; 0.0 on PASS / no WR
+    kelly_stake_scaled: float                # kelly_stake_full * kelly_multiplier (advisory bankroll fraction)
+    kelly_multiplier: float                  # safety scaler used (e.g. 0.5 for half-Kelly); 0.0 if no Kelly
 
 class PerceivedStats(BaseModel):
     # Rolling stats derived from resolved history. Persisted to ~/.pqi/stats.json.
@@ -203,13 +210,15 @@ respective confidence weights. An agent can be highly confident about one
 side but uncertain about the other.
 
 ```python
-# YES-side
+# YES-side score
 yes_score = Σ(prob_yes × conf_yes) / Σ(conf_yes)
-yes_edge  = yes_score − market.yes_price
 
-# NO-side
+# NO-side score
 no_score  = Σ(prob_no × conf_no) / Σ(conf_no)     # prob_no = 1 − prob_yes
-no_edge   = no_score − (1 − market.yes_price)
+
+# WR-based edges (informational; gated by EV gate, not by edge)
+edge      = perceived_win_rate − market.yes_price       # 0.0 when no WR snapshot
+no_edge   = perceived_win_rate − (1 − market.yes_price) # 0.0 when no WR snapshot
 ```
 
 Recommendation logic (ROI-aware, probability-first):
@@ -245,8 +254,15 @@ Signal type on market-aligned BUYs is ROI-banded:
 - `MODERATE VALUE` — 25% ≤ expected_roi < 50% (price ~0.667–0.80)
 - `LOW MARGIN` — 10% ≤ expected_roi < 25% (price ~0.80–0.91)
 
-`EDGE_THRESHOLD` is **deprecated** — `edge` is still computed and displayed
-for historical continuity but is no longer consumed as a gate or label.
+`EDGE_THRESHOLD` is **deprecated** and unused — kept only so existing
+`.env` files don't error on import. The `edge` / `no_edge` fields were
+**repurposed in session 23** from `(score − price)` to
+`(PerceivedTrueWinRate − side_price)`, so positive edge now means the
+side is priced below the historical hit rate (the same condition the
+EV gate enforces). They are 0.0 when no WR snapshot exists at run
+time. Legacy / pre-session-23 history entries kept the old semantic
+and are labeled accordingly in `history show`.
+
 Overall `confidence_level` label uses the higher of the two per-side means.
 `CouncilResult.expected_roi` is persisted on every result (0.0 on PASS).
 
@@ -340,10 +356,14 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 22 — dynamic EV gate + Kelly Criterion]
+**Last updated:** [session 23 — WR-based edges, run-time snapshots, themed roadmap]
 
-All Phase 1 and Phase 2 features are complete. See [`docs/session-log.md`](docs/session-log.md)
-for per-session details and [`docs/roadmap.md`](docs/roadmap.md) for future work.
+All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
+TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
+started. See [`docs/session-log.md`](docs/session-log.md) for
+per-session details and [`docs/roadmap.md`](docs/roadmap.md) for the
+themed plan (A. Modeling & Calibration, B. TUI + Trading,
+C. Operational Tooling).
 
 ### What's live
 
@@ -354,6 +374,10 @@ for per-session details and [`docs/roadmap.md`](docs/roadmap.md) for future work
   (`~/.pqi/stats.json`) rejects BUYs where `side_price ≥ win_rate` with reason
   "Big Drawdown Risk (-EV)". Kelly stake surfaced in recommendation panel and
   `history stats` overview. Gate gated by `MIN_WIN_RATE_SAMPLES`.
+- **WR-based edges** (session 23): `edge` / `no_edge` repurposed to
+  `(PerceivedTrueWinRate − side_price)`, with `perceived_win_rate_at_run`,
+  `kelly_stake_full`, `kelly_stake_scaled`, `kelly_multiplier` snapshotted
+  on every result. Surfaced in `display_council_result` and `history show <#>`.
 - Two-sided CLOB price history enrichment (YES + NO independently, non-fatal)
 - History system: full-fidelity persistence, resolution sync, per-agent accuracy, postmortem
 - SQLite cache with price-delta invalidation
@@ -380,14 +404,16 @@ in docs/. Read the relevant partial file when working in a specific area:
 - docs/roadmap.md — future work priorities
 
 ## PRIORITY options (pick one with the user)
-- Bear accuracy monitoring (ongoing from session 20). After 15-20 new
-  resolved entries, run `pqi history stats` and check Bear metrics. See
-  docs/roadmap.md #10.
-- EV gate tuning / verification. As new resolutions land, the
-  `PerceivedTrueWinRate` in `~/.pqi/stats.json` will drift. Watch for
-  "Big Drawdown Risk" PASSes in history vs what the pre-gate system would
-  have done, and check whether `MIN_WIN_RATE_SAMPLES=20` is the right
-  activation floor.
+The roadmap is now organized into themes — see `docs/roadmap.md`:
+- Theme A · Modeling & Calibration: A.1 (data asymmetry of confidence,
+  NEW), A.2 (briefing data-point weight audit, NEW), A.4 (Bear monitoring),
+  A.5 (EV gate tuning).
+- Theme B · Continuous-run TUI + Trading: B.1 (streaming TUI), then
+  B.2 (parallel workers w/ rate limiting). B.3–B.6 cover Polymarket
+  account auth, CLOB read client, Kelly-sized buy command, and a
+  match-watcher with time-based stop-loss. Sequential dependencies
+  documented per item.
+- Theme C · Operational Tooling: C.1–C.6 small QoL items.
 
 ## Instructions
 - Pick the next priority with the user before starting

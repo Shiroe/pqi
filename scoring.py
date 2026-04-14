@@ -80,6 +80,7 @@ def build_council_result(
         min_contrarian_confidence=config.MIN_CONTRARIAN_CONFIDENCE,
         agent_weights=agent_weights,
         perceived_win_rate=perceived_win_rate,
+        kelly_multiplier=config.KELLY_MULTIPLIER,
     )
 
 

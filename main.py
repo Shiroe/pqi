@@ -70,6 +70,7 @@ def display_market_list(markets: list[MarketData]) -> None:
     table.add_column("Volume (USD)", justify="right", width=14)
 
     analyzed = _analyzed_market_ids()
+    ceiling = _star_ceiling()
 
     for i, m in enumerate(markets, start=1):
         question = m.question
@@ -81,7 +82,7 @@ def display_market_list(markets: list[MarketData]) -> None:
             _format_end_date(m.end_date),
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
-            _signal_glyph(m.yes_price),
+            _signal_glyph(m.yes_price, ceiling),
             "[cyan]●[/cyan]" if str(m.id) in analyzed else "",
             f"${m.volume_usd:,.0f}",
         )
@@ -146,6 +147,9 @@ def display_council_result(result: CouncilResult) -> None:
         if result.pass_reason:
             trade_line += f"\n[dim]{result.pass_reason}[/dim]"
 
+    # Edges are WR-based: (PerceivedTrueWinRate − side_price). Only meaningful
+    # when a WR snapshot was captured at run time; otherwise we hide the line.
+    has_wr_edge = result.perceived_win_rate_at_run is not None
     yes_edge_sign = "+" if result.edge >= 0 else ""
     no_edge_sign = "+" if result.no_edge >= 0 else ""
     # Show max ROI for whichever side the council leaned, even on PASS —
@@ -197,13 +201,24 @@ def display_council_result(result: CouncilResult) -> None:
             f"Vol: {ph.no.volatility_24h:.1f}pp/hr\n"
         )
 
+    if has_wr_edge:
+        wr_at_run = result.perceived_win_rate_at_run or 0.0
+        edge_line = (
+            f"[bold]YES Edge vs WR:[/bold] {yes_edge_sign}{result.edge:.1%}  |  "
+            f"[bold]NO Edge vs WR:[/bold] {no_edge_sign}{result.no_edge:.1%}  "
+            f"[dim](WR {wr_at_run:.1%})[/dim]\n"
+        )
+    else:
+        edge_line = (
+            "[bold]Edge vs WR:[/bold]     [dim]n/a (need more resolved history)[/dim]\n"
+        )
+
     summary = (
         f"[bold]Council YES:[/bold]    {result.final_score:.1%}  |  "
         f"[bold]Council NO:[/bold]  {result.no_score:.1%}\n"
         f"[bold]Market Prices:[/bold]  YES = {yes_price:.1%}  |  NO = {no_price:.1%}\n"
         f"{trend_line}"
-        f"[bold]YES Edge:[/bold]       {yes_edge_sign}{result.edge:.1%}  |  "
-        f"[bold]NO Edge:[/bold]  {no_edge_sign}{result.no_edge:.1%}\n"
+        f"{edge_line}"
         f"{roi_line}"
         f"{ev_line}"
         f"[bold]Confidence:[/bold]     {result.confidence_level}\n\n"
@@ -252,21 +267,41 @@ def _analyzed_market_ids() -> set[str]:
         return set()
 
 
-def _signal_glyph(yes_price: float) -> str:
+def _star_ceiling() -> float:
+    """Upper price bound for the ⭐ signal — the point above which the EV gate
+    would reject a BUY. When `PerceivedStats` is active, this is the rolling
+    `true_win_rate` (star only on prices where we actually have an edge).
+    Falls back to the static 0.91 ROI-gate ceiling when stats are missing
+    or below the sample-size threshold, so cold-start behavior is unchanged.
+    """
+    if not config.EV_GATE_ENABLED:
+        return 0.91
+    try:
+        from pqi.stats import load_perceived_stats
+
+        stats = load_perceived_stats()
+    except Exception:
+        return 0.91
+    if stats is None or stats.below_min_samples:
+        return 0.91
+    return stats.true_win_rate
+
+
+def _signal_glyph(yes_price: float, ceiling: float = 0.91) -> str:
     """Tradeable-zone signal for the market list.
 
-    ⭐ — favored side is in the actionable band [0.55, 0.91): the council has
-         room to confirm/contradict and the price is still cheap enough to clear
-         the ROI gate.
+    ⭐ — favored side is in the actionable band [0.55, ceiling]: the council
+         has room to confirm/contradict and the price is at or below our
+         edge ceiling (PerceivedTrueWinRate when active, else 0.91).
     🔻 — favored side is at 100% (or ≥99%): market is effectively resolved,
          no edge available, listed only as noise.
-    (blank) — coin-flip zone (favored < 0.55) or ceiling-adjacent (≥ 0.91 but
-              < 1.0). Not actionable but worth glancing at.
+    (blank) — coin-flip zone (favored < 0.55) or above the ceiling but < 1.0.
+              Not actionable but worth glancing at.
     """
     fav = max(yes_price, 1.0 - yes_price)
     if fav >= 0.99:
         return "🔻"
-    if 0.55 <= fav < 0.91:
+    if 0.55 <= fav <= ceiling:
         return "⭐"
     return ""
 
@@ -287,19 +322,59 @@ def _moneyline_score(question: str, event_title: str) -> float:
     return overlap / len(t_words)
 
 
+def _is_moneyline(m: MarketData) -> bool:
+    """True when the Gamma-API `sportsMarketType` flags this as the moneyline.
+
+    Authoritative for sports/esports events. Non-sports markets have
+    `sports_market_type=None` and this returns False — callers fall back
+    to the title-overlap heuristic in that case.
+    """
+    return m.sports_market_type == "moneyline"
+
+
+def _moneyline_sort_key(m: MarketData, event_title: str) -> tuple[int, float, float]:
+    """Composite sort key that promotes moneyline markets to the top.
+
+    Ranks by (is_moneyline, title_overlap_score, volume) — all descending.
+    The sportsMarketType flag is the authoritative signal when present;
+    the title-overlap score is the fallback for non-sports events and the
+    tiebreaker when multiple markets share the same flag value.
+    """
+    return (
+        1 if _is_moneyline(m) else 0,
+        _moneyline_score(m.question, event_title),
+        m.volume_usd,
+    )
+
+
 def _sort_moneyline_first(
     markets: list[MarketData], event_title: str
 ) -> list[MarketData]:
-    """Return markets sorted with the moneyline (overall outcome) first.
-
-    Primary sort: moneyline similarity score (desc).
-    Secondary sort: volume (desc) — preserves original order for ties.
-    """
+    """Return markets sorted with the moneyline (overall outcome) first."""
     return sorted(
         markets,
-        key=lambda m: (_moneyline_score(m.question, event_title), m.volume_usd),
+        key=lambda m: _moneyline_sort_key(m, event_title),
         reverse=True,
     )
+
+
+def _headline_market(group: EventGroup) -> MarketData:
+    """The market whose YES/NO price best represents the event as a whole.
+
+    Priority: explicit `sportsMarketType == "moneyline"` (authoritative from
+    the Gamma API) → highest title-overlap score (heuristic fallback for
+    non-sports events) → highest volume (tiebreaker). For single-market
+    events or events without a title, returns the primary market directly.
+    """
+    if len(group.markets) <= 1:
+        return group.primary_market
+    # Direct hit on the API flag — skip the heuristic entirely.
+    for m in group.markets:
+        if _is_moneyline(m):
+            return m
+    if not group.event_title:
+        return group.primary_market
+    return _sort_moneyline_first(group.markets, group.event_title)[0]
 
 
 def display_event_list(groups: list[EventGroup]) -> None:
@@ -320,6 +395,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
     table.add_column("Volume (USD)", justify="right", width=14)
 
     analyzed = _analyzed_market_ids()
+    ceiling = _star_ceiling()
 
     for i, g in enumerate(groups, start=1):
         # Single-market events show the market question; multi-market show event title
@@ -330,7 +406,10 @@ def display_event_list(groups: list[EventGroup]) -> None:
         # No truncation — let Rich wrap long labels naturally
 
         starts = _format_end_date(g.event_start_time) if g.event_start_time else "—"
-        pm = g.primary_market
+        # Headline prices track the moneyline / overall-outcome market,
+        # not the highest-volume sub-market (Map 1 etc.). Sig/YES/NO all
+        # reference this market so the event-level signal is consistent.
+        pm = _headline_market(g)
 
         live_marker = " [green]LIVE[/green]" if g.live else ""
 
@@ -341,7 +420,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
             str(len(g.markets)),
             f"{pm.yes_price:.0%}",
             f"{1.0 - pm.yes_price:.0%}",
-            _signal_glyph(pm.yes_price),
+            _signal_glyph(pm.yes_price, ceiling),
             ("[cyan]●[/cyan]" if any(str(m.id) in analyzed for m in g.markets) else ""),
             f"${g.total_volume:,.0f}",
         )
@@ -395,6 +474,7 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
     sub_table.add_column("Volume", justify="right", width=12)
 
     analyzed = _analyzed_market_ids()
+    ceiling = _star_ceiling()
 
     for i, m in enumerate(sorted_markets, start=1):
         sub_table.add_row(
@@ -402,7 +482,7 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
             m.question,
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
-            _signal_glyph(m.yes_price),
+            _signal_glyph(m.yes_price, ceiling),
             "[cyan]●[/cyan]" if str(m.id) in analyzed else "",
             f"${m.volume_usd:,.0f}",
         )
@@ -1076,12 +1156,55 @@ def history_show(
         f"signal: [bold]{r.get('signal_type') or '—'}[/bold]   "
         f"confidence: [bold]{r.get('confidence_level', '?')}[/bold]",
         f"Council YES: {r.get('final_score', 0):.1%}   "
-        f"Council NO: {r.get('no_score', 0):.1%}   "
-        f"Edge YES: {r.get('edge', 0):+.1%}   Edge NO: {r.get('no_edge', 0):+.1%}",
+        f"Council NO: {r.get('no_score', 0):.1%}",
     ]
+
+    # Edge line — adapts to the semantic the entry was written with:
+    # - New entries carry `perceived_win_rate_at_run` and edges are WR-based.
+    # - Entries written before the EV gate (or with gate dormant) have
+    #   edge/no_edge = 0.0 and no snapshot key — we render them as n/a.
+    # - Legacy entries predate the WR semantic and stored (score − price),
+    #   flagged explicitly so the user isn't misled.
+    has_wr_key = "perceived_win_rate_at_run" in r
+    wr_at_run = r.get("perceived_win_rate_at_run")
+    edge_v = r.get("edge", 0) or 0
+    no_edge_v = r.get("no_edge", 0) or 0
+    if entry.get("legacy") or not has_wr_key:
+        if edge_v or no_edge_v:
+            rec_lines.append(
+                f"[dim]Edge YES (legacy score−price): {edge_v:+.1%}   "
+                f"Edge NO (legacy score−price): {no_edge_v:+.1%}[/dim]"
+            )
+        else:
+            rec_lines.append(
+                "[dim]Edge vs WR: n/a (no PerceivedTrueWinRate snapshot at run time)[/dim]"
+            )
+    elif wr_at_run is None:
+        rec_lines.append(
+            "[dim]Edge vs WR: n/a (EV gate inactive at run time — not enough samples yet)[/dim]"
+        )
+    else:
+        rec_lines.append(
+            f"Edge YES vs WR: {edge_v:+.1%}   Edge NO vs WR: {no_edge_v:+.1%}   "
+            f"[dim](WR at run: {wr_at_run:.1%})[/dim]"
+        )
+
     roi_val = r.get("expected_roi", 0) or 0
     if roi_val > 0:
         rec_lines.append(f"[bold]Expected ROI:[/bold] +{roi_val:.1%}")
+
+    # Kelly snapshot at run time (advisory sizing). Hidden on PASS and on
+    # legacy / pre-gate entries where the stakes were never computed.
+    k_full = r.get("kelly_stake_full", 0) or 0
+    k_scaled = r.get("kelly_stake_scaled", 0) or 0
+    k_mult = r.get("kelly_multiplier", 0) or 0
+    if rec in ("BUY YES", "BUY NO") and (k_full > 0 or k_scaled > 0):
+        mult_label = f"@{k_mult:g}x" if k_mult else "scaled"
+        rec_lines.append(
+            f"[bold]Kelly stake at run:[/bold] full {k_full:.1%} · "
+            f"{mult_label} {k_scaled:.1%} of bankroll"
+        )
+
     if r.get("pass_reason"):
         rec_lines.append(f"[dim]Pass reason:[/dim] {r['pass_reason']}")
     console.print(

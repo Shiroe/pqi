@@ -155,6 +155,12 @@ def _parse_market(
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        # sportsMarketType ("moneyline", "spread", "total", etc.) — only
+        # present on Polymarket's sports/esports markets. Normalize to
+        # lowercase so consumers can match case-insensitively.
+        smt_raw = raw.get("sportsMarketType")
+        sports_market_type = smt_raw.lower() if isinstance(smt_raw, str) and smt_raw else None
+
         return MarketData(
             id=market_id,
             question=question,
@@ -165,6 +171,7 @@ def _parse_market(
             volume_usd=volume_usd,
             category=category,
             clob_token_ids=clob_token_ids,
+            sports_market_type=sports_market_type,
         )
 
     except (KeyError, IndexError, ValueError, TypeError) as exc:

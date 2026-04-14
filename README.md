@@ -331,11 +331,13 @@ Active Polymarket Events
 ```
 
 - **Sig** (signal) — quick-scan indicator for actionable pricing:
-  - ⭐ Favored side in **[55%, 91%)** — the market has a clear lean but is still cheap
-    enough to clear ROI gates. This is the "analyze me" zone.
+  - ⭐ Favored side in **[55%, PerceivedTrueWinRate]** — the market has a clear lean
+    AND the price is at or below our historical hit rate, so there's actual edge.
+    When the EV gate is dormant (not enough samples yet) the ceiling falls back to
+    **91%** so star behavior matches the pre-EV system.
   - 🔻 Favored side **≥ 99%** — market is effectively resolved (priced at certainty),
     no edge available, shows up as noise.
-  - _(blank)_ — coin-flip zone (favored < 55%) or ceiling-adjacent (91–99%). Not
+  - _(blank)_ — coin-flip zone (favored < 55%) or above the edge ceiling. Not
     immediately actionable but may be worth monitoring.
 - **Seen** — `●` if any market in this event has been previously analyzed (has a
   non-legacy entry in `~/.pqi/history.jsonl`). Blank = fresh event, never analyzed.
@@ -359,7 +361,7 @@ Council of Seven — Verdicts
 │ Market Prices:  YES = 66.0%  |  NO = 34.0%            │
 │ 7d Trend YES:   +5.2pp RISING  |  24h: +1.8pp  |  Vol: 0.9pp/hr │
 │ 7d Trend NO:    -4.8pp FALLING |  24h: -1.5pp  |  Vol: 0.8pp/hr │
-│ YES Edge:       +9.2%  |  NO Edge:  -9.7%             │
+│ YES Edge vs WR: +8.4%  |  NO Edge vs WR: -25.6%  (WR 74.4%) │
 │ Max ROI (YES):  +51.5%  (if that side wins)            │
 │ True Win Rate:  74.4%  (n=43, EV ceiling)              │
 │ Kelly stake:    full 12.1% · @0.5x 6.0% of bankroll    │
@@ -368,6 +370,20 @@ Council of Seven — Verdicts
 │ >>> BUY YES @ $0.66/share — HIGH VALUE <<<             │
 ╰────────────────────────────────────────────────────────╯
 ```
+
+The `Edge vs WR` line is `(PerceivedTrueWinRate − side_price)` per
+side — positive means the price sits below the historical hit rate,
+which is exactly the condition the EV gate enforces. When the EV gate
+is dormant (not enough resolved samples yet), the line collapses to
+`Edge vs WR: n/a (need more resolved history)`.
+
+`pqi history show <#>` prints the same edge in WR-relative form when
+the entry was scored under the new semantic, falls back to a
+`(legacy score−price)` label for entries written before session 23,
+and includes the `perceived_win_rate_at_run` and Kelly stake snapshot
+that applied to that specific run — so you can audit what advice you
+actually received at the time, not what the current rolling stats
+would say.
 
 ### Recommendation types
 
@@ -435,7 +451,7 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MIN_CONTRARIAN_PROBABILITY`  | `0.70`  | Minimum council probability for a contrarian BUY (against market)                    |
 | `MIN_CONTRARIAN_CONFIDENCE`   | `0.80`  | Minimum per-side confidence for a contrarian BUY                                     |
 | `CONFIDENCE_HIGH_THRESHOLD`   | `0.67`  | Mean confidence required for HIGH label                                              |
-| `EDGE_THRESHOLD`              | `0.07`  | **Deprecated** — informational only; no longer gates recommendations                 |
+| `EDGE_THRESHOLD`              | `0.07`  | **Deprecated and unused** — kept only so existing `.env` files don't error on import |
 | `MIN_TRADEABLE_PRICE`         | `0.05`  | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals)                 |
 | `MAX_TRADEABLE_PRICE`         | `0.90`  | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk)  |
 | `MIN_EXPECTED_ROI`            | `0.15`  | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.87)      |
@@ -580,3 +596,30 @@ from resolved, non-legacy BUY history and persists it to
 Switch by setting `LLM_BACKEND=anthropic` in `.env`. Anthropic runs all 7 agents
 fully in parallel (no concurrency throttle needed). Ollama is throttled by
 `LOCAL_LLM_CONCURRENCY` (default 1) to prevent GPU OOM on consumer cards.
+
+---
+
+## Roadmap (where this is going)
+
+`docs/roadmap.md` is the source of truth. The flat backlog has been
+restructured into three themes:
+
+- **A. Modeling & Calibration** — sharper inference: data-asymmetry
+  handling for the two-sided confidence pair, an audit of how each
+  briefing block (Tavily news, sharp moves, post-kickoff price points)
+  actually moves the verdict, plus the existing Bear and EV-gate
+  monitoring follow-ups.
+- **B. Continuous-run TUI + Trading Automation (Phase 3)** — the next
+  major phase. Streaming TUI that surfaces actionable events, optional
+  background analysis workers with a process-shared rate-limit
+  coordinator (Anthropic + Tavily), Polymarket account auth via
+  `py-clob-client`, a Kelly-sized buy command, and a match-watcher
+  that fires a time- or PnL-based stop-loss after a position lands.
+- **C. Operational Tooling** — small QoL items: cache TTL,
+  `/public-search` integration for ghost events, multi-market batch
+  analysis, per-category accuracy slicing.
+
+Each theme lists its reference files and any blockers documented in
+`docs/known-issues.md` (notably ghost events, Gamma list-endpoint
+`live`/`ended` always being `None`, and the need for a global
+Anthropic rate-limit coordinator before parallel workers can ship).

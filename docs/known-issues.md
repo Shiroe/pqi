@@ -72,6 +72,40 @@ Referenced from CLAUDE.md.
   the semaphore entirely. Default 1 for consumer GPUs.
 - Council JSON parser: Pass 1 direct json.loads(), Pass 2 strip control chars.
 
+### Asymmetry of two-sided confidence (open question, not a bug)
+
+Since agents return `confidence_yes` and `confidence_no` independently, a
+single verdict can land at e.g. `p_yes=26% with conf_yes=72%` and
+`p_no=74% with conf_no=35%`. Mathematically `p_yes + p_no = 1.0`, but the
+*confidence* gap is real signal: the high-confidence side is a tight
+cluster of evidence, the low-confidence side is noise.
+
+Today we feed both into the scoring formula symmetrically (independent
+weighted averages per side, recommendation picks the higher-confidence
+side via `confidence_level`). That is defensible but probably leaves
+information on the table — a high-confidence "Team A almost certainly
+loses" verdict is a much stronger signal than the same agent's
+low-confidence "Team B probably wins" mirror, even though the two are
+algebraically equivalent.
+
+Candidate techniques to evaluate (see `docs/roadmap.md` Theme A · Data
+asymmetry of confidence):
+
+- **Credibility-weighted probability (Bayesian shrinkage)** — anchor on
+  the higher-confidence side and shrink the other toward it:
+  `p_adj = p_high * c_high + p_low * (1 - c_high)`.
+- **Log-odds weighted by confidence** — `Σ c_side * ln(p / (1-p))` per
+  side; sign of the sum picks the lean, magnitude is a "strength of
+  signal" score that naturally lets the high-confidence voice dominate.
+- **Dempster-Shafer style explicit ignorance** — model the
+  `1 - max(c_yes, c_no)` slice as "I don't know" rather than forcing it
+  into one of the two sides.
+
+Defer until we have more resolved samples to backtest against — the
+roadmap item tracks this.
+
+---
+
 ## Environment
 
 - `.env` uses `CLAUDE_API_KEY` instead of `ANTHROPIC_API_KEY`. `config.py` accepts
