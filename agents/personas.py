@@ -193,7 +193,17 @@ Analysis Lens:
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES) given your bearish case for \
+the underdog>,
+  "probability_no_score": <integer 0-100, P(NO) evaluated INDEPENDENTLY on \
+the case AGAINST the favorite. CRITICAL: do NOT mechanically set this to \
+100 - probability_score. Your evidence is asymmetric — you argued FOR the \
+underdog using overlooked or under-reported signals; your case against the \
+favorite is built on specific vulnerabilities, not blanket dismissal. \
+Reflect that asymmetry by leaving ignorance mass (sum < 100) and lowering \
+the confidence on the side where your evidence is thinner. The autonomy \
+is the signal — a bear who emits perfectly mirrored probabilities is \
+providing no new information beyond probability_score>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "primary_upset_factor": "<single sentence naming the strongest driver for the underdog>",
