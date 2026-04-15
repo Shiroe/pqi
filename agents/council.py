@@ -306,6 +306,41 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
         prob_raw = int(data["probability_score"])
         probability = max(0.0, min(1.0, prob_raw / 100))
 
+        # Option B (session 26): independent per-side probability.
+        # If the agent emits `probability_no_score`, parse it as P(NO) and
+        # tag the verdict source="independent". Otherwise fall back to a
+        # synthetic mirror (probability_no = 1 - probability), which the
+        # AgentVerdict validator handles via default values.
+        # Lenient policy per Option B plan §5.4: log coherence drift but
+        # never reject — the drift is the signal we want to measure.
+        probability_no: float | None = None
+        probability_source = "synthetic_mirror"
+        if "probability_no_score" in data:
+            try:
+                pn_raw = int(data["probability_no_score"])
+                probability_no = max(0.0, min(1.0, pn_raw / 100))
+                probability_source = "independent"
+                drift = abs(probability + probability_no - 1.0)
+                if drift > 0.3:
+                    logger.warning(
+                        "[%s] Coherence drift |p_yes + p_no - 1| = %.2f "
+                        "(p_yes=%.2f, p_no=%.2f) — accepting (lenient)",
+                        agent_key,
+                        drift,
+                        probability,
+                        probability_no,
+                    )
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "[%s] Malformed probability_no_score (%r) — falling back "
+                    "to synthetic mirror: %s",
+                    agent_key,
+                    data.get("probability_no_score"),
+                    exc,
+                )
+                probability_no = None
+                probability_source = "synthetic_mirror"
+
         # Two-sided confidence: confidence_yes and confidence_no.
         # Fallback: if agent only provided legacy "confidence_level", use it for both.
         if "confidence_yes" in data and "confidence_no" in data:
@@ -354,14 +389,21 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
     if not key_factor:
         key_factor = "Not specified."
 
-    return AgentVerdict(
-        agent_name=AGENT_DISPLAY_NAMES.get(agent_key, agent_key),
-        probability=probability,
-        confidence_yes=confidence_yes,
-        confidence_no=confidence_no,
-        rationale=rationale,
-        key_factor=key_factor,
-    )
+    verdict_kwargs: dict = {
+        "agent_name": AGENT_DISPLAY_NAMES.get(agent_key, agent_key),
+        "probability": probability,
+        "confidence_yes": confidence_yes,
+        "confidence_no": confidence_no,
+        "rationale": rationale,
+        "key_factor": key_factor,
+    }
+    if probability_no is not None:
+        # Independent emission — pin both fields and the source flag so the
+        # validator does not auto-fill / re-tag as synthetic_mirror.
+        verdict_kwargs["probability_yes"] = probability
+        verdict_kwargs["probability_no"] = probability_no
+        verdict_kwargs["probability_source"] = probability_source
+    return AgentVerdict(**verdict_kwargs)
 
 
 # ---------------------------------------------------------------------------
