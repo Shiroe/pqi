@@ -169,11 +169,11 @@ the command that surfaces it, and how to read the result.
 
 | Value (and aliases)                     | Matches                                                                                              |
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `correct_buy` (`buy`, `win`)            | BUY recommendation that matched the winning side                                                     |
-| `wrong_buy` (`wrong`, `loss`)           | BUY recommendation against the winning side                                                          |
-| `missed_opportunity` (`miss`, `missed`) | PASS where the council favored the winning side with prob ≥ 65% (gates blocked an actionable signal) |
-| `correct_pass` (`pass`)                 | PASS where the council was correctly unsure or wrong about the winner                                |
-| `voided` (`void`)                       | Market closed without a clean YES/NO winner                                                          |
+| `correct_buy` (`buy`, `win`)            | BUY whose side gained in price from entry to settlement (PnL > 0, including partial settlements like 0.50/0.50 draws) |
+| `wrong_buy` (`wrong`, `loss`)           | BUY whose side lost in price from entry to settlement (PnL < 0)                                      |
+| `missed_opportunity` (`miss`, `missed`) | PASS where a clean winner was declared and the council favored it with prob ≥ 65% (gates blocked an actionable signal) |
+| `correct_pass` (`pass`)                 | PASS where the council was correctly unsure or wrong, plus exact-push BUYs (rare)                    |
+| `voided` (`void`)                       | Market cancelled / refunded with no redemption price available (true void, not a draw)               |
 | `unresolved` (`pending`)                | Resolution not yet fetched from the Gamma API                                                        |
 
 ##### `--rec` values
@@ -211,11 +211,11 @@ distinct entries because the key is market id, not event id.
 
 | Outcome              | Meaning                                                                                                    |
 | -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `correct_buy`        | BUY recommendation matched the winning side                                                                |
-| `wrong_buy`          | BUY recommendation against the winning side                                                                |
-| `missed_opportunity` | PASS, but council favored the winning side with prob ≥ 65% — confidence gates blocked an actionable signal |
-| `correct_pass`       | PASS, council was unsure or wrong (correctly avoided)                                                      |
-| `voided`             | Market closed without a clean YES/NO winner                                                                |
+| `correct_buy`        | BUY whose side gained in price from entry to settlement (PnL-based — covers both clean 99/1 wins and intermediate settlements like 0.50/0.50 draws where entry was favorable) |
+| `wrong_buy`          | BUY whose side lost from entry to settlement (e.g. BUY YES @ 0.60 that settled 0.50/0.50 = –10¢/share)     |
+| `missed_opportunity` | PASS, clean winner declared, council favored it with prob ≥ 65% — gates blocked an actionable signal       |
+| `correct_pass`       | PASS, council was unsure or wrong (plus the rare exact-push BUY)                                           |
+| `voided`             | Market cancelled / refunded with no redemption price (true void only — 0.50/0.50 draws are NOT voids, they're PnL-bearing settlements) |
 | `unresolved`         | Resolution not yet fetched                                                                                 |
 
 #### Per-agent accuracy
@@ -452,17 +452,20 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MIN_CONTRARIAN_CONFIDENCE`   | `0.80`  | Minimum per-side confidence for a contrarian BUY                                     |
 | `CONFIDENCE_HIGH_THRESHOLD`   | `0.67`  | Mean confidence required for HIGH label                                              |
 | `EDGE_THRESHOLD`              | `0.07`  | **Deprecated and unused** — kept only so existing `.env` files don't error on import |
-| `MIN_TRADEABLE_PRICE`         | `0.05`  | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals)                 |
+| `MIN_TRADEABLE_PRICE`         | `0.09`  | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals)                 |
 | `MAX_TRADEABLE_PRICE`         | `0.90`  | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk)  |
-| `MIN_EXPECTED_ROI`            | `0.15`  | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.87)      |
+| `MIN_EXPECTED_ROI`            | `0.10`  | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.91)      |
 | `MIN_CONTRARIAN_ROI`          | `0.20`  | Stricter ROI floor for contrarian BUYs (≈ price ≤ 0.833)                             |
 | `EV_GATE_ENABLED`             | `true`  | Master switch for the final EV gate (PerceivedTrueWinRate ceiling)                   |
 | `MIN_WIN_RATE_SAMPLES`        | `20`    | Resolved-BUY threshold before the EV gate activates                                  |
 | `KELLY_MULTIPLIER`            | `0.5`   | Advisory Kelly scaler (0.5 = half-Kelly; 1.0 = full)                                 |
 | `MIN_VOLUME_USD`              | `10000` | Volume floor for general queries                                                     |
 | `MIN_VOLUME_SHORT_WINDOW_USD` | `500`   | Volume floor for short time-window / live queries                                    |
-| `RULES_LAWYER_WEIGHT`         | `2`     | Rules Lawyer counts as N agents in weighted scoring                                  |
-| `BEAR_WEIGHT`                 | `1.0`   | Bear agent weight in scoring (lower to reduce drag on confidence; try 0.7 if needed) |
+| `RULES_LAWYER_WEIGHT`         | `1`     | Rules Lawyer weight multiplier (static fallback; overridden by dynamic weights)      |
+| `BEAR_WEIGHT`                 | `1.0`   | Bear agent weight (static fallback; overridden by dynamic weights when enabled)      |
+| `AGENT_WEIGHTS_ENABLED`       | `true`  | Load dynamic per-agent reliability weights from `~/.pqi/agent_weights.json`          |
+| `MIN_AGENT_WEIGHT_SAMPLES`    | `30`    | Resolved-BUY threshold per agent before its dynamic weight applies (else 1.0)        |
+| `AGENT_WEIGHT_SHRINK`         | `2.0`   | Shrinkage strength: `weight = 1 + shrink * (lean_rate − council_avg)`                |
 | `MIN_COUNCIL_VERDICTS`        | `5`     | Minimum agents (of 7) that must return valid verdicts; aborts if below               |
 | `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
 | `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |

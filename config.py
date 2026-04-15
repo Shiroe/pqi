@@ -113,6 +113,19 @@ BEAR_WEIGHT: float = float(os.getenv("BEAR_WEIGHT", "1.0"))
 """Bear agent weight in scoring. Default 1.0 (equal). Lower to reduce Bear's
 drag on council confidence if prompt fix is insufficient (try 0.7 first)."""
 
+# Dynamic per-agent reliability weights (session 25). When enabled and the
+# agent_weights.json snapshot exists, the computed weights fully override the
+# static RULES_LAWYER_WEIGHT / BEAR_WEIGHT above (precedence mode α). Any
+# agent with fewer than MIN_AGENT_WEIGHT_SAMPLES resolved lean verdicts falls
+# back to 1.0 to avoid cold-start noise.
+AGENT_WEIGHTS_ENABLED: bool = os.getenv("AGENT_WEIGHTS_ENABLED", "true").lower() in {"1", "true", "yes"}
+MIN_AGENT_WEIGHT_SAMPLES: int = int(os.getenv("MIN_AGENT_WEIGHT_SAMPLES", "30"))
+AGENT_WEIGHT_SHRINK: float = float(os.getenv("AGENT_WEIGHT_SHRINK", "2.0"))
+"""Shrinkage coefficient for dynamic agent weights. Final weight per agent is
+`1.0 + shrink * (agent_lean_rate - council_avg_lean_rate)`. k=2.0 is a
+moderate nudge (Rules Lawyer ~1.08, Bear ~0.71 at session-24 lean rates).
+Set to 0.0 to disable the nudge while keeping the file machinery on."""
+
 # Probability-first recommendation gates
 MIN_COUNCIL_PROBABILITY: float = float(os.getenv("MIN_COUNCIL_PROBABILITY", "0.60"))
 MIN_CONTRARIAN_PROBABILITY: float = float(

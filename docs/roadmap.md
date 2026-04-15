@@ -59,9 +59,10 @@ Reference files:
 | `pqi/agents/personas.py`                        | Prompt-level changes (e.g. asking for separate explanations)  |
 | `pqi/stats.py`                                  | EV gate and Kelly inputs                                      |
 | `docs/known-issues.md` (Asymmetry section)      | Background on the asymmetric-confidence question              |
-| `docs/retrospectives/eval_tier1_roi_2026_04.md` | Bear agent tuning + missed-opportunity analysis               |
+| `docs/retrospectives/eval_tier1_roi_2026_04.md` | Bear agent tuning + missed-opportunity analysis (n=60 era)    |
+| `docs/retrospectives/eval_gate_audit_2026_04_15.md` | Full-history gate audit (n=240) — feeds A.1, A.4, A.5, A.7, A.8 |
 
-### A.1 Data asymmetry of confidence (NEW)
+### A.1 Data asymmetry of confidence (NEW, session-24 scoped)
 
 Today the scoring formula treats `confidence_yes` and `confidence_no`
 symmetrically — each side gets its own weighted average and the
@@ -77,16 +78,97 @@ voice. Candidates documented in `docs/known-issues.md` →
 - Dempster-Shafer style explicit "ignorance" mass for
   `1 - max(c_yes, c_no)`.
 
-**Plan:**
+#### Scope split: Option A (now) vs Option B (deferred)
 
-1. Add a parallel `inference_score` (computed but not gated on) to
-   `CouncilResult` so we can backtest each candidate against history.
-2. After ~50 more resolved entries, compare each candidate's
-   sign/magnitude against the actual winners in `pqi history list`.
-3. Promote the best performer into the gate stack (likely as a
-   tiebreaker between BUY and PASS, not a replacement).
+Session-24 decision (see `docs/retrospectives/eval_gate_audit_2026_04_15.md`
+for the framing): A.1 has two possible scopes and we deliberately ship
+the smaller one first.
 
-Blockers: none. Pure offline modeling work.
+**Option A — confidence-only asymmetry (session 24+, current scope).**
+Keep `AgentVerdict.probability` as a single `P(YES)` with `P(NO) = 1 −
+P(YES)` inferred (the current contract). Apply the three candidate
+techniques to the *confidence* dimension only — they adjust how the
+council aggregates the YES-side and NO-side weighted scores, not what
+each agent reports. Benefits: works on all 240 non-legacy historical
+verdicts; no schema change; no agent-prompt change; rollback is just
+removing fields. Limitation: if the real asymmetry lives in probability
+space (agent believes YES and NO probabilities don't sum to 1 because of
+void/tie outcomes, evidence gaps, or heterogeneous dependency between
+sides), Option A cannot express it.
+
+**Option B — full per-side probability autonomy (DEFERRED).**
+Extend `AgentVerdict` to return `probability_yes` and `probability_no`
+as separate fields; update all seven persona prompts in
+`pqi/agents/personas.py` to output both; update the council parser in
+`pqi/agents/council.py`; update scoring math to handle
+`p_yes + p_no ≠ 1` (renormalize, treat residual as ignorance mass per
+Dempster-Shafer, or model explicit "void" outcome). **Defer until
+Option A's effect is measured** because:
+
+- Every pre-B historical verdict has only `P(YES)`; backtest set
+  collapses to "verdicts captured after B ships," costing us the 240-row
+  runway we have today.
+- Gate thresholds calibrated against the current single-probability
+  semantic (`MIN_COUNCIL_PROBABILITY=0.60` etc.) would need re-tuning.
+- If Option A produces the improvement we hope for, Option B may be
+  unnecessary overhead.
+
+If Option A's shadow results show little movement across ≥50 new
+resolutions, revisit Option B with a proper backtest runway. Add a
+checkpoint item in this roadmap when that happens.
+
+#### Option A plan
+
+Application layer is **per-agent** (aggregation stays as a later pivot
+if we need it). Metrics are **Brier score + net-correct** (recovered
+correct minus newly wrong). Solution path is **(3) hybrid**: offline
+backtest eliminates obviously-bad candidates, survivors promote to
+shadow mode.
+
+1. **Offline backtest harness** (pure function, no pipeline change):
+   - Walk `history.jsonl`, filter to non-legacy resolved rows with
+     per-agent verdicts.
+   - For each row, recompute council `yes_score` / `no_score` under
+     each of the three candidates (shrinkage, log-odds, Dempster-Shafer)
+     at per-agent level, then aggregate via existing weighted-average.
+   - Report per-candidate: Brier score vs actual outcome, net-correct
+     delta, missed-op delta, wrong-buy delta.
+   - Include the baseline (current scoring) as a reference column.
+   - Use leave-one-out cross-validation where a candidate has
+     tuneable parameters (e.g. shrinkage multiplier) to avoid
+     overfit on n=50 BUYs.
+2. **Survivors → shadow fields.** Add `inference_score_shrinkage`,
+   `inference_score_logodds`, `inference_score_dempster` to
+   `CouncilResult` (nullable). Computed alongside live scoring,
+   **never gating**. Surfaced in the recommendation panel as a
+   "what-if" block and in `history show <#>` so the user can eyeball
+   whether each candidate would have flipped the verdict.
+3. **Measure in production.** After ≥50 new resolved entries
+   post-ship, re-run the offline harness against the now-richer set.
+   Decide: promote the best candidate into the gate stack (likely as
+   a tiebreaker between BUY and PASS), or defer to Option B.
+4. **Option A exit criteria** (pre-registered so we don't move the
+   goalposts):
+   - Promote candidate X if `Brier(X) < Brier(baseline)` by ≥ 0.01
+     AND `net-correct(X) ≥ net-correct(baseline)` on the post-ship
+     sample.
+   - Otherwise keep shadow, reopen Option B.
+
+Blockers:
+
+- None for step 1 (pure offline replay).
+- Steps 2-3 add three new fields to `CouncilResult` and compute three
+  extra per-row numbers — touches `models.py` but strictly additively
+  (new nullable fields, no change to existing verdict logic).
+
+#### YES/NO autonomy principle (applies to both options)
+
+CLAUDE.md now records the rule: YES and NO are autonomous signals, not
+algebraic mirrors. Prices are independent (CLOB), confidences are
+independent (today), probability is one-sided *today only* as a
+simplification. Any work under A.1 (and future roadmap items) must
+respect this — never infer NO-side evidence or confidence as a
+function of YES-side.
 
 ### A.2 Briefing data-point weight audit (NEW)
 
@@ -158,6 +240,149 @@ verdicts improve accuracy, consider using `weighted_avg` or trend
 direction as a soft input to scoring gates (e.g. tighter ROI threshold
 when trend opposes the recommendation). Likely subsumed by A.2 once
 the briefing weight audit lands — re-evaluate then.
+
+### A.7 Confidence floor calibration (NEW, session-24 retrospective)
+
+Session-24 retrospective (`eval_gate_audit_2026_04_15.md` finding 3.6)
+showed `CONFIDENCE_HIGH_THRESHOLD=0.67` blocks **45 of 46** missed
+opportunities (98%) — essentially every PASS-that-should-have-been-BUY
+is gated by this one threshold. Meanwhile HIGH-confidence PASSes only
+become misses <2% of the time (finding 3.7), so the floor is cheap in
+false BUYs but expensive in missed BUYs.
+
+This subsumes the older **A.3 "Tier 2 gate evaluation"** (same knob,
+then-available sample of n=60 suggested 0.67 → 0.65 as +2 net; n=240
+sample should give a much sharper estimate).
+
+**Plan:**
+
+1. Replay the 46 missed opportunities through threshold values
+   {0.60, 0.63, 0.65, 0.67, 0.70}; compute recovered-correct-BUYs and
+   newly-created wrong-BUYs per threshold (precision/recall curve).
+2. Cross-check against resolved HIGH-conf PASSes — which of them would
+   become BUYs at each candidate threshold, and with what outcome?
+3. Pick the threshold that maximizes net (recovered_correct −
+   new_wrong) while keeping the HIGH-conf-PASS false-miss rate
+   bounded.
+4. Flag interaction with A.1 — if A.1 changes how probability is
+   computed, the confidence floor may need re-calibration after A.1
+   lands. Run A.1 first, then A.7 on top of the new probability.
+
+Blockers: A.1 ordering (below) — if A.1 changes the probability
+semantic, A.7 must re-run on the new numbers.
+
+### A.8 Bull confidence overstatement audit (NEW, session-24 retrospective)
+
+Per-agent leaderboard (`eval_gate_audit_2026_04_15.md` finding 3.5):
+
+- Bull: mean confidence **0.66** (highest in council), lean hit rate
+  **60.6%** (second-lowest) — the inverse of the pre-session-20 Bear
+  problem.
+- Every other agent's mean confidence is 0.51-0.57; Bull is an outlier
+  by ~10pp.
+
+**Plan:**
+
+1. Audit the Bull persona in `pqi/agents/personas.py` the same way
+   session 20 audited Bear — look for structural phrases that anchor
+   confidence high on favorites (e.g. "the favorite typically...",
+   "statistics favor...", phrasing that maps narrative plausibility
+   onto numeric confidence).
+2. Compute Bull's hit rate broken down by `side_price` bucket
+   (≤0.55 / 0.55-0.70 / 0.70-0.85 / ≥0.85). If hit rate drops
+   monotonically with favorite price — i.e. Bull gets worse on bigger
+   favorites — that confirms the "rubber-stamps favorites" failure
+   mode.
+3. If confirmed, do a prompt rewrite (parallel to session 20's Bear
+   rewrite) with an evidence-binding guard and a confidence cap when
+   favorite evidence is thin.
+4. Monitor post-rewrite hit rate over next 50 resolved verdicts; only
+   consider lowering `BULL_WEIGHT` if the rewrite doesn't close the
+   gap (currently no `BULL_WEIGHT` knob exists — would need to add).
+
+Blockers: none. Prompt-level work, independent of A.1/A.5.
+
+### A.9 Dynamic per-agent reliability weights (SHIPPED, session 25)
+
+**Status: live.** Shipped as the A.1-alternative after β backtest rejected
+all probability-transform candidates. Additive to the existing gate stack;
+no verdict-math changes.
+
+**What landed:**
+
+- `pqi/agent_weights.py` — computes per-agent weights from resolved
+  lean-hit history using shrinkage anchor:
+  `weight = 1.0 + shrink * (agent_lean_rate - council_avg_lean_rate)`,
+  with k=2.0 (`AGENT_WEIGHT_SHRINK`). Agents below
+  `MIN_AGENT_WEIGHT_SAMPLES` (default 30) fall back to 1.0.
+- Persisted to `~/.pqi/agent_weights.json`, recomputed on every
+  `history sync` and `history stats`. Cold-start-safe.
+- `scoring.py` — dynamic weights fully override
+  `RULES_LAWYER_WEIGHT`/`BEAR_WEIGHT` static config when
+  `AGENT_WEIGHTS_ENABLED=true` (precedence mode α).
+- `CouncilResult.agent_weights_snapshot` — captures the weights in
+  force at run time (session-23 snapshot pattern). Rendered as a `Wt`
+  column in `history show <#>`'s verdict table.
+- Current live weights on session-25 data: Rules Lawyer 1.06,
+  Sentiment 1.07, Contrarian 1.07, Statistician 1.05, Specialist 1.06,
+  Bull 0.94, Bear 0.74.
+
+**Next-review gate (monitor, don't tune):**
+
+- After +30-50 new resolved verdicts, re-run the A.1 β harness against
+  baseline (static weights) vs dynamic weights. If dynamic materially
+  improves net-correct or Brier over baseline, keep k=2.0; if no
+  material change, consider migrating to the Bayesian formulation
+  below.
+
+**Deferred — Bayesian posterior weighting (when sample size grows):**
+
+Switch the weight formula from linear-shrinkage to a proper Bayesian
+posterior:
+
+    weight = (hits + α) / (n + α + β)
+
+with a symmetric prior `(α, β) = (c, c)` for some confidence strength
+c (e.g. c=10 = "10 imaginary fair verdicts"). Small-n agents shrink
+toward 0.5 automatically; large-n agents trust the data.
+
+**Why defer:** at session-24's per-agent n≈220, Bayesian posterior
+numbers are nearly identical to linear formula (both dominated by data,
+prior barely moves them). The Bayesian form only shines once some
+agents have 500+ samples and others have 30-50 — i.e. when the
+cold-start band starts mattering for more than a one-bit "on/off"
+decision. Revisit once we double the sample or add new agents.
+
+**Trigger to migrate:** any of
+- Council grows a new agent with <100 samples while others have 500+.
+- An agent's per-category conditional accuracy becomes a feature (A.1
+  Option B / category-conditional weights), because Bayesian priors
+  compose cleanly with category-split data, linear shrinkage doesn't.
+- Empirical finding that linear weights overreact to short-run agent
+  regressions (a reliable agent has a bad 20-verdict stretch and loses
+  meaningful influence).
+
+Blockers: data accumulation only. No code blockers.
+
+### A.10 Dynamic weight feedback-loop monitoring (NEW, session 25)
+
+Dynamic weights create a self-reinforcing loop: an agent weighted
+higher moves aggregate scores closer to its verdicts, which shapes
+which markets become BUYs, which (on resolution) feeds back into the
+agent's lean rate. Shrinkage toward 1.0 mitigates but doesn't eliminate.
+
+**Monitor:**
+
+- Weight stability over time — track each agent's weight trajectory
+  run-over-run. Rapid oscillation (>0.1/month) indicates an unstable
+  lean-rate estimator; consider raising `MIN_AGENT_WEIGHT_SAMPLES`.
+- Correlation of weight drift with council-level drift — if an agent's
+  weight rises while council's overall win rate falls, the loop is
+  amplifying noise rather than signal.
+- Decide on a weight floor if any agent trends toward zero (Bear is
+  the most at-risk; current 0.74 is healthy).
+
+Blockers: needs 3-6 months of weight snapshots to spot trajectories.
 
 ---
 
@@ -369,6 +594,6 @@ when implementing B.2.
 | Smarter scoring                        | Theme A · A.1 (asymmetry), A.2 (briefing weights)                           |
 | Continuous-run UX                      | Theme B · B.1 (TUI), then B.2 (parallel workers)                            |
 | Real trading                           | Theme B · B.3 → B.4 → B.5 → B.6, in that order                              |
-| Reducing wrong BUYs                    | Theme A · A.4 (Bear), A.5 (EV gate tuning)                                  |
-| Recovering missed opportunities        | Theme A · A.3 (Tier 2 gate), and `pqi history list --all --outcome miss`    |
+| Reducing wrong BUYs                    | Theme A · A.4 (Bear), A.5 (EV gate tuning), A.8 (Bull overconfidence)       |
+| Recovering missed opportunities        | Theme A · A.7 (confidence floor), `pqi history list --all --outcome miss`   |
 | Cache / pipeline fixes                 | Theme C — pick whichever item bites you first                               |

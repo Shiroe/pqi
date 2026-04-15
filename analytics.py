@@ -6,13 +6,20 @@ Pure functions over the migrated entry dicts produced by `pqi.history.load_histo
 None of these functions touch I/O directly except `compute_and_persist_postmortem()`,
 which writes the result back via history.update_analysis().
 
-Outcome classification:
-  - correct_buy        — recommendation BUY YES/NO matched the winning side
-  - wrong_buy          — recommendation BUY but the other side won
-  - missed_opportunity — PASS, council favored the winning side with prob > 0.65
-  - correct_pass       — PASS, council was wrong-or-coin-flip
+Outcome classification (PnL-based):
+  - correct_buy        — BUY whose side gained in price from entry to resolution
+  - wrong_buy          — BUY whose side lost in price from entry to resolution
+  - missed_opportunity — PASS, clean winner declared, council favored it with prob > 0.65
+  - correct_pass       — PASS (unsure/wrong) OR exact break-even BUY (rare push)
   - unresolved         — no resolution recorded yet
-  - voided             — closed but no clean winner
+  - voided             — closed but no numeric redemption price (true refund/cancellation)
+
+Intermediate resolutions (e.g. outcomePrices ["0.5","0.5"]) are NOT voids.
+They settle at the final_yes_price, so each BUY has real PnL:
+  BUY YES pnl = final_yes_price - entry_yes_price
+  BUY NO  pnl = entry_yes_price - final_yes_price
+Voided only covers cases where final_yes_price is missing/unparseable — i.e.
+the market cancelled and there is no redemption value at all.
 
 Per-agent stats:
   - hit_rate          — fraction of resolved entries where the agent's prob (>0.5)
@@ -60,9 +67,43 @@ def _verdicts(entry: dict) -> list[dict]:
 
 
 def _winner(entry: dict) -> Literal["YES", "NO"] | None:
+    """The side Polymarket declared as the clean winner (final price at 0.99+/0.01-).
+    Returns None for intermediate resolutions (draws, partial settlements)
+    and for unresolved / truly voided entries."""
     res = entry.get("resolution") or {}
     w = res.get("winning_side")
     return w if w in ("YES", "NO") else None
+
+
+def _final_yes_price(entry: dict) -> float | None:
+    """The settled YES redemption price. None when truly voided (no price) or unresolved."""
+    res = entry.get("resolution") or {}
+    fy = res.get("final_yes_price")
+    if fy is None:
+        return None
+    try:
+        return float(fy)
+    except (TypeError, ValueError):
+        return None
+
+
+def _directional_winner(entry: dict) -> Literal["YES", "NO"] | None:
+    """The side whose price *gained* from entry to resolution.
+
+    Matches `_winner` at clean extremes. For intermediate resolutions
+    (e.g. final 0.50 from entry 0.40) returns the side that made money
+    — this is what drives per-agent stats and PnL-based outcome buckets.
+    Returns None if final price is missing or exactly equal to entry
+    (exact push — excluded from stats so it doesn't distort averages)."""
+    final_yes = _final_yes_price(entry)
+    if final_yes is None:
+        return None
+    entry_yes = float(_market(entry).get("yes_price", 0.5))
+    if final_yes > entry_yes:
+        return "YES"
+    if final_yes < entry_yes:
+        return "NO"
+    return None
 
 
 def _council_favored_side(entry: dict) -> Literal["YES", "NO"]:
@@ -84,16 +125,37 @@ def classify_outcome(entry: dict) -> OutcomeKind:
     res = entry.get("resolution")
     if res is None:
         return "unresolved"
-    winner = _winner(entry)
-    if winner is None:
+
+    # True void — market closed but no redemption value (refund / cancellation).
+    # Intermediate settlements (e.g. 0.50/0.50) DO have a redemption price and
+    # are handled below as real PnL.
+    final_yes = _final_yes_price(entry)
+    if final_yes is None:
         return "voided"
 
     rec = _result(entry).get("recommendation", "PASS")
-    if rec.startswith("BUY"):
-        bought = "YES" if "YES" in rec else "NO"
-        return "correct_buy" if bought == winner else "wrong_buy"
+    entry_yes = float(_market(entry).get("yes_price", 0.5))
 
-    # PASS — was it a missed opportunity?
+    if rec.startswith("BUY"):
+        # PnL per share = final redemption price of the bought side minus entry price.
+        if "YES" in rec:
+            pnl = final_yes - entry_yes
+        else:  # BUY NO
+            pnl = entry_yes - final_yes
+        if pnl > 0:
+            return "correct_buy"
+        if pnl < 0:
+            return "wrong_buy"
+        # Exact break-even — rare floating-point tie; treat as a correct pass
+        # so it doesn't bias the win-rate denominator.
+        return "correct_pass"
+
+    # PASS — missed_opportunity only applies when there was a *clean* declared
+    # winner the council strongly favored. Intermediate resolutions don't have
+    # a winner to have "missed"; they fall through to correct_pass.
+    winner = _winner(entry)
+    if winner is None:
+        return "correct_pass"
     council_side = _council_favored_side(entry)
     council_prob = _council_favored_prob(entry)
     if council_side == winner and council_prob >= MISSED_OPPORTUNITY_PROB_FLOOR:
@@ -116,10 +178,19 @@ def agent_accuracy(entries: list[dict]) -> dict[str, AgentStats]:
     for entry in entries:
         if entry.get("legacy"):
             continue
-        winner = _winner(entry)
+        # Use the directional winner so intermediate resolutions (e.g. 0.50
+        # from entry 0.40) still contribute to agent stats. Returns None
+        # only on true voids, unresolved entries, and exact-push settlements.
+        winner = _directional_winner(entry)
         if winner is None:
             continue
-        actual = 1.0 if winner == "YES" else 0.0
+        # Brier actual uses the settled redemption price directly so partial
+        # settlements score calibration correctly (saying 50% on a 0.50 market
+        # should be ~0 error, not penalized against a forced 0/1 actual).
+        final_yes = _final_yes_price(entry)
+        actual = float(final_yes) if final_yes is not None else (
+            1.0 if winner == "YES" else 0.0
+        )
 
         for v in _verdicts(entry):
             name = v.get("agent_name", "?")
@@ -190,7 +261,14 @@ def signal_postmortem(entry: dict) -> dict:
                 "agents_with_winner": [], "agents_against_winner": [],
                 "median_prob": None, "coin_flip": False}
 
-    winner = _winner(entry)
+    # For the postmortem, the "winner" is directional — the side that gained
+    # in price from entry to resolution. Matches the clean winner at extremes
+    # and gives intermediate settlements a meaningful winning side.
+    clean_winner = _winner(entry)
+    winner = _directional_winner(entry) or clean_winner
+    final_yes = _final_yes_price(entry)
+    entry_yes = float(_market(entry).get("yes_price", 0.5))
+    intermediate = clean_winner is None and final_yes is not None
     verdicts = _verdicts(entry)
     if not verdicts or winner is None:
         return {"kind": kind, "summary": "Insufficient data.", "agents_with_winner": [],
@@ -232,12 +310,28 @@ def signal_postmortem(entry: dict) -> dict:
     n_total = len(verdicts)
     n_with = len(with_winner)
 
+    # PnL string for intermediate resolutions — shown alongside BUY summaries
+    # to make clear that the market settled at a middle price rather than 0/1.
+    pnl_tag = ""
+    if intermediate and rec.startswith("BUY"):
+        if "YES" in rec:
+            pnl = final_yes - entry_yes
+        else:
+            pnl = entry_yes - final_yes
+        sign = "+" if pnl >= 0 else ""
+        pnl_tag = (
+            f" — market settled at ${final_yes:.2f} (entry ${entry_yes:.2f} "
+            f"for {'YES' if 'YES' in rec else 'NO'} side), "
+            f"{sign}{pnl * 100:.1f}¢/share"
+        )
+
     if kind == "correct_buy":
         top = with_winner[0] if with_winner else None
         summary = (
             f"Correct {rec} — {n_with}/{n_total} agents called {winner}"
             + (f"; highest conviction: {top['agent']} ({top['side_conf']:.0%})" if top else "")
             + (" — coin-flip market in truth" if coin_flip else "")
+            + pnl_tag
         )
     elif kind == "wrong_buy":
         worst = against_winner[0] if against_winner else None
@@ -245,6 +339,7 @@ def signal_postmortem(entry: dict) -> dict:
             f"Wrong {rec} — only {n_with}/{n_total} agents called {winner} (winner)"
             + (f"; loudest wrong voice: {worst['agent']} ({worst['side_conf']:.0%})" if worst else "")
             + (" — market was a near coin-flip" if coin_flip else "")
+            + pnl_tag
         )
     elif kind == "missed_opportunity":
         high_conf_with = [r for r in with_winner if r["side_conf"] >= 0.70]
@@ -254,13 +349,19 @@ def signal_postmortem(entry: dict) -> dict:
             f"Reason: {pass_reason or 'gates blocked'}"
         )
     elif kind == "correct_pass":
-        summary = (
-            f"Correct PASS — council was unsure"
-            + (" (coin-flip market)" if coin_flip else f", median prob {med_yes:.0%}")
-            + f"; winner was {winner}"
-        )
+        if intermediate:
+            summary = (
+                f"Correct PASS — market settled at ${final_yes:.2f} "
+                f"(no clean winner; council median prob {med_yes:.0%})"
+            )
+        else:
+            summary = (
+                f"Correct PASS — council was unsure"
+                + (" (coin-flip market)" if coin_flip else f", median prob {med_yes:.0%}")
+                + f"; winner was {winner}"
+            )
     else:  # voided
-        summary = "Market closed without a clean winner (voided/refunded)."
+        summary = "Market cancelled / refunded — no redemption price available."
 
     return {
         "kind": kind,

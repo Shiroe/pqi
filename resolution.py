@@ -2,12 +2,23 @@
 """
 Fetch resolution outcomes from the Polymarket Gamma API.
 
-A market is considered resolved when:
-  - `closed` is True, AND
-  - `outcomePrices` settled to ["1","0"] (YES won) or ["0","1"] (NO won)
+A market is considered resolved when `closed=True`. Two shapes:
 
-Markets that are closed but have intermediate outcomePrices (rare; usually
-voided/refunded) are returned with winning_side=None.
+  1. Clean extreme — outcomePrices settled to ["1","0"] (YES won) or
+     ["0","1"] (NO won). `winning_side` is set accordingly; these are the
+     vast majority of sports/politics markets.
+
+  2. Intermediate — outcomePrices settled to something in between
+     (e.g. ["0.5","0.5"] on a declared draw, or anything strictly within
+     the extreme thresholds). This is NOT a void: every YES token redeems
+     for `final_yes_price` and every NO token for `1 - final_yes_price`,
+     so bets still have real PnL. `winning_side` stays None (no clean
+     winner declared) but `final_yes_price` is populated — downstream
+     analytics derives PnL and per-agent accuracy from that price.
+
+True voids (market cancelled / refunded with no redemption value) come
+through with both winning_side=None AND final_yes_price=None; the
+analytics layer buckets those as `voided`.
 """
 
 import json

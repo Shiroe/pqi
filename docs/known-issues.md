@@ -114,3 +114,36 @@ roadmap item tracks this.
 - LLM_BACKEND: `anthropic` (tested, working with claude-haiku-4-5-20251001)
 - Ollama: installed, llama3.1:8b available as fallback
 - LOCAL_LLM_CONCURRENCY: 1 (only affects Ollama; Anthropic runs fully parallel)
+
+## Persisted state files (load-bearing)
+
+- `~/.pqi/history.jsonl` — full-fidelity run history. Source of truth for
+  per-agent accuracy, outcome classification, and `PerceivedStats`. Deleting
+  it wipes all calibration inputs. `.bak` sibling is created by legacy
+  migration; safe to keep.
+- `~/.pqi/cache.db` — SQLite council cache. Keyed by `market_id`,
+  invalidated on >2% price delta. Deleting it only costs re-analysis cost,
+  not correctness.
+- **`~/.pqi/stats.json` — EV gate input.** Persisted `PerceivedStats`
+  snapshot (true_win_rate, sample_size, kelly_fraction_at_p75, below_min_samples).
+  Refreshed by `history sync` / `history stats` via `stats.recompute_from_history`.
+  **Deleting it silently disables the EV gate** until the next sync/stats
+  call rewrites it — `scoring.py` tolerates a missing file (returns `None`,
+  gate stays dormant) so no crash, just a behavioural regression to the
+  pre-session-22 system. If you want a hard reset of the gate, delete this
+  file AND run `pqi history stats` to recompute from current history.
+- **`~/.pqi/agent_weights.json` — dynamic per-agent scoring weights
+  (session 25).** Payload: `computed_at`, `min_samples`, `shrink`,
+  `council_avg_lean_rate`, `weights: {agent_name: float}`, `sources:
+  {agent_name: {hits, n, lean_rate}}`. Refreshed by `history sync` /
+  `history stats` via `agent_weights.recompute_from_history`. Overrides
+  static `RULES_LAWYER_WEIGHT` / `BEAR_WEIGHT` when
+  `AGENT_WEIGHTS_ENABLED=true` and the file exists (precedence mode α).
+  Deleting it reverts scoring to the static map on the next run — no
+  crash. Agents below `MIN_AGENT_WEIGHT_SAMPLES` (default 30) are
+  clamped to 1.0 inside `compute_weights`, so the file is always
+  complete for the 7 agents even at low sample counts. Set
+  `AGENT_WEIGHTS_ENABLED=false` to force-disable without deleting.
+- Atomic writes: all four writers use the `tmp + os.replace()` pattern,
+  so crashes mid-write leave the prior file intact. No lockfile yet —
+  concurrent writers are a B.2 / C.6 concern (see roadmap).

@@ -192,6 +192,30 @@ have high confidence in the YES estimate but low confidence in the NO estimate
 (e.g. insufficient data on the underdog). Parser has backward fallback: if only
 legacy `confidence_level` is found, both sides get the same value.
 
+**Two-sidedness is autonomy, not algebra (critical).** The YES and NO sides
+of every event are *autonomous signals about TeamA vs TeamB* — the evidence
+base for each is evaluated independently, not derived as the mirror of the
+other. Concretely, today:
+
+- **Prices** — `yes_price` and the CLOB NO-token price live on independent
+  orderbooks and do **not** sum to 1.0 (spread / vig). Always fetched side-by-side
+  (see `pqi/market/clob.py`). Never infer one from the other.
+- **Confidences** — `confidence_yes` and `confidence_no` are independent
+  fields carrying each side's own evidence weight. An agent can land at
+  `(p_yes=0.26, conf_yes=0.72) ∥ (p_no=0.74, conf_no=0.35)` because the
+  evidence for TeamA and TeamB is of different depth/quality.
+- **Probability** — stored today as a single field `AgentVerdict.probability
+  = P(YES)`, with `P(NO)` inferred as `1 − P(YES)` in `scoring.py`. This
+  is a **modeling simplification**, not a commitment that the two sides are
+  algebraically coupled. Treat YES and NO reasoning as two parallel problems
+  with coupled-but-not-identical evidence, even though the code compresses
+  them into one field.
+
+When extending the model (asymmetric-confidence work, per-side priors,
+future gate changes): per-side confidence is already autonomous and should
+be exploited; per-side probability is a deferred extension (see roadmap
+Theme A · A.1 "Option B") and must not be assumed to exist yet.
+
 **Rules Lawyer injection rule:** In `council.py`, when building the Rules Lawyer's
 user message, inject the `resolution_criteria` field first in a clearly marked block:
 RESOLUTION CRITERIA (SOURCE OF TRUTH — THIS OVERRIDES ALL OTHER CONTEXT):
@@ -230,7 +254,7 @@ share has a max ROI of 42.9% (sell at $1 = +30¢/70¢); an 80¢ share caps at
 
 Gate order inside `from_council_verdicts()`:
 
-1. **Price floor**: `side_price < MIN_TRADEABLE_PRICE` (0.05) → PASS
+1. **Price floor**: `side_price < MIN_TRADEABLE_PRICE` (0.09) → PASS
 2. **Price ceiling**: `side_price > MAX_TRADEABLE_PRICE` (0.90) → PASS.
    Near-resolved; ROI doesn't justify execution risk.
 3. **Contrarian** (council disagrees with market): requires all of
@@ -238,7 +262,7 @@ Gate order inside `from_council_verdicts()`:
    `side_conf >= MIN_CONTRARIAN_CONFIDENCE` (0.80),
    `expected_roi >= MIN_CONTRARIAN_ROI` (0.20). Label: `CONTRARIAN`.
 4. **Market-aligned**: requires
-   `council_prob >= MIN_COUNCIL_PROBABILITY` (0.57),
+   `council_prob >= MIN_COUNCIL_PROBABILITY` (0.60),
    `side_conf >= CONFIDENCE_HIGH_THRESHOLD` (0.67),
    `expected_roi >= MIN_EXPECTED_ROI` (0.10).
 5. **EV gate (final)**: after a BUY clears all prior gates, reject it if
@@ -294,6 +318,21 @@ when the gate is active — models.py stays pure.
 - Errors: log and continue (one agent failure should not crash the council)
 - No hardcoded strings — prompts in `personas.py`, endpoints in `config.py`
 - `rich.console.print()` for all user-facing output, `logging` for debug
+
+### Attribution rule (STRICT)
+
+Never mention AI, Claude, LLM-assistance, or any form of assistant
+authorship in this project. This applies to **all** of: source code,
+comments, docstrings, commit messages, PR titles/bodies, and any doc
+under `docs/` or the repo root.
+
+- **No** `Co-Authored-By: Claude ...` trailers in commits
+- **No** "Generated with Claude Code" / "🤖 Generated with..." footers
+- **No** "AI-assisted" / "with help from Claude" notes anywhere
+- **No** `# Claude wrote this` or similar attribution comments
+
+If a default template (e.g. system prompt's git commit/PR scaffold)
+includes attribution, strip it before writing.
 
 ### Configuration rule (strict)
 
@@ -356,7 +395,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 23 — WR-based edges, run-time snapshots, themed roadmap]
+**Last updated:** [session 25 — A.1 Option A closed, A.9 dynamic per-agent weighting shipped, Option B migration plan drafted]
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -364,6 +403,41 @@ started. See [`docs/session-log.md`](docs/session-log.md) for
 per-session details and [`docs/roadmap.md`](docs/roadmap.md) for the
 themed plan (A. Modeling & Calibration, B. TUI + Trading,
 C. Operational Tooling).
+
+Session 25 delivered three load-bearing artifacts:
+
+1. **A.1 Option A closed.** Extended β-phase backtest over 228 resolved
+   BUY rows (8 candidates: shrinkage ×2, log-odds ×2, Dempster ×4).
+   All candidates REJECTED against pre-registered criteria (ΔBrier
+   ≤ −0.005, ΔNet ≥ −1, bootstrap CI95<0 on both train + holdout).
+   Probability-level transforms cannot extract the target signal at
+   this sample size — Option B (per-side probability autonomy) is
+   the remaining path. See `scripts/a1_backtest.py`.
+2. **A.9 shipped — dynamic per-agent reliability weights.** Scoring
+   weights are now recomputed from resolved history via shrinkage
+   (`weight = 1 + shrink * (lean_rate − council_avg)`, min_samples=30,
+   shrink=2.0) and persisted to `~/.pqi/agent_weights.json`. The
+   weights fully override static `RULES_LAWYER_WEIGHT`/`BEAR_WEIGHT`
+   when enabled and a snapshot exists (precedence mode α). Snapshot
+   is captured on every `CouncilResult.agent_weights_snapshot`.
+   Surfaced in `history show <#>` (Wt column) and recomputed after
+   every `history sync` / at top of `history stats`. Live weights
+   match the Tier-1 retrospective ranking: Sentiment/Contrarian
+   1.07, Rules Lawyer/Specialist 1.06, Statistician 1.05, Bull 0.94,
+   Bear 0.74.
+3. **Option B migration plan drafted** at
+   [`docs/option_b_migration_plan.md`](docs/option_b_migration_plan.md).
+   Full per-side probability autonomy (`probability_yes`,
+   `probability_no` independent), zero-API-cost synthetic backfill
+   via `p_no = 1 − p_yes`, non-breaking 6-step rollout, same
+   pre-registered acceptance criteria as A.1 β. Implementation
+   deferred — plan-only this session.
+
+Sessions 22–24 confirmed the pre-EV scoring math is stable. Session
+25 preserved that contract: dynamic weights override the static
+map but feed the same `CouncilResult.from_council_verdicts()`
+entry; `agent_weights_snapshot` is additive metadata. No verdict
+logic changes in `models.py`.
 
 ### What's live
 
@@ -378,6 +452,11 @@ C. Operational Tooling).
   `(PerceivedTrueWinRate − side_price)`, with `perceived_win_rate_at_run`,
   `kelly_stake_full`, `kelly_stake_scaled`, `kelly_multiplier` snapshotted
   on every result. Surfaced in `display_council_result` and `history show <#>`.
+- **Dynamic per-agent reliability weights** (session 25,
+  `pqi/agent_weights.py`): shrinkage formula, min-samples gate,
+  JSON snapshot at `~/.pqi/agent_weights.json`, auto-recompute
+  after `history sync`, per-run `agent_weights_snapshot` metadata
+  on every `CouncilResult`.
 - Two-sided CLOB price history enrichment (YES + NO independently, non-fatal)
 - History system: full-fidelity persistence, resolution sync, per-agent accuracy, postmortem
 - SQLite cache with price-delta invalidation
@@ -395,29 +474,50 @@ C. Operational Tooling).
 
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
+Also read CTO_Agent.md — it frames the reviewer posture (contract-as-law,
+parallelism, bias-as-feature, statistical skepticism) for this project.
 
-CLAUDE.md was restructured in session 21 — detailed reference material is now
-in docs/. Read the relevant partial file when working in a specific area:
+Detailed reference material lives in docs/:
 - docs/api-reference.md — API endpoints, params, response formats
-- docs/known-issues.md — API quirks, edge cases, env setup
-- docs/session-log.md — per-session changelog
-- docs/roadmap.md — future work priorities
+- docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
+- docs/session-log.md — per-session changelog (current through session 25)
+- docs/roadmap.md — future work priorities, themed
+- docs/option_b_migration_plan.md — full Option B rollout plan (drafted session 25)
+
+## Session 25 context (completed)
+- A.1 Option A closed: β-phase backtest (8 probability-transform
+  candidates) all REJECTED against pre-registered criteria on 228
+  resolved BUYs. See scripts/a1_backtest.py — run it again before
+  promoting any new candidate.
+- A.9 shipped: dynamic per-agent reliability weighting live via
+  pqi/agent_weights.py. Shrinkage formula, min-samples gate,
+  snapshot at ~/.pqi/agent_weights.json, CouncilResult carries
+  agent_weights_snapshot. Config: AGENT_WEIGHTS_ENABLED,
+  MIN_AGENT_WEIGHT_SAMPLES (30), AGENT_WEIGHT_SHRINK (2.0).
+- Option B migration plan drafted at docs/option_b_migration_plan.md:
+  zero-API-cost backfill (p_no = 1 − p_yes), 6-step non-breaking
+  rollout, same acceptance criteria as A.1 β. IMPLEMENTATION
+  DEFERRED — paper plan only.
 
 ## PRIORITY options (pick one with the user)
-The roadmap is now organized into themes — see `docs/roadmap.md`:
-- Theme A · Modeling & Calibration: A.1 (data asymmetry of confidence,
-  NEW), A.2 (briefing data-point weight audit, NEW), A.4 (Bear monitoring),
-  A.5 (EV gate tuning).
-- Theme B · Continuous-run TUI + Trading: B.1 (streaming TUI), then
-  B.2 (parallel workers w/ rate limiting). B.3–B.6 cover Polymarket
-  account auth, CLOB read client, Kelly-sized buy command, and a
-  match-watcher with time-based stop-loss. Sequential dependencies
-  documented per item.
-- Theme C · Operational Tooling: C.1–C.6 small QoL items.
+- **Option B implementation**: start with step 1 of the migration plan
+  (additive schema + synthetic backfill). Follow the rollout order
+  exactly — no scoring-wiring until a backtest passes.
+- Theme A · Modeling & Calibration: A.4 (Bear monitoring, pure stats),
+  A.5 (EV gate threshold tuning, stats-only), A.10 (dynamic-weight
+  feedback-loop monitoring — protects A.9 from self-reinforcement).
+- Theme C · Operational Tooling: any of C.1–C.6 are isolated QoL items.
+- Theme B: B.1 (streaming TUI) is the entry point for Phase 3.
 
 ## Instructions
-- Pick the next priority with the user before starting
-- Read the relevant existing files before writing any new code
-- Read the relevant docs/ partial when touching APIs or debugging edge cases
-- Update ## Current State and ## Next Session Prompt at end of session
+- Pick the next priority with the user before starting.
+- Update ## Current State and write a fresh ## Next Session Prompt at
+  end of session. Log meaningful decisions in docs/session-log.md.
+- Don't edit models.py verdict logic without explicit sign-off — the
+  user treats the pre-EV recommendation contract as stable. Session
+  25's additions (agent_weights_snapshot) were metadata-only and
+  preserved this contract.
+- For Option B: strict rollout order per docs/option_b_migration_plan.md.
+  Never wire probability_no into scoring until the backtest passes the
+  pre-registered criteria on held-out data.
 ```

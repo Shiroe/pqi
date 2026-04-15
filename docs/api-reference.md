@@ -142,7 +142,7 @@ PRICE_HISTORY_FIDELITY=60 # CLOB price history resolution in minutes (60 = hourl
 LOG_LEVEL=INFO
 MAX_MARKETS_TO_FETCH=20
 MIN_VOLUME_USD=10000 # ignore illiquid markets
-EDGE_THRESHOLD=0.07 # minimum edge to recommend
-MIN_TRADEABLE_PRICE=0.05 # min per-share price of recommended side (PASS if below)
+EDGE_THRESHOLD=0.09 # deprecated — informational only (no longer a gate)
+MIN_TRADEABLE_PRICE=0.09 # min per-share price of recommended side (PASS if below)
 SHORT_WINDOW_HOURS=4 # resolve_within_hours <= this triggers relaxed volume floor
 MIN_VOLUME_SHORT_WINDOW_USD=500 # volume floor for short-window queries

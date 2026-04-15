@@ -1213,6 +1213,7 @@ def history_show(
 
     # Per-agent verdict table
     verdicts = r.get("verdicts") or []
+    weights_snap = r.get("agent_weights_snapshot") or {}
     if verdicts:
         winner = res.get("winning_side")
         vtable = Table(title="Council Verdicts", box=box.SIMPLE)
@@ -1221,6 +1222,8 @@ def history_show(
         vtable.add_column("Conf YES", justify="right")
         vtable.add_column("Conf NO", justify="right")
         vtable.add_column("Called", justify="center")
+        if weights_snap:
+            vtable.add_column("Wt", justify="right")
         if winner:
             vtable.add_column("✓", justify="center")
             vtable.add_column("Brier", justify="right")
@@ -1236,6 +1239,9 @@ def history_show(
                 f"{float(v.get('confidence_no', 0)):.0%}",
                 picked,
             ]
+            if weights_snap:
+                w = float(weights_snap.get(v.get("agent_name", ""), 1.0))
+                row.append(f"{w:.2f}")
             if winner:
                 hit = picked == winner
                 actual = 1.0 if winner == "YES" else 0.0
@@ -1336,6 +1342,18 @@ def history_sync(
         except Exception as exc:
             logger.debug("PerceivedStats recompute failed: %s", exc)
 
+        # Same hook for dynamic agent weights — also a pure pass over history.
+        if config.AGENT_WEIGHTS_ENABLED:
+            from pqi.agent_weights import recompute_from_history as _recompute_weights
+
+            try:
+                _recompute_weights(
+                    min_samples=config.MIN_AGENT_WEIGHT_SAMPLES,
+                    shrink=config.AGENT_WEIGHT_SHRINK,
+                )
+            except Exception as exc:
+                logger.debug("AgentWeights recompute failed: %s", exc)
+
     if not auto:
         console.print(
             f"[green]✓ {resolved} resolved[/green], "
@@ -1372,6 +1390,20 @@ def history_stats(
     except Exception as exc:
         logger.debug("PerceivedStats recompute failed: %s", exc)
         perceived = None
+
+    # Refresh dynamic agent weights in the same hook so `history stats`
+    # always shows leaderboard numbers consistent with what the next
+    # `analyze` run will score against.
+    if config.AGENT_WEIGHTS_ENABLED:
+        from pqi.agent_weights import recompute_from_history as _recompute_weights
+
+        try:
+            _recompute_weights(
+                min_samples=config.MIN_AGENT_WEIGHT_SAMPLES,
+                shrink=config.AGENT_WEIGHT_SHRINK,
+            )
+        except Exception as exc:
+            logger.debug("AgentWeights recompute failed: %s", exc)
 
     counts = Counter(classify_outcome(e) for e in entries)
     stats = agent_accuracy(entries)

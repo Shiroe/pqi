@@ -211,6 +211,12 @@ class CouncilResult(BaseModel):
     kelly_multiplier: float = 0.0
     """The half-Kelly (or other) safety scaler used for `kelly_stake_scaled`
     at run time. 0.0 when no Kelly sizing was computed."""
+    agent_weights_snapshot: dict[str, float] = Field(default_factory=dict)
+    """Snapshot of the per-agent scoring weights in force at run time.
+    Empty dict when no weights were supplied (legacy/static-default). Lets
+    `history show <#>` render the weighting regime that produced each
+    verdict, not the drifting current values. Does not enter the gate stack
+    — metadata-only, same pattern as `kelly_stake_scaled`."""
     briefing: BriefingDocument | None = None
     """Full briefing document handed to the council. Optional for backward compat."""
 
@@ -456,6 +462,7 @@ class CouncilResult(BaseModel):
             kelly_stake_full=kelly_full,
             kelly_stake_scaled=kelly_scaled,
             kelly_multiplier=kelly_mult_used,
+            agent_weights_snapshot=dict(weights),
         )
 
 
