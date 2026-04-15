@@ -216,7 +216,13 @@ as one?
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES) anchored on historical base rate \
+for the event category>,
+  "probability_no_score": <integer 0-100, P(NO) anchored on the historical base \
+rate for the OPPOSITE outcome — evaluated INDEPENDENTLY; need NOT equal \
+100 - probability_score. If you have a clean base rate for the YES condition \
+but no comparable historical data for the NO condition, leave ignorance mass \
+(sum < 100) and lower confidence_no>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "historical_baseline": "<e.g. '43% of FDA Phase 3 trials pass'>",
