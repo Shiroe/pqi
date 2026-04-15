@@ -469,6 +469,7 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MIN_COUNCIL_VERDICTS`        | `5`     | Minimum agents (of 7) that must return valid verdicts; aborts if below               |
 | `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
 | `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |
+| `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Wrap the Anthropic system prompt in a 5-min ephemeral cache block (no behavior change; ~10% input price on cache hits) |
 | `TAVILY_SEARCHES_PER_MARKET`  | `5`     | Tavily queries per analysis (3-5)                                                    |
 | `TAVILY_SNIPPET_CAP`          | `5000`  | Max chars of search snippets sent to LLM                                             |
 | `EVENT_ENRICHMENT_MAX`        | `30`    | Max parallel /events/{id} detail calls for enrichment                                |
@@ -594,11 +595,34 @@ from resolved, non-legacy BUY history and persists it to
 | Backend            | When to use           | Cost                                      |
 | ------------------ | --------------------- | ----------------------------------------- |
 | `ollama` (default) | Local dev, RTX 2070+  | Free                                      |
-| `anthropic`        | Production / accuracy | ~$0.015/council run with claude-haiku-4-5 |
+| `anthropic`        | Production / accuracy | ~$0.015/council run with claude-haiku-4-5 (cold cache); lower with prompt caching warm |
 
 Switch by setting `LLM_BACKEND=anthropic` in `.env`. Anthropic runs all 7 agents
 fully in parallel (no concurrency throttle needed). Ollama is throttled by
 `LOCAL_LLM_CONCURRENCY` (default 1) to prevent GPU OOM on consumer cards.
+
+### Prompt caching (Anthropic only)
+
+When `ANTHROPIC_PROMPT_CACHE_ENABLED=true` (default), the system prompt of every
+Anthropic call is sent inside a 5-minute ephemeral cache block. Repeat calls
+within the TTL window whose system prompt matches byte-for-byte are billed at
+~10% of normal input price (cache reads). Across-run reuse of the council's
+stable persona prompts and the synthesizer's stable system prompt is the
+biggest win.
+
+Caching is server-side and **does not change model behavior** — same prompt in,
+same probability distribution out. To verify the cache is engaging, run with
+`LOG_LEVEL=DEBUG` and watch for the per-call line:
+
+```
+anthropic usage: input=… output=… cache_read=… cache_create=…
+```
+
+`cache_create > 0` on the first call of a session, `cache_read > 0` on later
+calls within 5 minutes = working as intended. If both stay `0`, the prefix is
+below the model's minimum cacheable size (~1024–2048 tokens depending on
+model) and the `cache_control` field is silently ignored. Disable with
+`ANTHROPIC_PROMPT_CACHE_ENABLED=false` for debugging.
 
 ---
 

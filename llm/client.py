@@ -50,12 +50,42 @@ async def _chat_anthropic(system: str, user: str, model: str) -> str:
         )
 
     client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    # Wrap the system prompt as a cached ephemeral block when enabled.
+    # The cache is keyed by the exact prefix bytes — repeated calls within the
+    # 5-minute TTL whose system prompt matches are billed at ~10% of normal
+    # input. Below the model's minimum cacheable prefix the cache_control
+    # field is a silent no-op (no error, just no caching).
+    if config.ANTHROPIC_PROMPT_CACHE_ENABLED:
+        system_param: str | list = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    else:
+        system_param = system
+
     response = await client.messages.create(
         model=model,
-        system=system,
+        system=system_param,
         messages=[{"role": "user", "content": user}],
         max_tokens=1024,
     )
+
+    # Surface cache stats so we can verify the cache is engaging without
+    # waiting on the dashboard CSV. cache_read_input_tokens > 0 means we hit
+    # a warm cache; cache_creation_input_tokens > 0 means we wrote one.
+    usage = response.usage
+    logger.debug(
+        "anthropic usage: input=%d output=%d cache_read=%d cache_create=%d",
+        usage.input_tokens,
+        usage.output_tokens,
+        getattr(usage, "cache_read_input_tokens", 0) or 0,
+        getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    )
+
     return response.content[0].text
 
 

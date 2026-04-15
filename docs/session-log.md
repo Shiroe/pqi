@@ -4,6 +4,123 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 27 — Anthropic prompt caching enabled
+
+Cost-optimization pass triggered by analysis of
+`docs/claude_api_tokens_2026_04.csv` (13-day Anthropic console
+export). Two findings:
+
+1. **Zero prompt-cache usage.** Every `cache_write_5m`,
+   `cache_write_1h`, and `cache_read` cell across 13 days was `0`.
+   The council's stable per-persona system prompts and the
+   synthesizer's stable system prompt were being re-encoded
+   full-price on every API call.
+2. **Run-rate drift.** Last 7 days averaged ~1.45M input + ~240K
+   output tokens/day → ~$2.65/day = **~$80/mo run-rate, 4× over**
+   the CLAUDE.md Tech Stack target of "stays under $20/mo".
+
+### Patch (single-call surface, no caller changes)
+
+- **`pqi/config.py`** — new
+  `ANTHROPIC_PROMPT_CACHE_ENABLED: bool = (os.getenv(...,"true").lower() == "true")`.
+- **`.env.example`** — documented the key with comment explaining
+  TTL, no-op behavior below the min cacheable prefix, and rollback.
+- **`pqi/llm/client.py::_chat_anthropic`** — when caching is
+  enabled, the `system` argument (formerly a plain string) is
+  wrapped as a 1-element list:
+  ```python
+  [{"type": "text", "text": system,
+    "cache_control": {"type": "ephemeral"}}]
+  ```
+  Default TTL is 5 min (no `ttl` field). After every call, a
+  DEBUG log line surfaces the four token counts from
+  `response.usage`:
+  ```
+  anthropic usage: input=… output=… cache_read=… cache_create=…
+  ```
+  This avoids round-tripping through the dashboard CSV to verify
+  the cache engaged.
+
+### Why a single cache breakpoint, not multiple
+
+Considered a 3-layer breakdown (preamble / persona / briefing) but
+rejected for now:
+
+- The 7 council agents fire in parallel via `asyncio.gather`. Each
+  agent has a different persona body, so any cache key whose prefix
+  includes the persona body is unique per agent — no in-run sharing
+  beyond the preamble.
+- The biggest dollar saving is **across-run** reuse of the full
+  per-agent system prompt (preamble + body) when the same agent
+  runs again within 5 min. A single cache breakpoint at the end of
+  the system message captures that win with zero structural code
+  changes elsewhere.
+- Multi-breakpoint splits would have required restructuring
+  `council._build_user_message` (move the Rules Lawyer's
+  resolution-criteria injection to a suffix instead of a prefix,
+  same for Bull/Bear's side context). Deferred until we have
+  evidence the simple version isn't enough.
+
+### Behavioral guarantee
+
+Caching is server-side and invisible to the model. The model still
+receives every token of every request. Same prompt in → same output
+distribution out. The only externally observable change is lower
+input-token billing on cache hits + slightly lower latency.
+
+### Caveat to monitor
+
+Haiku models historically have a min cacheable prefix of
+~1024–2048 tokens. Several council personas (preamble + body) are
+right around that boundary. If `cache_creation_input_tokens`
+returns `0` after the first analyze run, the prefix is too short —
+`cache_control` is silently ignored. Next move would be to either:
+
+- Push the briefing into the system message to enlarge the prefix.
+- Restructure with multiple breakpoints so per-agent variable
+  context lives in a non-cached suffix.
+
+Verify with the DEBUG log before assuming the cache is hot.
+
+### Verification command
+
+```bash
+cd /home/shiroe/personal
+LOG_LEVEL=DEBUG python -m pqi.main --top 2>&1 | grep "anthropic usage"
+```
+
+Expected: 7 lines per analyze run (one per agent) plus
+synthesizer/search-architect lines. First call should show
+`cache_create=` non-zero on each unique persona; subsequent calls
+within 5 min should show `cache_read=` non-zero.
+
+### Rollback
+
+Single env var: `ANTHROPIC_PROMPT_CACHE_ENABLED=false` in `.env`.
+No code revert needed.
+
+### Files touched
+
+- `pqi/config.py` — `ANTHROPIC_PROMPT_CACHE_ENABLED`
+- `.env.example` — documentation
+- `pqi/llm/client.py` — `_chat_anthropic` body
+- `CLAUDE.md` — LLM Client Contract section, Current State,
+  Next Session Prompt
+- `README.md` — Backends section + Tuning table
+
+### What was NOT changed
+
+- `pqi/agents/council.py` — no signature changes; council still
+  builds system prompt via `AGENT_PERSONAS[key]` and passes it as
+  a string to `chat()`.
+- `pqi/ingestion/synthesizer.py` — no signature changes; both LLM
+  calls (Search Architect + synthesis) automatically get caching
+  via the same code path.
+- `pqi/models.py`, `pqi/scoring.py` — untouched. Aggregation
+  contract preserved.
+
+---
+
 ## Session 26 — Option B steps 1–4 shipped (schema, parser, personas, shadow analytics)
 
 Executed steps 1–4 of `docs/option_b_migration_plan.md` in strict

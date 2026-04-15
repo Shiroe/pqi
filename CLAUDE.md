@@ -50,6 +50,18 @@ The active backend is set by `LLM_BACKEND` env var:
 
 Default model per backend set in `pqi/config.py`.
 
+**Anthropic prompt caching (session 27):** when
+`ANTHROPIC_PROMPT_CACHE_ENABLED=true` (default) the system prompt is
+sent as a single `cache_control: ephemeral` block (5-minute TTL).
+Behavior is bit-identical to uncached calls — the model still receives
+every token. Cache hits bill at ~10% of base input price; cache writes
+at 1.25×. The biggest wins are across-run reuse of stable persona +
+synthesizer system prompts. Below the model's minimum cacheable prefix
+(~1024–2048 tokens depending on model), `cache_control` is a silent
+no-op. The DEBUG log line `anthropic usage: input=… cache_read=…
+cache_create=…` confirms whether the cache engaged. Kill switch:
+`ANTHROPIC_PROMPT_CACHE_ENABLED=false`.
+
 ---
 
 ## Data Flow (step by step)
@@ -395,7 +407,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 26 — Option B steps 1–4 shipped; shadow data accumulating, no scoring integration yet]
+**Last updated:** [session 27 — Anthropic prompt caching enabled in `pqi/llm/client.py` (system prompt cached as ephemeral block, 5-min TTL); shadow data still accumulating from session 26]
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -460,6 +472,49 @@ preserved it: every addition is metadata-only or upstream of the
 aggregator. `CouncilResult.from_council_verdicts()` math unchanged
 since session 23.
 
+### Session 27 (this session)
+
+Cost-optimization pass after analyzing
+`docs/claude_api_tokens_2026_04.csv` (13-day Anthropic console
+export). Two findings drove the change:
+
+1. **Zero prompt-cache usage.** Every `cache_write_*` and
+   `cache_read` cell in the export was `0` — the council's stable
+   personas + the synthesizer's stable system prompt were being
+   re-encoded full-price on every call. Estimated waste at the
+   then-current ~$80/mo run-rate: ~$50/mo.
+2. **Run-rate drift.** Last 7 days averaged ~1.45M input + ~240K
+   output tokens/day → ~$2.65/day = ~$80/mo, **4× over** the
+   CLAUDE.md "stays under $20/mo" Tech Stack target.
+
+Patch applied (single-call surface, no caller changes):
+
+- `config.py`: new `ANTHROPIC_PROMPT_CACHE_ENABLED: bool` (default
+  `true`).
+- `.env.example`: documented the key.
+- `llm/client.py::_chat_anthropic`: when enabled, wraps the
+  `system` argument as a 1-element list with
+  `cache_control: {"type": "ephemeral"}` (5-min TTL). Also logs
+  `usage.input_tokens` / `output_tokens` / `cache_read_input_tokens`
+  / `cache_creation_input_tokens` at DEBUG so we can verify the
+  cache is actually engaging without waiting on the dashboard CSV.
+
+**Behavioral guarantee:** model output is unchanged. Caching is a
+server-side optimization invisible to the model — same prompt in,
+same probability distribution out.
+
+**Caveat to monitor:** Haiku models have a min cacheable prefix
+(~1024–2048 tokens depending on version). Several council personas
+(preamble + body) are right around that boundary. If
+`cache_creation_input_tokens` returns `0` after the next analyze
+run, the prefix is too short — the next move would be to push the
+briefing into the system message, or move per-agent variable
+context to a suffix. Verify with the DEBUG log before assuming
+the cache is hot.
+
+**Rollback:** `ANTHROPIC_PROMPT_CACHE_ENABLED=false` in `.env`.
+No code revert needed.
+
 ### What's live
 
 - Full analyze pipeline: Gamma fetch → Tavily briefing → CLOB price history → Council → Scoring → CLI output
@@ -485,6 +540,11 @@ since session 23.
   shadow panel + per-agent drift/Brier table. Descriptive only —
   scoring still aggregates from single `probability` field. Steps 5–6
   (shadow backtest + scoring integration) pending.
+- **Anthropic prompt caching** (session 27, `pqi/llm/client.py`):
+  system prompt wrapped in a `cache_control: ephemeral` block
+  (5-min TTL) when `ANTHROPIC_PROMPT_CACHE_ENABLED=true`.
+  Cache-hit/write counts logged at DEBUG via `usage.cache_*`. No
+  behavioral change to outputs.
 - Two-sided CLOB price history enrichment (YES + NO independently, non-fatal)
 - History system: full-fidelity persistence, resolution sync, per-agent accuracy, postmortem
 - SQLite cache with price-delta invalidation
@@ -511,6 +571,33 @@ Detailed reference material lives in docs/:
 - docs/session-log.md — per-session changelog (current through session 26)
 - docs/roadmap.md — future work priorities, themed
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped session 26)
+
+## Session 27 context (completed)
+- Anthropic prompt caching enabled in pqi/llm/client.py.
+  System prompt wrapped as a single ephemeral cache block
+  (5-min TTL) when ANTHROPIC_PROMPT_CACHE_ENABLED=true (default).
+  Same chat() signature, same model behavior — caching is
+  server-side and invisible to callers.
+- Files touched: pqi/config.py (new
+  ANTHROPIC_PROMPT_CACHE_ENABLED bool), .env.example (documented),
+  pqi/llm/client.py (_chat_anthropic now takes system as a list
+  with cache_control + logs usage.cache_* counts at DEBUG).
+- Verification protocol: run any analyze command with logging
+  at DEBUG and watch for the line
+  `anthropic usage: input=… cache_read=… cache_create=…`.
+  First call should show cache_create>0; subsequent calls within
+  5 min on the same persona should show cache_read>0. If both
+  stay 0, the prefix is below the model's minimum cacheable size
+  (~1024–2048 tokens for Haiku) and we'll need to enlarge the
+  cached prefix (e.g. push the briefing into the system message,
+  or restructure with multiple breakpoints).
+- Driver: docs/claude_api_tokens_2026_04.csv showed all
+  cache_write_*/cache_read columns at 0 across 13 days while
+  daily token volume crept toward $80/mo run-rate (4× over the
+  CLAUDE.md $20/mo Tech Stack target).
+- No tests changed. Smoke-test `python -c "from pqi.llm import
+  client; from pqi import config; print(config.ANTHROPIC_PROMPT_CACHE_ENABLED)"`
+  passes (run from one level above pqi/).
 
 ## Session 26 context (completed)
 - Option B steps 1–4 shipped — steps 5 (shadow backtest) and 6
@@ -555,6 +642,13 @@ Detailed reference material lives in docs/:
   AGENT_WEIGHT_SHRINK (2.0).
 
 ## PRIORITY options (pick one with the user)
+- **Verify session-27 cache.** Quick first-priority sanity
+  check: run `LOG_LEVEL=DEBUG python -m pqi.main --top` once,
+  scan stdout for the `anthropic usage: …` lines, confirm
+  cache_create>0 on the first agent and cache_read>0 on
+  repeats. If cache_create stays 0 across all 7 agents, the
+  prefix is too short — see "Caveat to monitor" in Current
+  State for the next step.
 - **Option B step 5 — shadow backtest.** GATED: needs ~100–150
   independent resolved rows. At session-26 close we had 0
   resolved. Check `pqi history stats` output; if the per-agent

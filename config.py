@@ -44,6 +44,9 @@ ANTHROPIC_API_KEY: str = (
     os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY") or ""
 )
 ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+ANTHROPIC_PROMPT_CACHE_ENABLED: bool = (
+    os.getenv("ANTHROPIC_PROMPT_CACHE_ENABLED", "true").lower() == "true"
+)
 
 # ---------------------------------------------------------------------------
 # Tavily (news search)
