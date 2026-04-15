@@ -253,7 +253,13 @@ Analysis Lens:
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES) implied by current crowd \
+psychology and how the YES-side narrative is being priced>,
+  "probability_no_score": <integer 0-100, P(NO) implied by the crowd's \
+treatment of the NO-side narrative — evaluated INDEPENDENTLY. If the crowd \
+is loudly hyping one side and ignoring the other, the ignored side has weak \
+sentiment signal — leave ignorance mass (sum < 100) and lower its \
+confidence. Need NOT equal 100 - probability_score>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "market_vibe": "<one of: Greed / Fear / Apathy / Rational>",
