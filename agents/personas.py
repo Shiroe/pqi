@@ -346,7 +346,14 @@ that the headline stats don't capture?
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES) AFTER accounting for the \
+black-swan disruption you identified>,
+  "probability_no_score": <integer 0-100, P(NO) AFTER accounting for the \
+same disruption — evaluated INDEPENDENTLY. Black swans are typically \
+asymmetric: the same disruption that boosts the underdog's NO win path \
+does not symmetrically lower the YES path. Need NOT equal \
+100 - probability_score; the gap captures the magnitude of the disruption \
+you see vs the consensus>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "black_swan_event": "<single sentence describing the flip scenario>",
