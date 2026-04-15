@@ -291,7 +291,14 @@ over that materially change the probability?
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES) judged through your domain \
+expertise on the YES outcome path>,
+  "probability_no_score": <integer 0-100, P(NO) judged through your domain \
+expertise on the NO outcome path — evaluated INDEPENDENTLY. Technical \
+expertise is often asymmetric (you may know the engineering case for one \
+path far better than the regulatory case against it). Need NOT equal \
+100 - probability_score; leave ignorance mass when your SME knowledge \
+covers one side better than the other>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "domain_identified": "<e.g. Aerospace Engineering>",
