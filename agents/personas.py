@@ -42,6 +42,22 @@ time remaining is far less likely than the raw probability suggests — reflect 
 this in LOWER confidence scores. For LIVE/IMMINENT events, also note that \
 shares will trade at ~$0.01/$0.99 once the outcome becomes clear, even before \
 official resolution.
+- TWO-SIDED PROBABILITY (autonomy rule): if your Output Format JSON \
+contains BOTH `probability_score` AND `probability_no_score`, treat them \
+as TWO INDEPENDENT QUESTIONS:
+  - probability_score = P(YES outcome happens), evaluated on the YES-side \
+evidence in the briefing.
+  - probability_no_score = P(NO outcome happens), evaluated on the NO-side \
+evidence in the briefing.
+  - These do NOT need to sum to 100. If you have strong evidence on one \
+side and thin evidence on the other, leaving ignorance mass \
+(probability_score + probability_no_score < 100) is correct. Double-counting \
+shared evidence (sum > 100) is also acceptable when the briefing genuinely \
+supports both sides — but flag it in reasoning.
+  - Do NOT force probability_no_score = 100 - probability_score out of habit. \
+That defeats the purpose of the dual question.
+  - If your Output Format does NOT include probability_no_score, ignore this \
+rule and emit only probability_score as before.
 """
 
 
@@ -88,7 +104,9 @@ to resolve incorrectly?
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES outcome condition is met)>,
+  "probability_no_score": <integer 0-100, P(NO outcome condition is met) — \
+evaluated INDEPENDENTLY on the NO-side evidence; need NOT equal 100 - probability_score>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "key_technical_risk": "<single sentence: the main risk to the outcome condition, \
