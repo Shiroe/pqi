@@ -143,7 +143,16 @@ Analysis Lens:
 
 Output Format — return exactly this JSON structure:
 {
-  "probability_score": <integer 0-100>,
+  "probability_score": <integer 0-100, P(YES) given your bullish case for \
+the favored side>,
+  "probability_no_score": <integer 0-100, P(NO) evaluated INDEPENDENTLY on \
+the case AGAINST the underdog. CRITICAL: do NOT mechanically set this to \
+100 - probability_score. Your evidence is asymmetric — you argued FOR the \
+favorite in depth; your case against the underdog is shallower. Reflect \
+that asymmetry by leaving ignorance mass (sum < 100) and lowering the \
+confidence on your non-advocated side. The autonomy is the signal — a \
+bull who emits perfectly mirrored probabilities is providing no new \
+information beyond probability_score>,
   "confidence_yes": <integer 0-100>,
   "confidence_no": <integer 0-100>,
   "primary_catalyst": "<single sentence naming the strongest driver for the favored side>",
