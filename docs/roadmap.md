@@ -96,26 +96,31 @@ space (agent believes YES and NO probabilities don't sum to 1 because of
 void/tie outcomes, evidence gaps, or heterogeneous dependency between
 sides), Option A cannot express it.
 
-**Option B — full per-side probability autonomy (DEFERRED).**
-Extend `AgentVerdict` to return `probability_yes` and `probability_no`
-as separate fields; update all seven persona prompts in
-`pqi/agents/personas.py` to output both; update the council parser in
-`pqi/agents/council.py`; update scoring math to handle
-`p_yes + p_no ≠ 1` (renormalize, treat residual as ignorance mass per
-Dempster-Shafer, or model explicit "void" outcome). **Defer until
-Option A's effect is measured** because:
+**Option B — full per-side probability autonomy.** Status: **steps
+1–4 shipped session 26** (schema + synthetic-mirror backfill,
+tolerant parser, all 7 personas emitting `probability_no_score`,
+shadow analytics in `history stats`). Steps 5–6 pending:
 
-- Every pre-B historical verdict has only `P(YES)`; backtest set
-  collapses to "verdicts captured after B ships," costing us the 240-row
-  runway we have today.
-- Gate thresholds calibrated against the current single-probability
-  semantic (`MIN_COUNCIL_PROBABILITY=0.60` etc.) would need re-tuning.
-- If Option A produces the improvement we hope for, Option B may be
-  unnecessary overhead.
+- **Step 5 — shadow backtest.** GATED on ~100–150 independent
+  resolved rows (at session-26 close: 9 independent, 0 resolved).
+  Implementation target: `scripts/b_shadow_backtest.py`, mirroring
+  `scripts/a1_backtest.py`: chronological 70/30 train/holdout,
+  bootstrap ΔBrier CI (1000 resamples, seed 42), pre-registered
+  acceptance criteria per `docs/option_b_migration_plan.md` §7
+  (ΔBrier ≤ −0.005, ΔNet ≥ −1, CI95<0 on both slices).
+- **Step 6 — scoring integration.** Only after step 5 passes on
+  held-out data AND explicit user sign-off. Swap
+  `CouncilResult.from_council_verdicts` aggregation from
+  `(probability, 1 − probability)` to
+  `(probability_yes, probability_no)`. Re-tune
+  `MIN_COUNCIL_PROBABILITY` and friends against the new semantic.
 
-If Option A's shadow results show little movement across ≥50 new
-resolutions, revisit Option B with a proper backtest runway. Add a
-checkpoint item in this roadmap when that happens.
+Session-25 framing ("Option A closed, B is the remaining path") is
+superseded by session-26 execution — Option B is live in shadow
+mode, awaiting enough resolved independent-probability samples to
+decide whether B-math earns its way into scoring. See
+`docs/option_b_migration_plan.md` for the authoritative rollout
+spec.
 
 #### Option A plan
 

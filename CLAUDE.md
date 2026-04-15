@@ -395,7 +395,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 25 — A.1 Option A closed, A.9 dynamic per-agent weighting shipped, Option B migration plan drafted]
+**Last updated:** [session 26 — Option B steps 1–4 shipped; shadow data accumulating, no scoring integration yet]
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -404,40 +404,61 @@ per-session details and [`docs/roadmap.md`](docs/roadmap.md) for the
 themed plan (A. Modeling & Calibration, B. TUI + Trading,
 C. Operational Tooling).
 
-Session 25 delivered three load-bearing artifacts:
+Session 26 shipped steps 1–4 of the Option B rollout (per
+`docs/option_b_migration_plan.md`). Scoring is **not** touched —
+aggregation in `CouncilResult.from_council_verdicts()` still uses the
+single `probability` field. New data is descriptive / shadow-only.
 
-1. **A.1 Option A closed.** Extended β-phase backtest over 228 resolved
-   BUY rows (8 candidates: shrinkage ×2, log-odds ×2, Dempster ×4).
-   All candidates REJECTED against pre-registered criteria (ΔBrier
-   ≤ −0.005, ΔNet ≥ −1, bootstrap CI95<0 on both train + holdout).
-   Probability-level transforms cannot extract the target signal at
-   this sample size — Option B (per-side probability autonomy) is
-   the remaining path. See `scripts/a1_backtest.py`.
-2. **A.9 shipped — dynamic per-agent reliability weights.** Scoring
-   weights are now recomputed from resolved history via shrinkage
-   (`weight = 1 + shrink * (lean_rate − council_avg)`, min_samples=30,
-   shrink=2.0) and persisted to `~/.pqi/agent_weights.json`. The
-   weights fully override static `RULES_LAWYER_WEIGHT`/`BEAR_WEIGHT`
-   when enabled and a snapshot exists (precedence mode α). Snapshot
-   is captured on every `CouncilResult.agent_weights_snapshot`.
-   Surfaced in `history show <#>` (Wt column) and recomputed after
-   every `history sync` / at top of `history stats`. Live weights
-   match the Tier-1 retrospective ranking: Sentiment/Contrarian
-   1.07, Rules Lawyer/Specialist 1.06, Statistician 1.05, Bull 0.94,
-   Bear 0.74.
-3. **Option B migration plan drafted** at
-   [`docs/option_b_migration_plan.md`](docs/option_b_migration_plan.md).
-   Full per-side probability autonomy (`probability_yes`,
-   `probability_no` independent), zero-API-cost synthetic backfill
-   via `p_no = 1 − p_yes`, non-breaking 6-step rollout, same
-   pre-registered acceptance criteria as A.1 β. Implementation
-   deferred — plan-only this session.
+1. **Step 1 — additive schema + synthetic-mirror backfill.**
+   `AgentVerdict` gained `probability_yes`, `probability_no`,
+   `probability_source: Literal["independent","synthetic_mirror"]`
+   with a `model_validator(mode="after")` that auto-fills from the
+   canonical `probability` field when unset. `history.py` applies
+   the same backfill on load. `scripts/b_backfill.py` idempotently
+   rewrote `~/.pqi/history.jsonl` in place (atomic tmp+rename,
+   `.preB.bak` sibling) — 1860 verdicts across 292 rows tagged
+   `synthetic_mirror`. Zero API calls.
+2. **Step 2 — tolerant parser.** `council._parse_verdict` now reads
+   an optional `probability_no_score` int (0–100). When present, the
+   verdict is tagged `independent` and a drift warning fires at
+   `|p_yes + p_no − 1| > 0.3` (never rejects; lenient-by-design per
+   plan §5). Missing / malformed field falls through to synthetic
+   mirror — no regression for legacy personas.
+3. **Step 3 — persona rollout (all 7 agents).** SHARED_PREAMBLE
+   gained a TWO-SIDED PROBABILITY (autonomy) block, conditional on
+   the output-format block containing both fields. All 7 personas
+   now emit `probability_no_score`, promoted one-per-commit in the
+   order `rules_lawyer → statistician → sentiment → specialist →
+   contrarian → bull → bear`. Bull/Bear got explicit anti-mirror
+   framing (`"100 - probability_score"` warning, asymmetric-evidence
+   reminder) because they carry the highest regression risk.
+4. **Step 4 — shadow analytics.** `analytics.option_b_overview` and
+   `analytics.option_b_per_agent` compute per-agent `|drift|`,
+   signed drift, and per-side Brier (YES, NO) over resolved rows,
+   filtered on `probability_source == "independent"`. Phase
+   thresholds: `phase1 ≥ 10` (sanity), `phase2 ≥ 30` (pre-registered
+   bar). `pqi history stats` renders a new panel + per-agent table
+   when any independent verdicts exist; silent otherwise. Read-only;
+   zero gate impact.
 
-Sessions 22–24 confirmed the pre-EV scoring math is stable. Session
-25 preserved that contract: dynamic weights override the static
-map but feed the same `CouncilResult.from_council_verdicts()`
-entry; `agent_weights_snapshot` is additive metadata. No verdict
-logic changes in `models.py`.
+**API cost of the rollout:** per-agent output adds ~1 extra JSON
+field (~5–10 tokens). At 7 agents per analyze run and
+claude-haiku-4-5 output pricing (~$5/M), that's **≈ $0.00025 per
+run** — below the rounding noise of the existing ~$0.015 council
+cost. Prompt-cache hits on the preamble further dilute the impact.
+
+**Shadow-data status (at session end):** 9 independent verdicts
+across all 7 agents (≤ 0.5% of 1888 total). Max `|drift|` 0.12,
+signed drift near zero — autonomy is landing, not collapsing to
+`(0.5, 0.5)` or strict mirror. 0 resolved, so per-side Brier not
+yet computable. Phase 1 (≥ 10 independent per agent) and the
+backtest bar (100–150 total independent rows) remain ahead.
+
+Sessions 22–24 established the pre-EV scoring contract is stable.
+Session 25 (A.9 dynamic weights) and session 26 (Option B 1–4)
+preserved it: every addition is metadata-only or upstream of the
+aggregator. `CouncilResult.from_council_verdicts()` math unchanged
+since session 23.
 
 ### What's live
 
@@ -457,6 +478,13 @@ logic changes in `models.py`.
   JSON snapshot at `~/.pqi/agent_weights.json`, auto-recompute
   after `history sync`, per-run `agent_weights_snapshot` metadata
   on every `CouncilResult`.
+- **Option B shadow layer** (session 26, steps 1–4 of
+  `docs/option_b_migration_plan.md`): `AgentVerdict.probability_yes`,
+  `probability_no`, `probability_source` persisted; all 7 personas
+  emit `probability_no_score`; `history stats` renders Option B
+  shadow panel + per-agent drift/Brier table. Descriptive only —
+  scoring still aggregates from single `probability` field. Steps 5–6
+  (shadow backtest + scoring integration) pending.
 - Two-sided CLOB price history enrichment (YES + NO independently, non-fatal)
 - History system: full-fidelity persistence, resolution sync, per-agent accuracy, postmortem
 - SQLite cache with price-delta invalidation
@@ -480,44 +508,87 @@ parallelism, bias-as-feature, statistical skepticism) for this project.
 Detailed reference material lives in docs/:
 - docs/api-reference.md — API endpoints, params, response formats
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 25)
+- docs/session-log.md — per-session changelog (current through session 26)
 - docs/roadmap.md — future work priorities, themed
-- docs/option_b_migration_plan.md — full Option B rollout plan (drafted session 25)
+- docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped session 26)
 
-## Session 25 context (completed)
-- A.1 Option A closed: β-phase backtest (8 probability-transform
-  candidates) all REJECTED against pre-registered criteria on 228
-  resolved BUYs. See scripts/a1_backtest.py — run it again before
-  promoting any new candidate.
-- A.9 shipped: dynamic per-agent reliability weighting live via
-  pqi/agent_weights.py. Shrinkage formula, min-samples gate,
-  snapshot at ~/.pqi/agent_weights.json, CouncilResult carries
-  agent_weights_snapshot. Config: AGENT_WEIGHTS_ENABLED,
-  MIN_AGENT_WEIGHT_SAMPLES (30), AGENT_WEIGHT_SHRINK (2.0).
-- Option B migration plan drafted at docs/option_b_migration_plan.md:
-  zero-API-cost backfill (p_no = 1 − p_yes), 6-step non-breaking
-  rollout, same acceptance criteria as A.1 β. IMPLEMENTATION
-  DEFERRED — paper plan only.
+## Session 26 context (completed)
+- Option B steps 1–4 shipped — steps 5 (shadow backtest) and 6
+  (scoring integration) PENDING. Never wire probability_no into
+  the aggregator in CouncilResult.from_council_verdicts() until
+  step 5 passes pre-registered acceptance criteria.
+- Step 1: AgentVerdict.probability_yes / probability_no /
+  probability_source + model_validator auto-fill; history.py
+  applies the same fallback on load; scripts/b_backfill.py
+  rewrote ~/.pqi/history.jsonl (1860 verdicts → synthetic_mirror,
+  .preB.bak retained). Zero API calls.
+- Step 2: council._parse_verdict reads optional
+  probability_no_score int (0–100). Tags `independent` when
+  present, logs drift warning at |p_yes + p_no − 1| > 0.3,
+  lenient-by-design (never rejects). Falls back to
+  synthetic_mirror on missing/malformed.
+- Step 3: SHARED_PREAMBLE TWO-SIDED PROBABILITY block (conditional
+  on output-format containing both fields). All 7 personas emit
+  probability_no_score. Order: rules_lawyer → statistician →
+  sentiment → specialist → contrarian → bull → bear. Bull/Bear
+  carry explicit anti-mirror framing.
+- Step 4: analytics.option_b_overview / option_b_per_agent
+  compute per-agent |drift|, signed drift, YES/NO Brier on
+  resolved rows. Surfaced in `pqi history stats` when any
+  independent verdicts exist. Phase thresholds: phase1≥10,
+  phase2≥30. Read-only.
+- API cost impact: ~$0.00025/run (negligible).
+- Shadow status at session close: 9 independent verdicts across
+  all 7 agents, max |drift| 0.12, 0 resolved. Autonomy landing —
+  no mirror collapse, no (0.5, 0.5) degeneracy.
+
+## Background (kept from session 25)
+- A.1 Option A closed: probability-transform candidates all
+  REJECTED on 228 resolved BUYs. scripts/a1_backtest.py is the
+  reference implementation for the pre-registered acceptance
+  criteria (ΔBrier ≤ −0.005, ΔNet ≥ −1, bootstrap CI95<0 on
+  train+holdout).
+- A.9 live: dynamic per-agent reliability weighting via
+  pqi/agent_weights.py. Snapshot at ~/.pqi/agent_weights.json,
+  CouncilResult.agent_weights_snapshot per run. Config:
+  AGENT_WEIGHTS_ENABLED, MIN_AGENT_WEIGHT_SAMPLES (30),
+  AGENT_WEIGHT_SHRINK (2.0).
 
 ## PRIORITY options (pick one with the user)
-- **Option B implementation**: start with step 1 of the migration plan
-  (additive schema + synthetic backfill). Follow the rollout order
-  exactly — no scoring-wiring until a backtest passes.
-- Theme A · Modeling & Calibration: A.4 (Bear monitoring, pure stats),
-  A.5 (EV gate threshold tuning, stats-only), A.10 (dynamic-weight
-  feedback-loop monitoring — protects A.9 from self-reinforcement).
-- Theme C · Operational Tooling: any of C.1–C.6 are isolated QoL items.
+- **Option B step 5 — shadow backtest.** GATED: needs ~100–150
+  independent resolved rows. At session-26 close we had 0
+  resolved. Check `pqi history stats` output; if the per-agent
+  `n_res` column is still near-zero, defer. When ready, land
+  `scripts/b_shadow_backtest.py` mirroring scripts/a1_backtest.py's
+  structure (chronological 70/30 split, bootstrap ΔBrier CI,
+  pre-registered criteria). Candidate B-math list lives in
+  docs/option_b_migration_plan.md §7.
+- Theme A · Modeling & Calibration: A.4 (Bear monitoring, pure
+  stats), A.5 (EV gate threshold tuning, stats-only), A.10
+  (dynamic-weight feedback-loop monitoring — protects A.9 from
+  self-reinforcement; matters more now that A.9 is live).
+- Theme C · Operational Tooling: any of C.1–C.6 are isolated QoL
+  items.
 - Theme B: B.1 (streaming TUI) is the entry point for Phase 3.
 
 ## Instructions
-- Pick the next priority with the user before starting.
-- Update ## Current State and write a fresh ## Next Session Prompt at
-  end of session. Log meaningful decisions in docs/session-log.md.
-- Don't edit models.py verdict logic without explicit sign-off — the
-  user treats the pre-EV recommendation contract as stable. Session
-  25's additions (agent_weights_snapshot) were metadata-only and
-  preserved this contract.
-- For Option B: strict rollout order per docs/option_b_migration_plan.md.
-  Never wire probability_no into scoring until the backtest passes the
-  pre-registered criteria on held-out data.
+- Pick the next priority with the user before starting. If
+  Option B step 5 comes up, first run `pqi history stats` and
+  read the Option B shadow table — don't start the backtest
+  until the independent-sample budget is met.
+- Update ## Current State and write a fresh ## Next Session
+  Prompt at end of session. Log meaningful decisions in
+  docs/session-log.md.
+- Don't edit models.py verdict logic (the
+  `from_council_verdicts` aggregator) without explicit sign-off.
+  The session-23 contract is stable; session 25 (agent_weights_snapshot)
+  and session 26 (probability_yes/no/source + model_validator)
+  are additive-only and preserve it.
+- Option B rollout order is strict per
+  docs/option_b_migration_plan.md. Never wire probability_no
+  into scoring until step 5 passes pre-registered criteria on
+  held-out data.
+- STRICT: no AI / Claude / "assisted" attribution in code,
+  comments, commits, or docs (see CLAUDE.md "Attribution rule").
+- Commit per step, locally. No push without explicit ask.
 ```

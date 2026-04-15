@@ -4,6 +4,115 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 26 — Option B steps 1–4 shipped (schema, parser, personas, shadow analytics)
+
+Executed steps 1–4 of `docs/option_b_migration_plan.md` in strict
+rollout order. Steps 5 (shadow backtest) and 6 (scoring integration)
+deferred — shadow data has not accumulated. Per-step local commits
+(no push).
+
+Also codified the **Attribution rule (STRICT)** in CLAUDE.md
+Coding Conventions: no AI / Claude / "assisted" mentions in source,
+comments, commits, PRs, or docs. Durable memory pointer lives at
+`feedback_attribution.md`. All session-26 commits honor the rule.
+
+**Step 1 — additive schema + synthetic-mirror backfill** (`05bc2c9`).
+- `models.AgentVerdict`: new fields
+  `probability_yes: float | None`, `probability_no: float | None`,
+  `probability_source: Literal["independent","synthetic_mirror"] = "synthetic_mirror"`.
+  `@model_validator(mode="after")` auto-fills from canonical
+  `probability` when either per-side field is unset (uses
+  `object.__setattr__` for frozen-safety).
+- `history.py`: `_backfill_per_side_probability(entry)` helper
+  runs on every load after legacy migration — tolerant-read of
+  pre-B history without rewriting the file.
+- `scripts/b_backfill.py` (NEW): idempotent one-shot rewrite of
+  `~/.pqi/history.jsonl`. Atomic tmp+rename, auto-creates
+  `~/.pqi/history.jsonl.preB.bak` sibling on first modification,
+  counts per action (`already_migrated`, `migrated`,
+  `skipped_not_dict`, `skipped_no_probability`). Run output:
+  292 rows scanned, 1860 verdicts migrated, all tagged
+  `synthetic_mirror`. Zero API calls.
+- `scoring.py` / `CouncilResult.from_council_verdicts`: **untouched**.
+  Aggregator still consumes `probability` (canonical) so every
+  existing metric (lean rate, correct/wrong buy, EV gate, Kelly,
+  A.9 weights) is preserved bit-for-bit.
+
+**Step 2 — tolerant parser** (`c9a2bb8`).
+- `agents/council._parse_verdict`: reads optional
+  `probability_no_score` int (0–100). Logic:
+  - Field present and valid → tag `independent`, warn at
+    `|p_yes + p_no − 1| > 0.3` (never reject; lenient-by-design
+    per plan §5).
+  - Field missing/malformed → synthetic_mirror fallback, retain
+    the existing retry+backoff path.
+- Constructor only passes `probability_yes/no/source` when the
+  verdict is genuinely independent — `model_validator` handles
+  synthetic rows.
+
+**Step 3 — persona rollout (one-per-commit)** (`e011ec2`,
+`949c871`, `39173c5`, `013dd1d`, `af7d924`, `0eb3610`, `e3b93a8`).
+- `SHARED_PREAMBLE`: new "TWO-SIDED PROBABILITY (autonomy)" block,
+  conditional on the persona's Output Format containing both
+  `probability_score` and `probability_no_score`. Other personas
+  skip the block.
+- Promotion order (lowest structural-bias risk first, then
+  Bull/Bear last per plan §6):
+  `rules_lawyer → statistician → sentiment → specialist →
+   contrarian → bull → bear`.
+- Bull and Bear carry explicit anti-mirror framing:
+  *"probability_no_score is NOT `100 - probability_score`; the
+  evidence base for the opposing side is asymmetric."* This is
+  the highest-risk promotion — session-20 Bear rewrite is still
+  inside its A.4 monitoring window.
+- Each persona's output field docstring is tailored (Rules
+  Lawyer: "P(NO outcome condition is met)"; Statistician:
+  "anchored on historical base rate for OPPOSITE outcome"; etc.).
+
+**Step 4 — shadow analytics** (`9b3d7f9`).
+- `analytics.py`:
+  - `OPTION_B_PHASE1_MIN_SAMPLES = 10` (sanity floor).
+  - `OPTION_B_PHASE2_MIN_SAMPLES = 30` (pre-registered backtest bar).
+  - `_is_independent(v)` — filter predicate on
+    `probability_source == "independent"`.
+  - `option_b_overview(entries)` — totals: independent count,
+    resolved count, fraction, agents-with-any-independent.
+  - `option_b_per_agent(entries)` — per-agent `n_ind`, `n_res`,
+    `mean_abs_drift`, `mean_signed_drift` (= mean of
+    `p_yes + p_no − 1`), `yes_brier`, `no_brier` (per-side Brier
+    against `final_yes_price` on resolved markets), `phase`
+    classification.
+- `main.py history stats`: conditional Option B block —
+  panel (totals + agent coverage) + per-agent table with columns
+  `Agent | n_ind | n_res | |drift| | signed | YES Brier | NO Brier | Phase`.
+  Color-coded phase (green/yellow/dim). Silent when zero
+  independent verdicts. Footer explains signed-drift
+  interpretation (positive = double-count, negative = ignorance
+  mass, near-zero = mirror collapse).
+- Descriptive only. Zero gate impact. Scoring unchanged.
+
+**API cost impact.** Per-agent output adds ~1 JSON field
+(~5–10 tokens). 7 agents × ~$5/M output (claude-haiku-4-5-20251001)
+≈ **$0.00025 per analyze run** — below rounding noise of the
+existing ~$0.015 council cost. Anthropic prompt cache further
+dilutes the impact on repeated preambles.
+
+**Shadow-data status at session close.** 9 independent verdicts
+observed in history (all 7 agents represented, ≤ 0.5% of 1888
+total verdicts). Max `|drift|` 0.12, signed drift within
+`[-0.03, +0.12]`. No `(0.5, 0.5)` degeneracy, no strict mirrors.
+0 resolved → per-side Brier not yet computable. Phase 1
+(`n ≥ 10` per agent) and the backtest bar (100–150 independent
+rows total) remain ahead; no step 5 action possible yet.
+
+**What stayed off-limits.** `CouncilResult.from_council_verdicts`
+aggregation. The session-23 recommendation contract is preserved:
+probability → edges → price gates → contrarian/aligned → EV gate.
+Option B is upstream metadata; the aggregator sees an unchanged
+`probability` field until step 6 explicitly changes it.
+
+---
+
 ## Session 25 — A.1 Option A closed, A.9 dynamic per-agent weighting, Option B plan drafted
 
 Three deliverables this session:
