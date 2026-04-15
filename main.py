@@ -1571,6 +1571,81 @@ def history_stats(
 
     console.print(table)
 
+    # ----- Option B shadow analytics (descriptive only) ---------------------
+    from pqi.analytics import (
+        OPTION_B_PHASE1_MIN_SAMPLES,
+        OPTION_B_PHASE2_MIN_SAMPLES,
+        option_b_overview,
+        option_b_per_agent,
+    )
+
+    ov = option_b_overview(entries)
+    if ov["independent"] == 0:
+        console.print(
+            "\n[dim]Option B shadow: no independent-probability verdicts yet "
+            "(personas still warming up; new emissions tag as 'independent' "
+            "after the step-3 persona rollout).[/dim]"
+        )
+    else:
+        ob_summary = (
+            f"[bold]{ov['independent']}[/bold] independent verdicts  "
+            f"([dim]{ov['fraction_independent']:.1%} of {ov['total_verdicts']} total; "
+            f"{ov['independent_resolved']} resolved[/dim])\n"
+            f"[bold]Agents with any independent emission:[/bold] "
+            f"{len(ov['agents_with_any_independent'])}/7"
+        )
+        console.print(
+            Panel(
+                ob_summary,
+                title="Option B shadow (per-side probability autonomy)",
+                border_style="magenta",
+            )
+        )
+
+        ob_table = Table(
+            title=(
+                f"Per-agent Option B metrics  "
+                f"(phase1≥{OPTION_B_PHASE1_MIN_SAMPLES}, phase2≥{OPTION_B_PHASE2_MIN_SAMPLES})"
+            ),
+            box=box.ROUNDED,
+        )
+        ob_table.add_column("Agent", style="cyan")
+        ob_table.add_column("n_ind", justify="right")
+        ob_table.add_column("n_res", justify="right")
+        ob_table.add_column("|drift|", justify="right", style="dim")
+        ob_table.add_column("signed", justify="right", style="dim")
+        ob_table.add_column("YES Brier", justify="right")
+        ob_table.add_column("NO Brier", justify="right")
+        ob_table.add_column("Phase", justify="right")
+
+        agent_rows = option_b_per_agent(entries)
+        for name in sorted(agent_rows, key=lambda k: agent_rows[k]["n_independent"], reverse=True):
+            r = agent_rows[name]
+            phase_str = {
+                "phase2": "[bold green]phase2[/bold green]",
+                "phase1": "[yellow]phase1[/yellow]",
+                "below_phase1": "[dim]below[/dim]",
+            }[r["phase"]]
+            yb = f"{r['yes_brier']:.3f}" if r["yes_brier"] is not None else "—"
+            nb = f"{r['no_brier']:.3f}" if r["no_brier"] is not None else "—"
+            ob_table.add_row(
+                name,
+                str(r["n_independent"]),
+                str(r["n_resolved"]),
+                f"{r['mean_abs_drift']:.2f}",
+                f"{r['mean_signed_drift']:+.2f}",
+                yb,
+                nb,
+                phase_str,
+            )
+        console.print(ob_table)
+        console.print(
+            "[dim]signed drift = mean(p_yes + p_no − 1). "
+            "Positive = agent double-counts shared evidence; "
+            "negative = agent leaves ignorance mass; "
+            "near-zero = effectively mirrored (autonomy not landing).[/dim]"
+        )
+
 
 if __name__ == "__main__":
     app()

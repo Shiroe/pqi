@@ -384,3 +384,127 @@ def compute_and_persist_postmortem(entry: dict) -> dict:
         if run_id:
             update_analysis(run_id, pm)
     return pm
+
+
+# ---------------------------------------------------------------------------
+# Option B shadow analytics (session 26+) — read-only descriptive metrics
+# ---------------------------------------------------------------------------
+#
+# Coherence + side-bias work on ANY independent verdict (resolved or not).
+# Per-side Brier requires resolution. ALL metrics filter on
+# probability_source == "independent" — synthetic_mirror rows would
+# mechanically zero them out.
+#
+# These functions are descriptive ONLY. Nothing in scoring.py reads them.
+# Promotion to a gate input requires a passing backtest per the migration
+# plan §6 step 6.
+
+# Sample target for "this agent has enough independent data to be worth
+# backtesting against." Below this we flag the agent as Phase 1 only.
+OPTION_B_PHASE1_MIN_SAMPLES = 10
+OPTION_B_PHASE2_MIN_SAMPLES = 30
+
+
+def _is_independent(verdict: dict) -> bool:
+    return verdict.get("probability_source") == "independent"
+
+
+def option_b_overview(entries: list[dict]) -> dict:
+    """Flat counts across the whole history file. Always cheap to call."""
+    total_verdicts = 0
+    independent = 0
+    synthetic = 0
+    independent_resolved = 0
+    agents_with_any: set[str] = set()
+
+    for entry in entries:
+        winner = _directional_winner(entry)
+        for v in _verdicts(entry):
+            total_verdicts += 1
+            src = v.get("probability_source")
+            if src == "independent":
+                independent += 1
+                agents_with_any.add(v.get("agent_name", "?"))
+                if winner is not None:
+                    independent_resolved += 1
+            elif src == "synthetic_mirror":
+                synthetic += 1
+
+    return {
+        "total_verdicts": total_verdicts,
+        "independent": independent,
+        "synthetic": synthetic,
+        "independent_resolved": independent_resolved,
+        "fraction_independent": (independent / total_verdicts) if total_verdicts else 0.0,
+        "agents_with_any_independent": sorted(agents_with_any),
+    }
+
+
+def option_b_per_agent(entries: list[dict]) -> dict[str, dict]:
+    """Per-agent shadow metrics, filtered to probability_source == "independent".
+
+    Returns dict keyed by agent_name with:
+      - n_independent           — count of independent verdicts (any resolution status)
+      - n_resolved              — independent verdicts on resolved markets
+      - mean_abs_drift          — mean |p_yes + p_no − 1| (coherence)
+      - mean_signed_drift       — mean (p_yes + p_no − 1) (side-bias direction)
+      - yes_brier               — per-side Brier on YES (resolved only)
+      - no_brier                — per-side Brier on NO (resolved only)
+      - phase                   — "phase1" / "phase2" / "below_phase1" by sample count
+    """
+    agg: dict[str, dict] = {}
+
+    for entry in entries:
+        if entry.get("legacy"):
+            continue
+        winner = _directional_winner(entry)
+        final_yes = _final_yes_price(entry)
+        for v in _verdicts(entry):
+            if not _is_independent(v):
+                continue
+            name = v.get("agent_name", "?")
+            s = agg.setdefault(name, {
+                "n_independent": 0, "n_resolved": 0,
+                "abs_drift_sum": 0.0, "signed_drift_sum": 0.0,
+                "yes_brier_sum": 0.0, "no_brier_sum": 0.0,
+            })
+
+            p_yes_raw = v.get("probability_yes")
+            p_no_raw = v.get("probability_no")
+            if p_yes_raw is None or p_no_raw is None:
+                continue
+            p_yes = float(p_yes_raw)
+            p_no = float(p_no_raw)
+
+            s["n_independent"] += 1
+            drift = p_yes + p_no - 1.0
+            s["abs_drift_sum"] += abs(drift)
+            s["signed_drift_sum"] += drift
+
+            if winner is not None and final_yes is not None:
+                actual_yes = float(final_yes)
+                actual_no = 1.0 - actual_yes
+                s["yes_brier_sum"] += (p_yes - actual_yes) ** 2
+                s["no_brier_sum"] += (p_no - actual_no) ** 2
+                s["n_resolved"] += 1
+
+    out: dict[str, dict] = {}
+    for name, s in agg.items():
+        n = s["n_independent"]
+        n_res = s["n_resolved"]
+        if n >= OPTION_B_PHASE2_MIN_SAMPLES:
+            phase = "phase2"
+        elif n >= OPTION_B_PHASE1_MIN_SAMPLES:
+            phase = "phase1"
+        else:
+            phase = "below_phase1"
+        out[name] = {
+            "n_independent": n,
+            "n_resolved": n_res,
+            "mean_abs_drift": (s["abs_drift_sum"] / n) if n else 0.0,
+            "mean_signed_drift": (s["signed_drift_sum"] / n) if n else 0.0,
+            "yes_brier": (s["yes_brier_sum"] / n_res) if n_res else None,
+            "no_brier": (s["no_brier_sum"] / n_res) if n_res else None,
+            "phase": phase,
+        }
+    return out
