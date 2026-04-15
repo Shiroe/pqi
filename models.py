@@ -146,12 +146,38 @@ class AgentVerdict(BaseModel):
     Probability and confidence are stored as 0.0–1.0 floats.
     The council.py parser divides the agent's 0–100 integer output by 100
     before constructing this model.
+
+    Option B schema (session 26+, additive): `probability_yes` and
+    `probability_no` are independent first-class fields. Today they
+    are auto-derived from `probability` (P(YES)) when omitted, with
+    `probability_source = "synthetic_mirror"`. Once personas emit
+    `probability_no` independently, the parser will pass both fields
+    explicitly and tag `probability_source = "independent"`.
+
+    Aggregation in `CouncilResult.from_council_verdicts` still reads
+    `probability` (== probability_yes). The aggregation swap to
+    `(probability_yes, probability_no)` is a separate gated change.
     """
 
     agent_name: str
     """Human-readable display name, e.g. 'The Rules Lawyer'."""
     probability: float = Field(..., ge=0.0, le=1.0)
-    """Agent's estimate of the YES probability."""
+    """Agent's estimate of the YES probability. Equal to `probability_yes`
+    by construction; kept as the canonical field during the Option B
+    transition so existing call sites and aggregation logic do not change."""
+    probability_yes: float = Field(default=None, ge=0.0, le=1.0)  # type: ignore[assignment]
+    """Agent's autonomous estimate of P(YES). Auto-filled from `probability`
+    when omitted (legacy / synthetic_mirror path)."""
+    probability_no: float = Field(default=None, ge=0.0, le=1.0)  # type: ignore[assignment]
+    """Agent's autonomous estimate of P(NO). Auto-filled as `1 - probability`
+    when omitted (legacy / synthetic_mirror path). Under full Option B
+    autonomy this can differ from `1 - probability_yes`."""
+    probability_source: Literal["independent", "synthetic_mirror"] = "synthetic_mirror"
+    """Where probability_yes/no came from. `synthetic_mirror` = derived as
+    `(p, 1-p)` from a single-source probability (legacy data, or new code
+    that hasn't yet emitted both fields). `independent` = the agent emitted
+    both fields autonomously. Option B analytics (per-side Brier, coherence,
+    side-bias) MUST filter on `probability_source == "independent"`."""
     confidence_yes: float = Field(..., ge=0.0, le=1.0)
     """Agent's confidence in its YES-side estimate."""
     confidence_no: float = Field(..., ge=0.0, le=1.0)
@@ -160,6 +186,19 @@ class AgentVerdict(BaseModel):
     """2–4 sentence explanation of the verdict."""
     key_factor: str
     """Single most important factor driving this verdict."""
+
+    @model_validator(mode="after")
+    def _backfill_per_side_probability(self) -> AgentVerdict:
+        # Auto-fill the new fields from `probability` when callers omit them.
+        # This keeps every existing AgentVerdict(...) call site working and
+        # tags the result as a synthetic mirror so Option B analytics filter
+        # it out. Independent emission must set both fields AND
+        # probability_source="independent" explicitly.
+        if self.probability_yes is None:
+            object.__setattr__(self, "probability_yes", self.probability)
+        if self.probability_no is None:
+            object.__setattr__(self, "probability_no", 1.0 - self.probability)
+        return self
 
 
 class CouncilResult(BaseModel):

@@ -36,6 +36,34 @@ def _is_legacy(entry: dict) -> bool:
     return "verdicts" not in entry and "result" not in entry
 
 
+def _backfill_per_side_probability(entry: dict) -> dict:
+    """In-memory Option B synthetic mirror.
+
+    Ensures every verdict dict carries `probability_yes`, `probability_no`,
+    and `probability_source`. Missing fields are populated as
+    `(p, 1-p, "synthetic_mirror")` so downstream consumers (analytics,
+    history show, backtest scripts) see a uniform shape regardless of when
+    the entry was written. Idempotent — entries with the new fields already
+    set are returned untouched. No I/O; the persistent rewrite is the job
+    of `scripts/b_backfill.py`.
+    """
+    result = entry.get("result") or {}
+    verdicts = result.get("verdicts") or []
+    for v in verdicts:
+        if not isinstance(v, dict):
+            continue
+        p = v.get("probability")
+        if p is None:
+            continue
+        if "probability_yes" not in v or v["probability_yes"] is None:
+            v["probability_yes"] = p
+        if "probability_no" not in v or v["probability_no"] is None:
+            v["probability_no"] = 1.0 - p
+        if "probability_source" not in v or v["probability_source"] is None:
+            v["probability_source"] = "synthetic_mirror"
+    return entry
+
+
 def _migrate_legacy_entry(entry: dict) -> dict:
     """Wrap a legacy flat entry so the rest of the code can treat it uniformly.
 
@@ -155,7 +183,7 @@ def load_history() -> list[dict]:
             except json.JSONDecodeError:
                 logger.warning("Skipping malformed history line %d", line_num)
                 continue
-            entries.append(_migrate_legacy_entry(raw))
+            entries.append(_backfill_per_side_probability(_migrate_legacy_entry(raw)))
     return entries
 
 
