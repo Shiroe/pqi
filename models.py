@@ -82,6 +82,108 @@ class PriceHistory(BaseModel):
     """UTC timestamp when the CLOB data was fetched."""
 
 
+class H2HMatch(BaseModel):
+    """One head-to-head encounter between the two parties of the current
+    market, as returned by a structured-data provider (e.g. PandaScore).
+
+    Sourced from a stable-ID API, not from a search snippet, so the date
+    and result are trustworthy. The council reads these as PRIOR MATCH
+    FACTS context — never as evidence about the upcoming event.
+    """
+
+    match_id: str
+    """Provider's stable match ID (e.g. PandaScore numeric ID as string)."""
+    scheduled_at: datetime
+    """When the prior match was scheduled (UTC)."""
+    winner_name: str | None = None
+    """Display name of the winning side, or None for a draw / forfeit."""
+    score_summary: str
+    """Human-readable result, e.g. "2-0", "16-13", "1-1 draw"."""
+    tournament_name: str | None = None
+    """Optional tournament/event the prior match was part of."""
+
+
+class TeamForm(BaseModel):
+    """Recent-form snapshot for one party in the current market.
+
+    Counts are over the most recent N completed matches for that party
+    as returned by the structured-data provider. N is set per provider
+    (default config: PANDASCORE_RECENT_FORM_COUNT)."""
+
+    team_name: str
+    """Provider's canonical team name (the one we will compare against)."""
+    matches_considered: int = Field(..., ge=0)
+    """How many recent completed matches contributed to the W/L counts."""
+    wins: int = Field(..., ge=0)
+    losses: int = Field(..., ge=0)
+    last_match_at: datetime | None = None
+    """When the most recent counted match was played, UTC. None if no
+    completed matches were available."""
+
+
+class StructuredMatchRecord(BaseModel):
+    """Trusted, structured-data view of the current market's specific event,
+    plus context (head-to-head history, recent form) about the two parties.
+
+    Produced by `pqi/ingestion/match_resolver.py` when the market resolves to
+    a known structured-data provider entry (e.g. PandaScore for esports).
+    The Pydantic shape is provider-agnostic so other providers (PandaScore,
+    GRID, OpenDota, etc.) can populate the same record without changing
+    downstream consumers.
+
+    None when no resolver was attempted, the resolver was disabled, or the
+    fuzzy match against the provider returned no candidate above the
+    confidence threshold.
+    """
+
+    provider: str
+    """Source identifier, e.g. "pandascore"."""
+    provider_match_id: str
+    """Provider's stable ID for the SPECIFIC match this Polymarket question
+    is about — not a prior encounter. Lets us key the cache off the
+    structured-data view, not the LLM-derived briefing."""
+    game: str
+    """Provider's game/category slug (e.g. "cs2", "lol", "valorant",
+    "dota2", "r6siege", "mlbb")."""
+    scheduled_at: datetime
+    """Provider's scheduled start time, UTC. Cross-check against the
+    market's `event_start_time`."""
+    status: Literal["scheduled", "running", "finished", "canceled"]
+    """Lifecycle of the specific match in the provider's system. The
+    council reads `finished` as authorisation to interpret a final score
+    in the briefing as the resolved outcome; any other value means the
+    market is not resolved at the source."""
+    team_a_name: str
+    """Provider's canonical name for the YES-side / first party."""
+    team_b_name: str
+    """Provider's canonical name for the NO-side / second party."""
+    match_format: str | None = None
+    """Optional best-of format, e.g. "BO3", "BO5"."""
+    tournament_name: str | None = None
+    """Optional tournament / event / series name."""
+    final_score: str | None = None
+    """Final scoreline when status == "finished"; otherwise None."""
+    winner_name: str | None = None
+    """Winning side's display name when status == "finished"; otherwise None."""
+    h2h: list[H2HMatch] = Field(default_factory=list)
+    """Prior encounters between the two parties, newest first. Empty list
+    when no prior matches were available."""
+    team_a_recent_form: TeamForm | None = None
+    """Recent-form snapshot for team A. None when the provider didn't
+    return enough data for a snapshot."""
+    team_b_recent_form: TeamForm | None = None
+    """Recent-form snapshot for team B. None when the provider didn't
+    return enough data for a snapshot."""
+    fuzzy_score: int = Field(..., ge=0, le=100)
+    """rapidfuzz token_set_ratio confidence score (0-100) of the
+    market-question → provider-match resolution. Persisted so that
+    `history show <#>` can render the confidence the resolver had at
+    run time, and so the council can downgrade trust when the score
+    is borderline (PANDASCORE_FUZZY_THRESHOLD by default)."""
+    fetched_at: datetime
+    """UTC timestamp when the provider was queried."""
+
+
 class EventGroup(BaseModel):
     """
     A group of sibling markets from the same Polymarket event.
@@ -150,6 +252,13 @@ class BriefingDocument(BaseModel):
     """UTC timestamp of when the briefing was assembled."""
     price_history: PriceHistory | None = None
     """CLOB price history with trend metrics. None if fetch failed or unavailable."""
+    structured_match: StructuredMatchRecord | None = None
+    """Trusted, structured-data view of the match (e.g. PandaScore for
+    esports). When present, it is the authoritative source for whether
+    the event has started / finished, what the canonical team names are,
+    and the H2H / recent-form context. None when the resolver was
+    disabled, no provider covered the category, or no candidate cleared
+    the fuzzy-match confidence threshold."""
 
 
 class AgentVerdict(BaseModel):
