@@ -23,7 +23,7 @@ from tavily import AsyncTavilyClient
 
 from pqi import config
 from pqi.llm.client import chat as llm_chat
-from pqi.models import BriefingDocument, MarketData
+from pqi.models import BriefingDocument, MarketData, StructuredMatchRecord
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ _SYNTHESIZER_USER_TMPL = """\
 TODAY (UTC): {today}
 EVENT START: {event_start_display}
 EVENT STATUS: {time_status}
-
+{structured_block}\
 Market question: {question}
 
 Raw search results:
@@ -269,31 +269,33 @@ def _detect_completion_contamination(
     news_summary: str,
     side_yes_case: list[str],
     side_no_case: list[str],
+    structured_match: StructuredMatchRecord | None = None,
 ) -> list[str]:
     """
     Mechanical safety net for the temporal coherence rule in
     `_SYNTHESIZER_SYSTEM`. Returns a list of disambiguation warnings.
 
-    Trigger condition: the market's `event_start_time` is in the future AND
-    one of the synthesised buckets (news_summary / side_*_case) contains
-    text matching a past-tense final-result pattern.
+    Trigger conditions (any one fires):
+      A. `event_start_time` is in the future AND a bucket carries past-tense
+         final-result language. (Step 1 trigger.)
+      B. `structured_match.status` is "scheduled" or "running" AND a bucket
+         carries past-tense final-result language. (Step 2 cross-source
+         confirmation — when PandaScore says the match isn't finished, any
+         past-tense scoreline in the synthesis is contamination regardless
+         of how the market's event_start_time looks.)
 
-    The warning is intentionally generic — the council's job is to consult
-    `prior_match_facts` and the EVENT TIMING block to decide what's stale.
-    The warning's role is just to flag that the LLM may have failed to
-    fully separate a past encounter from this market's setup.
-
-    Returns empty list when the event is in progress, has ended, or no
-    contamination is detected — which should be the common case once the
-    system prompt does its job.
+    Returns empty list when the event is in progress / ended (and no
+    structured contradiction exists) or when no completion patterns hit.
     """
-    if market.event_start_time is None:
-        return []
-
     now = datetime.now(timezone.utc)
-    if market.event_start_time <= now:
-        # Event is live or past — past-tense scoreline language may legitimately
-        # describe partial / final state, not contamination.
+    structured_says_unfinished = (
+        structured_match is not None
+        and structured_match.status in {"scheduled", "running"}
+    )
+    event_in_future = (
+        market.event_start_time is not None and market.event_start_time > now
+    )
+    if not (event_in_future or structured_says_unfinished):
         return []
 
     haystacks: list[tuple[str, str]] = [("news_summary", news_summary)]
@@ -314,15 +316,69 @@ def _detect_completion_contamination(
     if not hits:
         return []
 
+    # Anchor sentence prioritises the structured source when present (it's
+    # more authoritative than the market's event_start_time, which can be
+    # missing or stale on Polymarket's side).
+    if structured_match is not None and structured_says_unfinished:
+        anchor = (
+            f"PandaScore reports this match as {structured_match.status} "
+            f"(scheduled {structured_match.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')})"
+        )
+    elif market.event_start_time is not None:
+        anchor = (
+            f"this event starts at "
+            f"{market.event_start_time.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"(in the future)"
+        )
+    else:
+        anchor = "the event has not started yet"
+
     locations = ", ".join(label for label, _ in hits)
     sample = hits[0][1]
     warning = (
         f"Past-tense match-result language detected in {locations} despite "
-        f"this event starting at {market.event_start_time.strftime('%Y-%m-%d %H:%M UTC')} "
-        f"(in the future). Sample: \"{sample}\". Treat any final scoreline as "
+        f"{anchor}. Sample: \"{sample}\". Treat any final scoreline as "
         f"a PRIOR encounter, not this market's outcome."
     )
     return [warning]
+
+
+def _format_structured_block(
+    structured_match: StructuredMatchRecord | None,
+) -> str:
+    """Render the optional `STRUCTURED MATCH RECORD` segment for the
+    synthesizer user prompt.
+
+    When present, the synthesizer is told to (a) trust the canonical names
+    + status as authoritative and (b) NOT paraphrase the H2H list back into
+    `prior_match_facts` — the resolver-supplied list will already populate
+    that bucket on the briefing without going through the LLM. Only NEW
+    H2H from the snippets should make it into prior_match_facts.
+
+    Returns empty string when structured_match is None — the template line
+    becomes a single newline, which is fine.
+    """
+    if structured_match is None:
+        return ""
+    sm = structured_match
+    h2h_lines = (
+        "\n".join(
+            f"  - {h.scheduled_at.strftime('%Y-%m-%d')} — "
+            f"winner: {h.winner_name or 'unknown'} ({h.score_summary})"
+            for h in sm.h2h[:5]
+        )
+        or "  - (none)"
+    )
+    return (
+        f"\nSTRUCTURED MATCH RECORD (PandaScore — authoritative):\n"
+        f"  Match status: {sm.status}\n"
+        f"  Canonical teams: {sm.team_a_name} vs {sm.team_b_name}"
+        f"{f' ({sm.match_format})' if sm.match_format else ''}\n"
+        f"  Tournament: {sm.tournament_name or '(unknown)'}\n"
+        f"  Resolver H2H (already attached to briefing — DO NOT paraphrase \n"
+        f"  back into prior_match_facts; only ADD new H2H from snippets if any):\n"
+        f"{h2h_lines}\n"
+    )
 
 
 def _extract_entities(question: str) -> tuple[str, str] | None:
@@ -544,7 +600,10 @@ async def _execute_search(
 # Public API
 # ---------------------------------------------------------------------------
 
-async def build_briefing(market: MarketData) -> BriefingDocument:
+async def build_briefing(
+    market: MarketData,
+    structured_match: StructuredMatchRecord | None = None,
+) -> BriefingDocument:
     """
     Orchestrate Tavily searches and produce a BriefingDocument.
 
@@ -554,6 +613,18 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
       3. Extract key_facts heuristically from raw search content
       4. Call LLM once to synthesise news_summary, side_yes/no_case, key_context
       5. Assemble and return BriefingDocument
+
+    `structured_match` (optional) is the trusted match record from
+    `match_resolver.resolve_match`. When present:
+      - The synthesizer LLM sees a STRUCTURED MATCH RECORD block and is
+        told to treat it as authoritative (and NOT to paraphrase the
+        resolver's H2H into prior_match_facts).
+      - Its `h2h` list is post-merged into BriefingDocument.prior_match_facts
+        so the council always sees those past encounters even if the
+        synthesizer skips them.
+      - Its `status` strengthens the contamination tagger.
+      - It is persisted on the BriefingDocument so the council can render
+        the STRUCTURED MATCH DATA block (Task 2f).
 
     Raises:
         ValueError:   If TAVILY_API_KEY is not configured.
@@ -598,11 +669,13 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
     # synthesizer is reading from the same clock the agents will read from.
     event_start_display, time_status = _compute_time_status(market)
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    structured_block = _format_structured_block(structured_match)
 
     user_msg = _SYNTHESIZER_USER_TMPL.format(
         today=today_str,
         event_start_display=event_start_display,
         time_status=time_status,
+        structured_block=structured_block,
         question=market.question,
         snippets=raw_snippets,
     )
@@ -632,12 +705,36 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
 
     disambiguation_warnings = _detect_completion_contamination(
         market, news_summary, side_yes_case, side_no_case,
+        structured_match=structured_match,
     )
     if disambiguation_warnings:
         logger.warning(
             "Disambiguation: %d warning(s) emitted for market %s",
             len(disambiguation_warnings), market.id,
         )
+
+    # Merge resolver-supplied H2H into prior_match_facts. The resolver's
+    # records are stable-ID and dated, so they go FIRST; the synthesizer's
+    # snippet-derived items follow. Deduplicate naively against the resolver
+    # date tag — synthesizer items repeating the same date+winner are dropped
+    # to avoid showing the same encounter twice.
+    if structured_match is not None and structured_match.h2h:
+        resolver_lines: list[str] = []
+        resolver_signatures: set[str] = set()
+        for h in structured_match.h2h:
+            line = (
+                f"{h.scheduled_at.strftime('%Y-%m-%d')} — "
+                f"winner: {h.winner_name or 'unknown'} ({h.score_summary})"
+                f"{f' @ {h.tournament_name}' if h.tournament_name else ''}"
+            )
+            resolver_lines.append(line)
+            sig = f"{h.scheduled_at.strftime('%Y-%m-%d')}|{(h.winner_name or '').lower()}"
+            resolver_signatures.add(sig)
+        deduped_synth = [
+            f for f in prior_match_facts
+            if not any(sig.split("|", 1)[0] in f for sig in resolver_signatures)
+        ]
+        prior_match_facts = resolver_lines + deduped_synth
 
     return BriefingDocument(
         market=market,
@@ -648,6 +745,7 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
         key_context=key_context,
         prior_match_facts=prior_match_facts,
         disambiguation_warnings=disambiguation_warnings,
+        structured_match=structured_match,
         data_freshness=datetime.now(timezone.utc),
     )
 
