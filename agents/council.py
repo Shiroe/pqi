@@ -51,43 +51,80 @@ _KEY_FACTOR_FIELDS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 
 
-def _compute_event_timing(end_date: datetime) -> str:
+def _compute_event_timing(
+    end_date: datetime,
+    event_start_time: datetime | None = None,
+) -> str:
     """
-    Compute a human-readable timing block from the market end date.
-    Returns a multi-line string with timing category and context note.
+    Compute a human-readable timing block.
+
+    Anchored on `event_start_time` when available (the real-world kickoff),
+    falling back to `end_date` (the market resolution deadline) otherwise.
+    The anchor matters: a CS match scheduled for "in 3 hours" must NOT be
+    described as "resolves in 6 hours" just because the market keeps a
+    grace window after the match — that gap is exactly what made past-tense
+    Tavily snippets look like reality.
+
+    Returns a multi-line block. The first line shows the active anchor;
+    LIVE/IMMINENT also appends an explicit warning that any past-tense
+    coverage must describe a *prior* meeting, not this one.
     """
     now = datetime.now(timezone.utc)
-    delta_seconds = (end_date - now).total_seconds()
+    anchor = event_start_time if event_start_time is not None else end_date
+    anchor_label = "event start" if event_start_time is not None else "market end"
+    delta_seconds = (anchor - now).total_seconds()
     hours = delta_seconds / 3600
 
     if delta_seconds <= 0:
-        category = "EXPIRED"
-        time_str = "already past end date"
+        # Negative delta on event_start anchor means the event has begun (or
+        # finished); on end_date anchor it means the market is past resolution.
+        category = "LIVE_OR_PAST" if event_start_time is not None else "EXPIRED"
+        if event_start_time is not None:
+            elapsed_h = abs(hours)
+            if elapsed_h < 1:
+                time_str = f"started ~{int(abs(delta_seconds) // 60)} minutes ago"
+            elif elapsed_h < 24:
+                time_str = f"started ~{elapsed_h:.1f} hours ago"
+            else:
+                time_str = f"started ~{int(elapsed_h / 24)} days ago"
+        else:
+            time_str = "already past end date"
     elif hours < 3:
         category = "LIVE/IMMINENT"
         if hours < 1:
-            time_str = f"resolves in ~{int(delta_seconds // 60)} minutes"
+            time_str = f"in ~{int(delta_seconds // 60)} minutes"
         else:
-            time_str = f"resolves in ~{hours:.1f} hours"
+            time_str = f"in ~{hours:.1f} hours"
     elif hours < 24:
         category = "TODAY"
-        time_str = f"resolves in ~{hours:.0f} hours"
+        time_str = f"in ~{hours:.0f} hours"
     elif hours < 168:
         days = hours / 24
         category = "THIS WEEK"
-        time_str = f"resolves in ~{days:.1f} days"
+        time_str = f"in ~{days:.1f} days"
     else:
         days = hours / 24
         category = "FUTURE"
-        time_str = f"resolves in ~{int(days)} days"
+        time_str = f"in ~{int(days)} days"
 
-    block = f"EVENT TIMING: {category} ({time_str})"
+    block = f"EVENT TIMING: {category} ({anchor_label} {time_str})"
     if category == "LIVE/IMMINENT":
         block += (
             "\nNOTE: This event is happening NOW or very soon. Price action after "
             "the outcome becomes clear will push shares to ~$0.01/$0.99 before "
-            "official resolution."
+            "official resolution.\n"
+            "TEMPORAL COHERENCE: Because this specific event has not finished, "
+            "any past-tense match coverage in the briefing describes a PRIOR "
+            "encounter between the same parties, not this one. Treat it as "
+            "head-to-head context, never as the outcome of this market."
         )
+    elif category == "TODAY" or category == "THIS WEEK" or category == "FUTURE":
+        if event_start_time is not None:
+            block += (
+                "\nTEMPORAL COHERENCE: This event has not started yet. Any "
+                "past-tense scoreline in the briefing describes a PRIOR "
+                "encounter — not this market."
+            )
     return block
 
 
@@ -148,10 +185,46 @@ def _format_briefing(briefing: BriefingDocument) -> str:
     context_block = "\n".join(f"- {f}" for f in briefing.key_context) or "- (none)"
 
     no_price = 1.0 - m.yes_price
-    timing_block = _compute_event_timing(m.end_date)
+    timing_block = _compute_event_timing(m.end_date, m.event_start_time)
 
     # Extract outcome labels from resolution criteria for explicit clarity
     outcome_labels = _extract_outcome_labels(m.question, m.resolution_criteria)
+
+    # Optional EVENT START line — only when the API surfaced a start time.
+    # When present this is the temporal anchor the agents should reason from,
+    # not the END DATE (which is the resolution deadline, often hours later).
+    event_start_block = ""
+    if m.event_start_time is not None:
+        event_start_block = (
+            f"EVENT START: {m.event_start_time.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        )
+
+    # Optional PRIOR MATCH FACTS — head-to-head history surfaced by the
+    # synthesizer when Tavily snippets describe earlier encounters between the
+    # same parties. Always rendered under a clearly disambiguating header so
+    # the council never reads them as evidence about this market's outcome.
+    prior_match_block = ""
+    if briefing.prior_match_facts:
+        items = "\n".join(f"- {f}" for f in briefing.prior_match_facts)
+        prior_match_block = (
+            "\nPRIOR MATCH FACTS (HEAD-TO-HEAD HISTORY — NOT THIS EVENT):\n"
+            "These describe past encounters between the same parties. "
+            "Use them only as form/H2H context. They are NOT proof that "
+            "this market's event has resolved.\n"
+            f"{items}\n"
+        )
+
+    # Optional DISAMBIGUATION WARNINGS — mechanical alerts produced by
+    # post-LLM contamination detection (synthesizer.py). Always shown when
+    # present; the council MUST treat them as overrides of any conflicting
+    # past-tense claim in the news summary.
+    disambiguation_block = ""
+    if briefing.disambiguation_warnings:
+        items = "\n".join(f"- {w}" for w in briefing.disambiguation_warnings)
+        disambiguation_block = (
+            "\nDISAMBIGUATION WARNINGS (READ FIRST — OVERRIDES NEWS SUMMARY):\n"
+            f"{items}\n"
+        )
 
     # Price history block (conditional — only if CLOB data was fetched)
     price_history_block = ""
@@ -195,8 +268,10 @@ def _format_briefing(briefing: BriefingDocument) -> str:
         f"CURRENT MARKET PRICES: YES = {m.yes_price:.0%}  |  NO = {no_price:.0%}"
         f"  (buying YES costs ${m.yes_price:.2f}/share; buying NO costs ${no_price:.2f}/share)\n"
         f"CATEGORY: {m.category}\n"
+        f"{event_start_block}"
         f"END DATE: {m.end_date.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"{timing_block}\n"
+        f"{disambiguation_block}"
         f"{price_history_block}"
         f"VOLUME (USD): ${m.volume_usd:,.0f}\n"
         f"\nRESOLUTION CRITERIA:\n{m.resolution_criteria}\n"
@@ -205,6 +280,7 @@ def _format_briefing(briefing: BriefingDocument) -> str:
         f"\nCASE FOR YES:\n{yes_block}\n"
         f"\nCASE FOR NO:\n{no_block}\n"
         f"\nKEY CONTEXT:\n{context_block}\n"
+        f"{prior_match_block}"
         f"\nDATA FRESHNESS: {briefing.data_freshness.strftime('%Y-%m-%d %H:%M UTC')}\n"
     )
 

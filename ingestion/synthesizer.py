@@ -106,13 +106,44 @@ Generate exactly {num_queries} search queries as JSON:
 # LLM prompts for synthesis (unchanged)
 # ---------------------------------------------------------------------------
 
-_SYNTHESIZER_SYSTEM = (
-    "You are a research assistant synthesizing news search results into structured "
-    "market intelligence for a prediction market analyst. "
-    "Respond with ONLY a valid JSON object — no markdown fences, no explanation."
-)
+_SYNTHESIZER_SYSTEM = """\
+You are a research assistant synthesizing news search results into structured \
+market intelligence for a prediction market analyst.
+
+TEMPORAL COHERENCE — READ FIRST:
+Search engines surface past coverage of recurring matchups (Team A vs Team B \
+played multiple times over a season). When a snippet describes a *completed* \
+encounter that does not match the upcoming event under analysis, you must NOT \
+present it as evidence about how the upcoming event resolved.
+
+Rules:
+- The user message gives you TODAY (current UTC date) and the EVENT START \
+time / status. Trust those over any date a snippet implies.
+- If the event has NOT yet started (status FUTURE / THIS WEEK / IMMINENT) and \
+a snippet contains a final scoreline (e.g. "Team A won 2-0", "Team A defeated \
+Team B"), that snippet describes a PRIOR meeting. Route it to \
+`prior_match_facts`. Do NOT route it to `news_summary`, `side_yes_case`, \
+or `side_no_case` as evidence about this market's resolution.
+- If the event status is LIVE and a snippet shows a partial score, you may \
+treat it as live state — but only if the snippet is dated within the event \
+window. Anything older is prior-match history.
+- It is ALWAYS safe to treat scoreline snippets as prior context. The cost \
+of a false positive is small (an extra H2H bullet); the cost of a false \
+negative (treating an old result as the current outcome) is catastrophic.
+
+DEDUPLICATION:
+A single underlying fact often appears across multiple snippets in slightly \
+different wording. Do not restate the same fact in multiple buckets. If a \
+fact belongs in `prior_match_facts`, do not also place a paraphrase of it \
+in `key_context` or `side_*_case`. Each bucket should add new information.
+
+Respond with ONLY a valid JSON object — no markdown fences, no explanation."""
 
 _SYNTHESIZER_USER_TMPL = """\
+TODAY (UTC): {today}
+EVENT START: {event_start_display}
+EVENT STATUS: {time_status}
+
 Market question: {question}
 
 Raw search results:
@@ -121,24 +152,31 @@ Raw search results:
 From the above, extract:
 1. news_summary: 3-5 sentence neutral summary of the current situation. \
 For competitive markets (e.g. Team A vs Team B), summarize both sides' \
-positions, not just one.
+positions, not just one. If the event has not started yet, summarize the \
+*setup* — do NOT narrate a result.
 2. side_yes_case: up to 5 short strings — evidence and arguments favoring \
 the YES outcome. For competitive markets, include BOTH the YES-side's \
-strengths AND the NO-side's weaknesses.
+strengths AND the NO-side's weaknesses. Do not cite past final scorelines \
+as evidence here unless this market itself is about a past event.
 3. side_no_case: up to 5 short strings — evidence and arguments favoring \
-the NO outcome. For competitive markets, include BOTH the NO-side's \
-strengths AND the YES-side's weaknesses.
+the NO outcome. Same rule on past scorelines applies.
 4. key_context: up to 5 short strings — contextual factors that affect the \
 outcome but aren't arguments for either side (e.g. tournament format, \
-match stakes, venue, head-to-head record, recent form trajectory, \
-game version/patch, regulatory timeline).
+match stakes, venue, recent form trajectory, game version/patch, \
+regulatory timeline). Do NOT duplicate prior_match_facts here.
+5. prior_match_facts: up to 5 short strings — completed prior encounters \
+between the same parties, each tagged with its date when known \
+(e.g. "2024-09-12 — TeamA beat TeamB 2-0 at IEM Cologne"). EMPTY LIST if \
+this market refers to its own past resolution, or if no prior matchups \
+appear in the snippets.
 
 Return exactly this JSON (no markdown fences):
 {{
   "news_summary": "...",
   "side_yes_case": ["...", "..."],
   "side_no_case": ["...", "..."],
-  "key_context": ["...", "..."]
+  "key_context": ["...", "..."],
+  "prior_match_facts": ["...", "..."]
 }}"""
 
 
@@ -179,13 +217,14 @@ def _extract_key_facts(search_results: list[dict]) -> list[str]:
 
 def _parse_llm_response(
     response: str,
-) -> tuple[str, list[str], list[str], list[str]]:
+) -> tuple[str, list[str], list[str], list[str], list[str]]:
     """
     Parse the LLM JSON response into
-    (news_summary, side_yes_case, side_no_case, key_context).
+    (news_summary, side_yes_case, side_no_case, key_context, prior_match_facts).
 
     Strips markdown fences for Ollama compatibility. Falls back gracefully
-    if JSON parsing fails.
+    if JSON parsing fails. `prior_match_facts` is empty-list when the LLM
+    omits the key (e.g. legacy / non-competitive markets).
     """
     # Strip markdown fences (```json ... ```) if the model adds them
     text = re.sub(r"```(?:json)?\s*|\s*```", "", response).strip()
@@ -202,10 +241,88 @@ def _parse_llm_response(
         key_context = [
             s.strip() for s in data.get("key_context", []) if str(s).strip()
         ]
-        return news_summary, side_yes_case, side_no_case, key_context
+        prior_match_facts = [
+            s.strip() for s in data.get("prior_match_facts", []) if str(s).strip()
+        ]
+        return news_summary, side_yes_case, side_no_case, key_context, prior_match_facts
     except (json.JSONDecodeError, AttributeError):
         logger.warning("Could not parse LLM JSON response; using raw text as summary")
-        return response[:500].strip(), [], [], []
+        return response[:500].strip(), [], [], [], []
+
+
+# Past-tense scoreline / completion patterns. Conservative — must contain a
+# clear final-result verb AND either a numeric scoreline (2-0, 16-13) or a
+# past-tense win/defeat verb. Tuned to avoid matching "Team A beat the spread"
+# or "Team A defeated expectations".
+_COMPLETION_PATTERNS = [
+    re.compile(r"\bwon\s+\d+[-:]\d+", re.IGNORECASE),
+    re.compile(r"\bbeat\s+\w[\w\s]{0,30}?\s+\d+[-:]\d+", re.IGNORECASE),
+    re.compile(r"\bdefeated\s+\w[\w\s]{0,30}?\s+\d+[-:]\d+", re.IGNORECASE),
+    re.compile(r"\b\d+[-:]\d+\s+(?:victory|win|loss|defeat)\b", re.IGNORECASE),
+    re.compile(r"\bfinal\s+score\b", re.IGNORECASE),
+    re.compile(r"\bsweep(?:ed|s)\s+\w[\w\s]{0,30}?\s+\d+[-:]\d+", re.IGNORECASE),
+]
+
+
+def _detect_completion_contamination(
+    market: MarketData,
+    news_summary: str,
+    side_yes_case: list[str],
+    side_no_case: list[str],
+) -> list[str]:
+    """
+    Mechanical safety net for the temporal coherence rule in
+    `_SYNTHESIZER_SYSTEM`. Returns a list of disambiguation warnings.
+
+    Trigger condition: the market's `event_start_time` is in the future AND
+    one of the synthesised buckets (news_summary / side_*_case) contains
+    text matching a past-tense final-result pattern.
+
+    The warning is intentionally generic — the council's job is to consult
+    `prior_match_facts` and the EVENT TIMING block to decide what's stale.
+    The warning's role is just to flag that the LLM may have failed to
+    fully separate a past encounter from this market's setup.
+
+    Returns empty list when the event is in progress, has ended, or no
+    contamination is detected — which should be the common case once the
+    system prompt does its job.
+    """
+    if market.event_start_time is None:
+        return []
+
+    now = datetime.now(timezone.utc)
+    if market.event_start_time <= now:
+        # Event is live or past — past-tense scoreline language may legitimately
+        # describe partial / final state, not contamination.
+        return []
+
+    haystacks: list[tuple[str, str]] = [("news_summary", news_summary)]
+    haystacks.extend((f"side_yes_case[{i}]", s) for i, s in enumerate(side_yes_case))
+    haystacks.extend((f"side_no_case[{i}]", s) for i, s in enumerate(side_no_case))
+
+    hits: list[tuple[str, str]] = []
+    for label, text in haystacks:
+        if not text:
+            continue
+        for pat in _COMPLETION_PATTERNS:
+            m = pat.search(text)
+            if m:
+                snippet = text[max(0, m.start() - 20) : m.end() + 20]
+                hits.append((label, snippet.strip()))
+                break  # one hit per haystack is enough for the warning
+
+    if not hits:
+        return []
+
+    locations = ", ".join(label for label, _ in hits)
+    sample = hits[0][1]
+    warning = (
+        f"Past-tense match-result language detected in {locations} despite "
+        f"this event starting at {market.event_start_time.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"(in the future). Sample: \"{sample}\". Treat any final scoreline as "
+        f"a PRIOR encounter, not this market's outcome."
+    )
+    return [warning]
 
 
 def _extract_entities(question: str) -> tuple[str, str] | None:
@@ -477,7 +594,15 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
     )
     raw_snippets = raw_snippets[:config.TAVILY_SNIPPET_CAP]
 
+    # Reuse the same temporal anchors the Search Architect saw, so the
+    # synthesizer is reading from the same clock the agents will read from.
+    event_start_display, time_status = _compute_time_status(market)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     user_msg = _SYNTHESIZER_USER_TMPL.format(
+        today=today_str,
+        event_start_display=event_start_display,
+        time_status=time_status,
         question=market.question,
         snippets=raw_snippets,
     )
@@ -485,9 +610,13 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
     logger.debug("Calling LLM for synthesis (snippet_chars=%d)", len(raw_snippets))
     llm_response = await llm_chat(system=_SYNTHESIZER_SYSTEM, user=user_msg)
 
-    news_summary, side_yes_case, side_no_case, key_context = _parse_llm_response(
-        llm_response
-    )
+    (
+        news_summary,
+        side_yes_case,
+        side_no_case,
+        key_context,
+        prior_match_facts,
+    ) = _parse_llm_response(llm_response)
 
     # Ensure non-empty fields — fallback if LLM returned empty
     if not news_summary:
@@ -498,6 +627,17 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
         side_no_case = ["Insufficient data to build NO case."]
     if not key_context:
         key_context = ["No additional context available."]
+    # prior_match_facts: empty-list is the correct default — many markets
+    # have no prior encounters between named parties. Do not synthesize one.
+
+    disambiguation_warnings = _detect_completion_contamination(
+        market, news_summary, side_yes_case, side_no_case,
+    )
+    if disambiguation_warnings:
+        logger.warning(
+            "Disambiguation: %d warning(s) emitted for market %s",
+            len(disambiguation_warnings), market.id,
+        )
 
     return BriefingDocument(
         market=market,
@@ -506,6 +646,8 @@ async def build_briefing(market: MarketData) -> BriefingDocument:
         side_yes_case=side_yes_case,
         side_no_case=side_no_case,
         key_context=key_context,
+        prior_match_facts=prior_match_facts,
+        disambiguation_warnings=disambiguation_warnings,
         data_freshness=datetime.now(timezone.utc),
     )
 

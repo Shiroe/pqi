@@ -86,6 +86,18 @@ that condition occurring in the real world, using the briefing data.
 Constraints:
 - Read the resolution criteria carefully for the CONDITION that must be true.
 - Assess the probability of that condition based on the briefing data.
+- TEMPORAL COHERENCE CHECK (highest priority): cross-reference the EVENT \
+TIMING block, the DISAMBIGUATION WARNINGS block (if present), and the \
+PRIOR MATCH FACTS block (if present) against the news_summary and side \
+cases. If EVENT TIMING says the event has NOT started yet, then any \
+final-scoreline language in the briefing describes a PRIOR encounter and \
+is NOT proof that the resolution condition has been met. In this case \
+your probability_score must reflect the *probability the event will satisfy \
+the condition*, not certainty that it already has. If the briefing is \
+internally incoherent (timing says "future", news says "Team X won"), \
+trust the timing and downgrade confidence_yes / confidence_no by 10-20 \
+points to reflect data-quality concerns, then state the contradiction in \
+key_technical_risk.
 - Resolution mechanism risk (oracle delay, source unavailability) is a \
 SECONDARY concern. It should lower your confidence scores by 5-15 points \
 at most, NOT dominate your probability estimate.
