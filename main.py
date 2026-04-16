@@ -523,12 +523,33 @@ async def _run_analysis(
     current market so the council sees the right resolution criteria.
     """
     from pqi.ingestion.synthesizer import build_briefing
+    from pqi.ingestion.match_resolver import resolve_match
     from pqi.agents.council import run_council
     from pqi.scoring import build_council_result
     from pqi.cache import get_cached, store_result
 
+    # Resolve the structured match record FIRST so it can both inform the
+    # cache invalidation key (status changes invalidate even when price
+    # barely moves) and feed the synthesizer / council. Resolver returns
+    # None for non-esports markets, missing keys, low fuzzy confidence,
+    # or any provider-side failure — the pipeline is unchanged in those
+    # cases (Tavily-only briefing, no STRUCTURED MATCH DATA block).
+    structured_match = None
+    if shared_briefing is None:
+        try:
+            structured_match = await resolve_match(market)
+        except Exception as exc:
+            logger.warning("Match resolver failed for %s: %s", market.id, exc)
+        if structured_match is not None:
+            console.print(
+                f"[cyan]PandaScore: {structured_match.team_a_name} vs "
+                f"{structured_match.team_b_name} ({structured_match.status}, "
+                f"fuzzy={structured_match.fuzzy_score})[/cyan]"
+            )
+    structured_status = structured_match.status if structured_match else None
+
     if not no_cache:
-        cached = await get_cached(market.id, market.yes_price)
+        cached = await get_cached(market.id, market.yes_price, structured_status)
         if cached is not None:
             console.print("[green]Cache hit — using previous council result.[/green]")
             return cached
@@ -540,7 +561,7 @@ async def _run_analysis(
         briefing = shared_briefing.model_copy(update={"market": market})
     else:
         console.print(f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}")
-        briefing = await build_briefing(market)
+        briefing = await build_briefing(market, structured_match=structured_match)
     console.print(f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]")
 
     # Enrich briefing with CLOB price history (non-fatal)
