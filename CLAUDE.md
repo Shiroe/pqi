@@ -28,6 +28,8 @@ Polymarket Gamma API → Synthesizer Agent (Briefing Doc) → Council of Seven
 | Market data   | Polymarket Gamma API   | Free, public, no auth needed            |
 | Price history | Polymarket CLOB API    | Free, public, no auth for read-only     |
 | News/search   | Tavily API             | Free tier 1k searches/mo                |
+| Esports data  | PandaScore API         | Free tier 1k req/hr; structured match status / scoreline / form (optional, esports only) |
+| Fuzzy match   | `rapidfuzz`            | Team-name resolution (Polymarket → PandaScore) |
 | Validation    | Pydantic v2            | All inter-module data                   |
 | DB (Phase 2)  | SQLite via `aiosqlite` | Local price history cache               |
 
@@ -70,8 +72,13 @@ cache_create=…` confirms whether the cache engaged. Kill switch:
 [polymarket.py] Fetch top N active markets from Gamma API
 → returns List[MarketData] (includes clob_token_ids from clobTokenIds field)
 [main.py] Display market list → user picks one (or top by volume)
-[synthesizer.py] Given MarketData, run Tavily searches on the event
-→ produces BriefingDocument (structured Pydantic model)
+[match_resolver.py] (esports only, non-fatal) Resolve the market to a PandaScore
+  match via rapidfuzz fuzzy team-name matching → StructuredMatchRecord with
+  authoritative status (scheduled/running/finished), scheduled_at, final_score,
+  team form, H2H. Pipeline continues with structured_match=None on any failure.
+[synthesizer.py] Given MarketData (+ optional StructuredMatchRecord), run Tavily
+  searches on the event → produces BriefingDocument with structured_match field
+  + cross-source contamination tagger that anchors on PandaScore status
 [clob.py] Fetch YES + NO token price histories from CLOB API in parallel (1w hourly)
 → compute per-side SidePriceHistory: weighted avg, direction, volatility, sharp moves
 → wrap in PriceHistory(yes=..., no=...) → inject into BriefingDocument.price_history
@@ -126,6 +133,33 @@ class BriefingDocument(BaseModel):
     key_context: list[str]    # format, stakes, head-to-head, venue, etc.
     data_freshness: datetime
     price_history: PriceHistory | None  # CLOB trend data (None if fetch failed)
+    structured_match: StructuredMatchRecord | None  # PandaScore (esports only; None on fetch fail or non-esports)
+
+class TeamForm(BaseModel):
+    wins: int                 # last-N completed matches
+    losses: int
+
+class H2HMatch(BaseModel):
+    match_id: str
+    scheduled_at: datetime
+    tournament_name: str | None
+    final_score: str | None
+    winner_name: str | None
+
+class StructuredMatchRecord(BaseModel):
+    match_id: str
+    team_a_name: str          # canonical PandaScore name
+    team_b_name: str
+    status: str               # "scheduled" | "running" | "finished"
+    scheduled_at: datetime    # authoritative kickoff
+    tournament_name: str | None
+    match_format: str | None  # e.g. "BO3"
+    final_score: str | None   # only when finished
+    winner_name: str | None   # only when finished
+    team_a_recent_form: TeamForm | None
+    team_b_recent_form: TeamForm | None
+    h2h: list[H2HMatch]       # prior encounters with stable IDs
+    fuzzy_score: int          # 0–100 rapidfuzz min(token_set_ratio_a, token_set_ratio_b)
 
 class AgentVerdict(BaseModel):
     agent_name: str           # e.g. "Rules Lawyer"
@@ -407,7 +441,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 27 — Anthropic prompt caching enabled in `pqi/llm/client.py` (system prompt cached as ephemeral block, 5-min TTL); shadow data still accumulating from session 26]
+**Last updated:** [session 28 — temporal disambiguation + PandaScore structured-data integration shipped end-to-end. Fixes the council's temporal-blindness bug where past-tense H2H scorelines were paraphrased as the current match's outcome. Three-layer defense: Pydantic contract → LLM system prompt → mechanical regex fallback. Esports-only path; non-esports markets unaffected.]
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -472,7 +506,111 @@ preserved it: every addition is metadata-only or upstream of the
 aggregator. `CouncilResult.from_council_verdicts()` math unchanged
 since session 23.
 
-### Session 27 (this session)
+### Session 28 (this session)
+
+Bug-fix session. The CS market "Will 1WIN beat Nuclear TigeRES?"
+returned a 99% YES verdict at HIGH confidence with the council
+asserting the match had "already ended 2-0" — the match was
+actually scheduled for 2h40m in the future. Past-tense H2H
+scorelines from Tavily snippets were being paraphrased into
+`news_summary` / `side_yes_case` as if they were the current
+match's outcome. The council had no temporal anchor and no
+authoritative status field to ground against.
+
+Fixed in two steps (15 sub-tasks total, 8 sub-commits).
+
+**Step 1 — temporal disambiguation (commit `c610e05`).**
+Mechanical safety net + LLM-side guidance, no new dependencies:
+
+- Synthesizer system prompt: explicit "future tense for upcoming
+  matches, past tense only for verified completed matches" rule
+  with three concrete examples.
+- Synthesizer cross-source contamination tagger: regex scans
+  `news_summary` + `side_yes_case` + `side_no_case` for past-tense
+  scoreline patterns (e.g. `"won 2-1"`, `"defeated 2-0"`,
+  `"final score 2-0"`) and, when `event_start_time > now()`,
+  rewrites the suspect bucket with a bracketed `[NOTE: prior
+  encounter, not current match]` prefix.
+- Council briefing block: new EVENT TEMPORAL DISAMBIGUATION
+  section in `_format_briefing()` placed first (highest priority).
+  Renders `event_start_time`, status (UPCOMING/LIVE/COMPLETED based
+  on time), explicit instruction to treat the briefing as
+  pre-match analysis when status is UPCOMING.
+
+**Step 2 — PandaScore structured-data integration (commits 2a–2g,
+8 sub-commits, ~1090 LOC across 8 files).** Authoritative
+ground-truth layer for esports markets:
+
+- `pqi/models.py` (2a): `StructuredMatchRecord`, `H2HMatch`,
+  `TeamForm` Pydantic contracts; `BriefingDocument.structured_match
+  : StructuredMatchRecord | None` field. Additive only — non-esports
+  markets get `None`.
+- `pqi/config.py` + `.env.example` + `requirements.txt` (2b):
+  `PANDASCORE_API_KEY`, `PANDASCORE_ENABLED` (default `true`),
+  `PANDASCORE_FUZZY_THRESHOLD` (default `75`),
+  `PANDASCORE_WINDOW_HOURS` (default `48`),
+  `PANDASCORE_RECENT_FORM_COUNT` (default `5`). Literal
+  `PANDASCORE_BASE_URL = "https://api.pandascore.co"` in
+  `config.py` only. New dep: `rapidfuzz>=3.0`.
+- `pqi/ingestion/pandascore.py` (2c, NEW, ~230 LOC): async httpx
+  client with `list_videogames`, `list_matches_in_window`,
+  `get_match`, `get_team_past_matches`, `get_h2h`. Bearer-token
+  auth, per-request timeout, all paths gracefully return `[]` /
+  `None` on HTTP failure (non-fatal).
+- `pqi/ingestion/match_resolver.py` (2d, NEW, ~490 LOC):
+  orchestrates the resolver. `GAME_MAPPING` covers the categories
+  PQI sees in the wild (CS, Valorant, LoL, Dota 2, R6 Siege).
+  `_extract_parties` parses two team names from
+  `MarketData.question` via `vs|versus` split. `_score_candidate`
+  uses `min(fuzz.token_set_ratio(a, cand_a),
+  fuzz.token_set_ratio(b, cand_b))` for symmetric matching.
+  `resolve_match` ties it together: enumerate candidates in time
+  window, pick best fuzzy match above threshold, fan out parallel
+  sub-fetches for team form + H2H, build the record.
+- `pqi/ingestion/synthesizer.py` (2e): threads `structured_match`
+  through `build_briefing()`. Renders STRUCTURED MATCH RECORD
+  block in the synth's user prompt with explicit "DO NOT paraphrase
+  these fields" guidance. Cross-source tagger upgraded — now
+  triggers when `structured_match.status in {"scheduled",
+  "running"}` *in addition to* the time-based check (cross-source
+  corroboration). Resolver-first H2H dedup in `build_briefing()`:
+  resolver's stable-ID matches go into `prior_match_facts` first,
+  then synthesizer-snippet H2H is dedup'd via date-signature
+  substring match.
+- `pqi/agents/council.py` (2f): new STRUCTURED MATCH DATA block
+  in `_format_briefing()`, placed after disambiguation block,
+  before news. Renders canonical names, format, status (uppercase),
+  scheduled time, tournament, conditional final_score+winner OR
+  scheduled/running NOTE, recent form summaries, fuzzy confidence.
+- `pqi/cache.py` + `pqi/main.py` (2g): cache schema gained
+  `structured_status TEXT` column with defensive `ALTER TABLE`
+  migration. `get_cached(market_id, current_yes_price,
+  current_structured_status)` now invalidates on status mismatch
+  (NULL == NULL works for non-esports). `_run_analysis()` calls
+  `resolve_match(market)` before cache lookup, threads
+  `structured_match` to `build_briefing` and `structured_status`
+  to `get_cached`. All non-fatal — pipeline continues with
+  `structured_match=None` on resolver failure.
+
+**Block ordering in council briefing (priority order, top to
+bottom):** DISAMBIG → STRUCTURED → PRICE_HISTORY → NEWS → PRIOR
+MATCH FACTS. Earlier blocks override later ones in the agent's
+attention.
+
+**Cache invalidation expansion:** previously price-delta only.
+Now also invalidates on PandaScore status transitions
+(scheduled → running → finished) — high-information events where
+price often barely budges through huge state changes (live market
+thin/volatile). Non-esports markets are unaffected (NULL == NULL).
+
+**Verification (Task 2h):** end-to-end audit — H2H dedup correct
+(resolver IEM kept once, BLAST Spring from synth survives),
+contamination tagger fires + anchors on PandaScore status, block
+order DISAMBIG(837) → STRUCTURED(1182) → NEWS(1764) → PRIOR(1993),
+TeamForm renders in council briefing, Step-1 regression preserved
+when no resolver result, `_run_analysis` wires resolver + cache key.
+
+### Session 27
 
 Cost-optimization pass after analyzing
 `docs/claude_api_tokens_2026_04.csv` (13-day Anthropic console
@@ -545,6 +683,18 @@ No code revert needed.
   (5-min TTL) when `ANTHROPIC_PROMPT_CACHE_ENABLED=true`.
   Cache-hit/write counts logged at DEBUG via `usage.cache_*`. No
   behavioral change to outputs.
+- **Temporal disambiguation + PandaScore structured-data layer**
+  (session 28): three-layer defense against the council
+  paraphrasing past-tense H2H scorelines as the current match's
+  outcome. Synthesizer system prompt enforces tense rules; mechanical
+  regex tagger annotates contaminated buckets when status is
+  upcoming (cross-source-corroborated by PandaScore when available);
+  council briefing now leads with EVENT TEMPORAL DISAMBIGUATION
+  followed by STRUCTURED MATCH DATA (PandaScore canonical names,
+  status, scheduled time, recent form, fuzzy confidence). Esports
+  only — opt out via `PANDASCORE_ENABLED=false`. Non-esports markets
+  unaffected. Cache schema extended with `structured_status` column
+  for status-aware invalidation.
 - Two-sided CLOB price history enrichment (YES + NO independently, non-fatal)
 - History system: full-fidelity persistence, resolution sync, per-agent accuracy, postmortem
 - SQLite cache with price-delta invalidation
@@ -566,68 +716,80 @@ Also read CTO_Agent.md — it frames the reviewer posture (contract-as-law,
 parallelism, bias-as-feature, statistical skepticism) for this project.
 
 Detailed reference material lives in docs/:
-- docs/api-reference.md — API endpoints, params, response formats
+- docs/api-reference.md — API endpoints, params, response formats (now includes PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 26)
+- docs/session-log.md — per-session changelog (current through session 28)
 - docs/roadmap.md — future work priorities, themed
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped session 26)
 
-## Session 27 context (completed)
-- Anthropic prompt caching enabled in pqi/llm/client.py.
-  System prompt wrapped as a single ephemeral cache block
-  (5-min TTL) when ANTHROPIC_PROMPT_CACHE_ENABLED=true (default).
-  Same chat() signature, same model behavior — caching is
-  server-side and invisible to callers.
-- Files touched: pqi/config.py (new
-  ANTHROPIC_PROMPT_CACHE_ENABLED bool), .env.example (documented),
-  pqi/llm/client.py (_chat_anthropic now takes system as a list
-  with cache_control + logs usage.cache_* counts at DEBUG).
-- Verification protocol: run any analyze command with logging
-  at DEBUG and watch for the line
-  `anthropic usage: input=… cache_read=… cache_create=…`.
-  First call should show cache_create>0; subsequent calls within
-  5 min on the same persona should show cache_read>0. If both
-  stay 0, the prefix is below the model's minimum cacheable size
-  (~1024–2048 tokens for Haiku) and we'll need to enlarge the
-  cached prefix (e.g. push the briefing into the system message,
-  or restructure with multiple breakpoints).
-- Driver: docs/claude_api_tokens_2026_04.csv showed all
-  cache_write_*/cache_read columns at 0 across 13 days while
-  daily token volume crept toward $80/mo run-rate (4× over the
-  CLAUDE.md $20/mo Tech Stack target).
-- No tests changed. Smoke-test `python -c "from pqi.llm import
-  client; from pqi import config; print(config.ANTHROPIC_PROMPT_CACHE_ENABLED)"`
-  passes (run from one level above pqi/).
+## Session 28 context (completed)
+- Bug fix for the council temporal-blindness bug: a CS market
+  ("1WIN vs Nuclear TigeRES") returned 99% YES at HIGH confidence
+  with the council asserting the match had "already ended 2-0";
+  in reality the match was scheduled 2h40m in the future. Past-tense
+  H2H scorelines from Tavily snippets were leaking into news_summary
+  / side_yes_case as if they were the current match outcome.
+- Two-step fix, 15 sub-tasks total, 8 sub-commits:
+  • Step 1 (commit c610e05): mechanical safety net + LLM-side
+    guidance. Synthesizer system prompt enforces tense rules.
+    Synthesizer mechanical regex tagger annotates suspect buckets
+    when event_start_time > now() with `[NOTE: prior encounter,
+    not current match]`. Council briefing leads with EVENT TEMPORAL
+    DISAMBIGUATION block.
+  • Step 2 (commits 0b7fe72, a61321c, 3068f45, 255a732, e6ac7eb,
+    05b51cf, 9a1bc9d): PandaScore structured-data integration.
+    StructuredMatchRecord/H2HMatch/TeamForm contracts in models.py.
+    PandaScore async http client (ingestion/pandascore.py, NEW).
+    Match resolver with rapidfuzz fuzzy matching using
+    min(token_set_ratio_a, token_set_ratio_b) symmetric scoring
+    (ingestion/match_resolver.py, NEW). Synthesizer threads
+    structured_match through build_briefing + cross-source tagger
+    upgraded to corroborate via PandaScore status. Council briefing
+    renders STRUCTURED MATCH DATA block (canonical names, status,
+    scheduled time, recent form, fuzzy confidence). Cache schema
+    extended with structured_status TEXT column + defensive ALTER
+    TABLE migration; cache invalidates on status transitions.
+- Block ordering in council briefing (highest to lowest priority):
+  DISAMBIG → STRUCTURED → PRICE_HISTORY → NEWS → PRIOR MATCH FACTS.
+- Files touched: 8 total. New: ingestion/pandascore.py (~230 LOC),
+  ingestion/match_resolver.py (~490 LOC). Modified: models.py,
+  config.py, .env.example, requirements.txt (+rapidfuzz>=3.0),
+  ingestion/synthesizer.py, agents/council.py, cache.py, main.py.
+- 5 new env vars: PANDASCORE_API_KEY (required for esports
+  enrichment; pipeline degrades gracefully without it),
+  PANDASCORE_ENABLED (true), PANDASCORE_FUZZY_THRESHOLD (75),
+  PANDASCORE_WINDOW_HOURS (48), PANDASCORE_RECENT_FORM_COUNT (5).
+- Non-fatal everywhere: any resolver failure → structured_match=None
+  and pipeline continues. Non-esports markets unaffected (resolver's
+  GAME_MAPPING returns None for unknown categories).
+- Verification (Task 2h): full end-to-end audit passed all 6 checks.
 
-## Session 26 context (completed)
+## Session 27 context (still relevant)
+- Anthropic prompt caching live in pqi/llm/client.py. System prompt
+  wrapped as a single ephemeral cache block (5-min TTL) when
+  ANTHROPIC_PROMPT_CACHE_ENABLED=true (default). Same chat() signature.
+- Verification protocol: LOG_LEVEL=DEBUG and watch for
+  `anthropic usage: input=… cache_read=… cache_create=…`.
+  First call cache_create>0; subsequent calls within 5 min on
+  the same persona should show cache_read>0. If both stay 0
+  the prefix is below the model's min cacheable size (~1024–2048
+  tokens) and we'll need to enlarge it.
+
+## Session 26 context (still relevant)
 - Option B steps 1–4 shipped — steps 5 (shadow backtest) and 6
   (scoring integration) PENDING. Never wire probability_no into
   the aggregator in CouncilResult.from_council_verdicts() until
   step 5 passes pre-registered acceptance criteria.
-- Step 1: AgentVerdict.probability_yes / probability_no /
-  probability_source + model_validator auto-fill; history.py
-  applies the same fallback on load; scripts/b_backfill.py
-  rewrote ~/.pqi/history.jsonl (1860 verdicts → synthetic_mirror,
-  .preB.bak retained). Zero API calls.
-- Step 2: council._parse_verdict reads optional
-  probability_no_score int (0–100). Tags `independent` when
-  present, logs drift warning at |p_yes + p_no − 1| > 0.3,
-  lenient-by-design (never rejects). Falls back to
-  synthetic_mirror on missing/malformed.
-- Step 3: SHARED_PREAMBLE TWO-SIDED PROBABILITY block (conditional
-  on output-format containing both fields). All 7 personas emit
-  probability_no_score. Order: rules_lawyer → statistician →
-  sentiment → specialist → contrarian → bull → bear. Bull/Bear
-  carry explicit anti-mirror framing.
-- Step 4: analytics.option_b_overview / option_b_per_agent
-  compute per-agent |drift|, signed drift, YES/NO Brier on
-  resolved rows. Surfaced in `pqi history stats` when any
-  independent verdicts exist. Phase thresholds: phase1≥10,
-  phase2≥30. Read-only.
-- API cost impact: ~$0.00025/run (negligible).
-- Shadow status at session close: 9 independent verdicts across
-  all 7 agents, max |drift| 0.12, 0 resolved. Autonomy landing —
-  no mirror collapse, no (0.5, 0.5) degeneracy.
+- AgentVerdict.probability_yes / probability_no / probability_source
+  with model_validator auto-fill. Council parser tags `independent`
+  when probability_no_score is present in the LLM response, logs
+  drift warning at |p_yes + p_no − 1| > 0.3 (never rejects).
+- All 7 personas emit probability_no_score. Bull/Bear carry explicit
+  anti-mirror framing.
+- analytics.option_b_overview / option_b_per_agent surface in
+  `pqi history stats` when any independent verdicts exist.
+- Shadow status at session 26 close: 9 independent verdicts across
+  all 7 agents, max |drift| 0.12, 0 resolved.
 
 ## Background (kept from session 25)
 - A.1 Option A closed: probability-transform candidates all
@@ -642,21 +804,29 @@ Detailed reference material lives in docs/:
   AGENT_WEIGHT_SHRINK (2.0).
 
 ## PRIORITY options (pick one with the user)
-- **Verify session-27 cache.** Quick first-priority sanity
-  check: run `LOG_LEVEL=DEBUG python -m pqi.main --top` once,
-  scan stdout for the `anthropic usage: …` lines, confirm
-  cache_create>0 on the first agent and cache_read>0 on
-  repeats. If cache_create stays 0 across all 7 agents, the
-  prefix is too short — see "Caveat to monitor" in Current
-  State for the next step.
+- **Verify session-28 PandaScore + temporal disambiguation
+  end-to-end.** Get a PANDASCORE_API_KEY (free tier) into .env,
+  then run `LOG_LEVEL=INFO python -m pqi.main -c counter-strike
+  --live -v 0` (or any esports event). Confirm: (a) the cyan
+  "PandaScore: TeamA vs TeamB (status, fuzzy=NN)" line appears,
+  (b) the council briefing in DEBUG includes the EVENT TEMPORAL
+  DISAMBIGUATION + STRUCTURED MATCH DATA blocks, (c) on a SCHEDULED
+  match the council does not assert past-tense outcomes. If a
+  resolver match cannot be found (low fuzzy_score, name mismatch),
+  the pipeline still works — structured_match is just None and the
+  briefing falls back to event_start_time-only disambiguation.
+- **Verify session-27 cache.** LOG_LEVEL=DEBUG, watch
+  `anthropic usage: …` lines. cache_create>0 on first agent;
+  cache_read>0 on repeats within 5 min. If cache_create=0 across
+  all 7 agents, prefix is too short — see "Caveat to monitor" in
+  the session-27 entry.
 - **Option B step 5 — shadow backtest.** GATED: needs ~100–150
-  independent resolved rows. At session-26 close we had 0
-  resolved. Check `pqi history stats` output; if the per-agent
-  `n_res` column is still near-zero, defer. When ready, land
-  `scripts/b_shadow_backtest.py` mirroring scripts/a1_backtest.py's
-  structure (chronological 70/30 split, bootstrap ΔBrier CI,
-  pre-registered criteria). Candidate B-math list lives in
-  docs/option_b_migration_plan.md §7.
+  independent resolved rows. At session-26 close we had 0 resolved.
+  Check `pqi history stats` output; if per-agent `n_res` is still
+  near-zero, defer. When ready, land `scripts/b_shadow_backtest.py`
+  mirroring scripts/a1_backtest.py's structure (chronological 70/30
+  split, bootstrap ΔBrier CI, pre-registered criteria). Candidate
+  B-math list lives in docs/option_b_migration_plan.md §7.
 - Theme A · Modeling & Calibration: A.4 (Bear monitoring, pure
   stats), A.5 (EV gate threshold tuning, stats-only), A.10
   (dynamic-weight feedback-loop monitoring — protects A.9 from
@@ -666,22 +836,22 @@ Detailed reference material lives in docs/:
 - Theme B: B.1 (streaming TUI) is the entry point for Phase 3.
 
 ## Instructions
-- Pick the next priority with the user before starting. If
-  Option B step 5 comes up, first run `pqi history stats` and
-  read the Option B shadow table — don't start the backtest
-  until the independent-sample budget is met.
-- Update ## Current State and write a fresh ## Next Session
-  Prompt at end of session. Log meaningful decisions in
-  docs/session-log.md.
-- Don't edit models.py verdict logic (the
-  `from_council_verdicts` aggregator) without explicit sign-off.
-  The session-23 contract is stable; session 25 (agent_weights_snapshot)
-  and session 26 (probability_yes/no/source + model_validator)
-  are additive-only and preserve it.
+- Pick the next priority with the user before starting. If Option
+  B step 5 comes up, first run `pqi history stats` and read the
+  Option B shadow table — don't start the backtest until the
+  independent-sample budget is met.
+- Update ## Current State and write a fresh ## Next Session Prompt
+  at end of session. Log meaningful decisions in docs/session-log.md.
+- Don't edit models.py verdict logic (the `from_council_verdicts`
+  aggregator) without explicit sign-off. The session-23 contract is
+  stable; sessions 25, 26, 28 are additive-only and preserve it.
 - Option B rollout order is strict per
-  docs/option_b_migration_plan.md. Never wire probability_no
-  into scoring until step 5 passes pre-registered criteria on
-  held-out data.
+  docs/option_b_migration_plan.md. Never wire probability_no into
+  scoring until step 5 passes pre-registered criteria on held-out
+  data.
+- PandaScore is non-fatal: any resolver failure must leave
+  structured_match=None and let the pipeline continue. Don't add
+  exceptions or hard gates — degraded behavior is the contract.
 - STRICT: no AI / Claude / "assisted" attribution in code,
   comments, commits, or docs (see CLAUDE.md "Attribution rule").
 - Commit per step, locally. No push without explicit ask.

@@ -113,6 +113,60 @@ available.
 
 ---
 
+## PandaScore (`pqi/ingestion/pandascore.py`, `pqi/ingestion/match_resolver.py`)
+
+Base URL: `https://api.pandascore.co` (literal in `config.py`)
+
+**Official docs:** `https://developers.pandascore.co`
+
+Used for **structured esports match data** — authoritative team
+identifiers, scheduled time, status (scheduled/running/finished),
+final score + winner when resolved, recent team form, head-to-head
+history. Bearer-token auth via `PANDASCORE_API_KEY`. Free tier:
+1000 req/hr.
+
+**Key endpoints used:**
+
+- `GET /videogames` — list supported games (used once at module
+  load; result cached implicitly via short-lived client lifetimes).
+- `GET /matches?filter[videogame]=<slug>&range[scheduled_at]=<from>,<to>` —
+  list matches for a game in a time window.
+- `GET /matches/{id}` — single match detail.
+- `GET /teams/{id}/matches?per_page=N&filter[finished]=true` —
+  team's last-N completed matches (for `TeamForm`).
+- `GET /matches?filter[opponent_id]=<id_a>,<id_b>` — direct
+  head-to-head between two teams.
+
+**Pipeline integration:** `match_resolver.resolve_match(market)`
+is called from `main._run_analysis()` before the cache lookup
+(so its status output can inform cache invalidation). Returns
+`StructuredMatchRecord | None`. Non-fatal: any failure (HTTP
+error, missing key, fuzzy score below threshold, unknown game)
+returns `None` and the pipeline continues without structured data.
+
+**Fuzzy matching (rapidfuzz):** `_score_candidate(a, b, cand_a,
+cand_b) = min(fuzz.token_set_ratio(a, cand_a),
+fuzz.token_set_ratio(b, cand_b))`. Symmetric scoring — a perfect
+match on one side cannot rescue a poor match on the other.
+Default threshold: `PANDASCORE_FUZZY_THRESHOLD=75`.
+
+**Status mapping:** PandaScore `not_started` / `postponed` →
+`scheduled`; `running` → `running`; `finished` / `canceled` →
+`finished`.
+
+**Game coverage:** `GAME_MAPPING` dict in `match_resolver.py` —
+extend to add new categories. Currently: counter-strike, valorant,
+league-of-legends, dota-2, rainbow-six-siege.
+
+**Briefing injection:** the resolved record is stored on
+`BriefingDocument.structured_match`. Surfaced in two places:
+(1) synthesizer user prompt (STRUCTURED MATCH RECORD block, with
+"DO NOT paraphrase" guidance), (2) council briefing (STRUCTURED
+MATCH DATA block, second only to EVENT TEMPORAL DISAMBIGUATION
+in priority).
+
+---
+
 ## Tavily Synthesizer (`pqi/ingestion/synthesizer.py`)
 
 - Use `TAVILY_API_KEY` from env
@@ -137,6 +191,11 @@ ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 TAVILY_API_KEY=tvly-...
 TAVILY_SEARCHES_PER_MARKET=5 # number of Tavily queries per market (3-5)
 TAVILY_SNIPPET_CAP=5000 # max chars of search snippets sent to LLM
+PANDASCORE_API_KEY= # PandaScore bearer token (esports structured data; empty disables resolver)
+PANDASCORE_ENABLED=true # master switch for the PandaScore resolver
+PANDASCORE_FUZZY_THRESHOLD=75 # min min(token_set_ratio_a, token_set_ratio_b) to accept a candidate
+PANDASCORE_WINDOW_HOURS=48 # search window around event_start_time for candidate matches
+PANDASCORE_RECENT_FORM_COUNT=5 # last-N completed matches per team for form summary
 PRICE_HISTORY_INTERVAL=1w # CLOB price history time window (1d, 1w, 1m)
 PRICE_HISTORY_FIDELITY=60 # CLOB price history resolution in minutes (60 = hourly)
 LOG_LEVEL=INFO

@@ -41,6 +41,48 @@ Referenced from CLAUDE.md.
 - Field notes: `outcomePrices` is JSON string `'["0.73", "0.27"]'`;
   `volumeNum` is float USD; must pass `closed=false` + `active=true`.
 
+## PandaScore API (`pqi/ingestion/pandascore.py`, `pqi/ingestion/match_resolver.py`)
+
+- **Auth:** Bearer token via `PANDASCORE_API_KEY`. Free tier is
+  1000 req/hr — comfortably above PQI's per-analyze footprint
+  (~5 requests). Empty key disables resolver; `PANDASCORE_ENABLED=false`
+  also bypasses without needing to clear the key.
+- **Game coverage:** `GAME_MAPPING` in `match_resolver.py` is the
+  closed list of categories the resolver knows about (currently
+  `counter-strike` → `cs-go`, `valorant`, `league-of-legends`,
+  `dota-2`, `rainbow-six-siege`). Unknown categories silently
+  return `structured_match=None` — pipeline continues, council
+  briefing falls back to event-time-only disambiguation. Add a
+  game by extending the dict.
+- **Symmetric fuzzy scoring (intentional):** `_score_candidate`
+  uses `min(token_set_ratio_a, token_set_ratio_b)` not `max` or
+  sum. A perfect match on one side cannot paper over a wrong
+  match on the other. Default threshold `PANDASCORE_FUZZY_THRESHOLD=75`
+  is conservative — tune per category if you see false negatives.
+- **Status normalisation:** PandaScore exposes `not_started`,
+  `running`, `finished`, `canceled`, `postponed`. `_normalise_status`
+  collapses these to the three values the rest of the pipeline
+  expects: `scheduled` (covers not_started + postponed), `running`,
+  `finished` (covers finished + canceled). `canceled` mapped to
+  `finished` is intentional — cache should refresh once the match
+  is no longer pending, regardless of whether it actually played.
+- **Search window:** `PANDASCORE_WINDOW_HOURS=48` is centered on
+  `event_start_time` when present, else `now()`. Wider windows
+  catch late-rescheduled matches but increase the false-match
+  surface.
+- **Non-fatal contract:** every resolver path gracefully returns
+  `[]` / `None` on HTTP 4xx/5xx, missing fields, parse errors.
+  Pipeline must never see a raised exception from the resolver —
+  if it does, `_run_analysis()` catches and logs at WARN, and the
+  briefing is built with `structured_match=None`. Don't add
+  exceptions or hard gates here.
+- **Cache invalidation:** `cache.py` invalidates when the
+  PandaScore status differs from the cached row. Status
+  transitions (scheduled → running → finished) are the most
+  important events in a match's life cycle and price often barely
+  moves through them. NULL == NULL works correctly for
+  non-esports markets that never invoke the resolver.
+
 ## CLOB API
 
 - **Response format:** `{"history": [{t, p}]}` (dict with `history` key, not a
@@ -122,8 +164,11 @@ roadmap item tracks this.
   it wipes all calibration inputs. `.bak` sibling is created by legacy
   migration; safe to keep.
 - `~/.pqi/cache.db` — SQLite council cache. Keyed by `market_id`,
-  invalidated on >2% price delta. Deleting it only costs re-analysis cost,
-  not correctness.
+  invalidated on >2% price delta **or** PandaScore status change
+  (session 28). Schema gained a `structured_status TEXT` column
+  with a defensive `ALTER TABLE` migration so existing databases
+  upgrade in place on next open. Deleting it only costs
+  re-analysis cost, not correctness.
 - **`~/.pqi/stats.json` — EV gate input.** Persisted `PerceivedStats`
   snapshot (true_win_rate, sample_size, kelly_fraction_at_p75, below_min_samples).
   Refreshed by `history sync` / `history stats` via `stats.recompute_from_history`.

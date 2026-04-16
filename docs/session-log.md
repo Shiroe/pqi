@@ -4,6 +4,232 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 28 — Temporal disambiguation + PandaScore structured-data integration
+
+Bug-fix session triggered by a critical incident: the council
+returned 99% YES at HIGH confidence on the CS market "Will 1WIN
+beat Nuclear TigeRES?", asserting that the match had "already
+ended 2-0" — the match was actually scheduled 2h40m in the future.
+Past-tense H2H scorelines from Tavily snippets were being
+paraphrased into `news_summary` / `side_yes_case` as if they were
+the current match's outcome. The agents had no temporal anchor
+and no authoritative status field to ground against.
+
+Two-step fix shipped end-to-end (15 sub-tasks total, 8 sub-commits).
+
+### Step 1 — Temporal disambiguation (commit `c610e05`)
+
+Mechanical safety net + LLM-side guidance. No new dependencies.
+
+- **Synthesizer system prompt:** explicit "future tense for
+  upcoming matches, past tense only for verified completed
+  matches" rule with three concrete examples (UPCOMING / LIVE /
+  COMPLETED).
+- **Synthesizer cross-source contamination tagger** in
+  `build_briefing()`: regex scans `news_summary` +
+  `side_yes_case` + `side_no_case` for past-tense scoreline
+  patterns (e.g. `"won 2-1"`, `"defeated 2-0"`, `"final score
+  2-0"`). When `event_start_time > now()`, rewrites the suspect
+  bucket with a bracketed `[NOTE: prior encounter, not current
+  match]` prefix.
+- **Council briefing block:** new EVENT TEMPORAL DISAMBIGUATION
+  section in `_format_briefing()` placed first (highest priority).
+  Renders `event_start_time`, status (UPCOMING/LIVE/COMPLETED based
+  on time), explicit instruction to treat the briefing as
+  pre-match analysis when status is UPCOMING.
+
+### Step 2 — PandaScore structured-data integration (commits 2a–2g)
+
+Authoritative ground-truth layer for esports markets. ~1090 LOC
+across 8 files. 8 sub-commits in dependency order.
+
+- **2a (`models.py`, commit `0b7fe72`):** new Pydantic contracts:
+
+  ```python
+  class TeamForm(BaseModel):
+      wins: int
+      losses: int
+
+  class H2HMatch(BaseModel):
+      match_id: str
+      scheduled_at: datetime
+      tournament_name: str | None
+      final_score: str | None
+      winner_name: str | None
+
+  class StructuredMatchRecord(BaseModel):
+      match_id: str
+      team_a_name: str        # canonical PandaScore name
+      team_b_name: str
+      status: str             # "scheduled" | "running" | "finished"
+      scheduled_at: datetime  # authoritative kickoff
+      tournament_name: str | None
+      match_format: str | None
+      final_score: str | None  # only when finished
+      winner_name: str | None  # only when finished
+      team_a_recent_form: TeamForm | None
+      team_b_recent_form: TeamForm | None
+      h2h: list[H2HMatch]
+      fuzzy_score: int        # 0–100
+  ```
+
+  `BriefingDocument.structured_match: StructuredMatchRecord | None`.
+  Additive — non-esports markets always get `None`.
+
+- **2b (`config.py` + `.env.example` + `requirements.txt`, commit
+  `a61321c`):** 5 new env vars:
+
+  | Var | Default | Effect |
+  |---|---|---|
+  | `PANDASCORE_API_KEY` | _(empty)_ | Bearer token. Empty disables resolver entirely. |
+  | `PANDASCORE_ENABLED` | `true` | Master switch. False bypasses resolver even when key is present. |
+  | `PANDASCORE_FUZZY_THRESHOLD` | `75` | Min `min(token_set_ratio_a, token_set_ratio_b)` to accept a candidate. |
+  | `PANDASCORE_WINDOW_HOURS` | `48` | Search window around event time for candidate matches. |
+  | `PANDASCORE_RECENT_FORM_COUNT` | `5` | Last-N matches per team for form summary. |
+
+  Literal `PANDASCORE_BASE_URL = "https://api.pandascore.co"` in
+  `config.py` only (true code constant, not user-tunable).
+  New dep: `rapidfuzz>=3.0`.
+
+- **2c (`pqi/ingestion/pandascore.py`, NEW, commit `3068f45`):**
+  ~230 LOC async httpx client. Bearer auth via header. Methods:
+  `list_videogames`, `list_matches_in_window(game_id, from_dt,
+  to_dt)`, `get_match(match_id)`,
+  `get_team_past_matches(team_id, page_size)`, `get_h2h(team_a_id,
+  team_b_id)`. All paths gracefully return `[]` / `None` on HTTP
+  failure or missing data — non-fatal.
+
+- **2d (`pqi/ingestion/match_resolver.py`, NEW, commit
+  `255a732`):** ~490 LOC orchestrator.
+  - `GAME_MAPPING` — Polymarket category slug → PandaScore game
+    slug. Covers what PQI sees in the wild: `counter-strike` →
+    `cs-go`, `valorant`, `league-of-legends`, `dota-2`,
+    `rainbow-six-siege`. Returns `None` for unknown categories
+    (resolver no-ops on non-esports).
+  - `_extract_parties(question)` — splits market question on
+    `\s+vs\s+|\s+versus\s+` to get two team names. Strips
+    "(BOX)" / "Match" / question marks.
+  - `_score_candidate(a, b, cand_a, cand_b)` — symmetric scoring:
+    `min(fuzz.token_set_ratio(a, cand_a), fuzz.token_set_ratio(b,
+    cand_b))`. Required (vs `max` or sum) so that one side being
+    a perfect match doesn't paper over the other side being wrong.
+  - `_pick_best_candidate` — sorts above-threshold candidates by
+    descending score; returns winner or `None`.
+  - `_build_team_form(client, team_id, n)` — fetches last-N
+    completed matches for a team, computes wins/losses.
+  - `_build_h2h(client, team_a_id, team_b_id)` — fetches direct
+    head-to-head with stable match IDs.
+  - `_normalise_status` — collapses PandaScore statuses
+    (`not_started`, `running`, `finished`, `canceled`, etc.) to
+    the three values the rest of the pipeline expects.
+  - `resolve_match(market)` — top-level entry. Returns
+    `StructuredMatchRecord | None`. Parallel sub-fetches via
+    `asyncio.gather` for team form + H2H once a candidate is
+    picked.
+
+- **2e (`pqi/ingestion/synthesizer.py`, commit `e6ac7eb`):**
+  Threads `structured_match` through `build_briefing()`. Renders
+  STRUCTURED MATCH RECORD block in the synth's user prompt with
+  explicit "DO NOT paraphrase these fields" instruction.
+  Cross-source tagger upgraded — now triggers when
+  `structured_match.status in {"scheduled", "running"}` *in
+  addition to* the time-based check (cross-source corroboration
+  strengthens the signal). Resolver-first H2H dedup in the
+  `prior_match_facts` builder: resolver's stable-ID matches go
+  first, then synthesizer-snippet H2H is dedup'd via date-signature
+  substring match (`sig.split("|", 1)[0] in f`).
+
+- **2f (`pqi/agents/council.py`, commit `05b51cf`):** new
+  STRUCTURED MATCH DATA block in `_format_briefing()`, placed
+  between disambiguation_block and price_history_block. Renders
+  canonical names + format, status (uppercase), scheduled time,
+  tournament, conditional final_score+winner OR scheduled/running
+  NOTE, recent form summaries, fuzzy confidence. Block omitted
+  entirely when `briefing.structured_match is None` (non-esports
+  / resolver miss).
+
+- **2g (`pqi/cache.py` + `pqi/main.py`, commit `9a1bc9d`):**
+  Cache schema gained `structured_status TEXT` column with
+  defensive `ALTER TABLE` migration (catches `OperationalError`
+  when column already exists). `get_cached(market_id,
+  current_yes_price, current_structured_status)` invalidates on
+  status mismatch. NULL == NULL works correctly for non-esports
+  markets that never invoke the resolver. `_run_analysis()` now
+  calls `resolve_match(market)` before cache lookup, threads
+  `structured_match` to `build_briefing` and `structured_status`
+  to `get_cached`. Skipped when `shared_briefing is not None`
+  (sibling reuse path).
+
+### Block ordering in council briefing
+
+Highest to lowest priority (top to bottom):
+
+1. EVENT TEMPORAL DISAMBIGUATION — anchors what time it is and
+   whether the match has started.
+2. STRUCTURED MATCH DATA — authoritative identifiers from
+   PandaScore.
+3. MARKET PRICE HISTORY — CLOB trend metrics.
+4. NEWS SUMMARY + KEY FACTS + side cases — synthesized narrative.
+5. PRIOR MATCH FACTS — H2H, decay-prone.
+
+Earlier blocks override later ones in the agent's attention.
+
+### Cache invalidation expansion
+
+Previously: price-delta only (>2% YES move → stale). Now also
+invalidates on PandaScore status transitions (scheduled → running
+→ finished) — high-information events where price often barely
+budges through huge state changes (live market thin/volatile).
+Non-esports markets are unaffected: both sides are NULL, so the
+mismatch check never fires.
+
+### Verification (Task 2h)
+
+End-to-end audit, all 6 checks passed:
+
+- H2H dedup: resolver IEM kept once, BLAST Spring (synth-only)
+  survives.
+- Contamination warning fires + anchors on PandaScore status (not
+  just event_start_time).
+- Block order DISAMBIG(837) → STRUCTURED(1182) → NEWS(1764) →
+  PRIOR(1993) — measured byte offsets in the assembled briefing.
+- Resolver TeamForm renders in council briefing (`1WIN recent
+  form: 4W-1L`, `Nuclear TigeRES recent form: 2W-3L`).
+- Step-1 regression preserved (no STRUCTURED block, falls back to
+  event_start_time anchor when no resolver hit).
+- `main._run_analysis` correctly wires resolver + cache key.
+
+### Cost & operational impact
+
+- **API cost:** PandaScore free tier (1k req/hr). Per-analyze
+  call: 1 list-matches + 1 get-match + 2 team-form + 1 h2h ≈ 5
+  requests. Negligible against the rate limit.
+- **Latency:** resolver runs before cache lookup (so it can
+  inform invalidation). Adds ~200–500ms per esports analyze when
+  PandaScore is up. Non-fatal — failure path adds 0 latency.
+- **No behavioral change** for non-esports markets — the resolver
+  no-ops on unknown categories.
+
+### Why this design (CTO posture notes)
+
+- **Three-layer defense (Bias-as-Feature applied to data
+  quality):** prompts, regex, structured data are independent
+  defenses. Any one can fail and the others still catch the
+  contamination.
+- **Non-fatal everywhere (Parallelism, Statistical Skepticism):**
+  any resolver failure → `structured_match=None` and the pipeline
+  continues. No new hard gates. The council degrades gracefully
+  to the Step-1 system.
+- **Symmetric fuzzy scoring (Contract-as-Law):** `min(score_a,
+  score_b)` not `max` or sum — required so that "Team Liquid vs
+  NRG" doesn't get paired with "Team Liquid vs Cloud9" just
+  because the first side matches perfectly.
+- **Resolver-first H2H dedup:** PandaScore has stable match IDs;
+  Tavily snippets do not. Trusting the structured source first
+  and dedup'ing the unstructured second is the correct precedence.
+
+---
+
 ## Session 27 — Anthropic prompt caching enabled
 
 Cost-optimization pass triggered by analysis of

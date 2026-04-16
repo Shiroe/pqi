@@ -10,10 +10,15 @@ Polymarket Gamma API (/events endpoint)
   → Event grouping (sibling markets under one event, e.g. Moneyline + Map 1 + Map 2)
     → Parallel enrichment (GET /events/{id} for reliable live/ended/start time)
       → User selects event → picks specific market
-        → Synthesizer (5 Tavily searches → BriefingDocument)
-          → CLOB price history (1w hourly → trend, volatility, sharp moves)
-            → Council of Seven (7 parallel LLM calls, two-sided confidence)
-              → Probability-first recommendation: BUY YES / BUY NO / PASS
+        → PandaScore resolver (esports only, non-fatal — fuzzy-matches teams to
+          a structured match record: status, scheduled time, form, H2H)
+          → Synthesizer (5 Tavily searches → BriefingDocument with cross-source
+            contamination tagger anchored on PandaScore status)
+            → CLOB price history (1w hourly → trend, volatility, sharp moves)
+              → Council of Seven (7 parallel LLM calls, two-sided confidence,
+                briefing leads with EVENT TEMPORAL DISAMBIGUATION + STRUCTURED
+                MATCH DATA blocks)
+                → Probability-first recommendation: BUY YES / BUY NO / PASS
 ```
 
 The council computes two independent scores: a YES-side and NO-side weighted average,
@@ -52,6 +57,11 @@ cp pqi/.env.example pqi/.env
 ```dotenv
 # Required always
 TAVILY_API_KEY=tvly-...
+
+# Optional — esports structured-data layer (free tier 1k req/hr)
+# Without it, esports analyses fall back to Tavily-only narratives.
+# Get a key at https://pandascore.co — pipeline degrades gracefully if absent.
+# PANDASCORE_API_KEY=
 
 # Dev (local Ollama)
 LLM_BACKEND=ollama
@@ -470,6 +480,11 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
 | `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |
 | `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Wrap the Anthropic system prompt in a 5-min ephemeral cache block (no behavior change; ~10% input price on cache hits) |
+| `PANDASCORE_API_KEY`          | _(empty)_ | PandaScore bearer token. Empty disables the resolver — esports analyses fall back to Tavily-only |
+| `PANDASCORE_ENABLED`          | `true`  | Master switch for the PandaScore resolver (false bypasses even if key is set)        |
+| `PANDASCORE_FUZZY_THRESHOLD`  | `75`    | Min `min(token_set_ratio_a, token_set_ratio_b)` to accept a match candidate          |
+| `PANDASCORE_WINDOW_HOURS`     | `48`    | Search window around `event_start_time` for candidate PandaScore matches             |
+| `PANDASCORE_RECENT_FORM_COUNT` | `5`    | Last-N completed matches per team for the form summary                               |
 | `TAVILY_SEARCHES_PER_MARKET`  | `5`     | Tavily queries per analysis (3-5)                                                    |
 | `TAVILY_SNIPPET_CAP`          | `5000`  | Max chars of search snippets sent to LLM                                             |
 | `EVENT_ENRICHMENT_MAX`        | `30`    | Max parallel /events/{id} detail calls for enrichment                                |
@@ -514,7 +529,10 @@ pqi/
 │   │                    #   parallel enrichment, client-side timing filters
 │   └── clob.py          # CLOB API client — price history fetch + trend metrics
 └── ingestion/
-    └── synthesizer.py   # LLM Search Architect → 5 Tavily queries → BriefingDocument
+    ├── synthesizer.py   # LLM Search Architect → 5 Tavily queries → BriefingDocument
+    │                    #   (+ cross-source contamination tagger anchored on PandaScore status)
+    ├── pandascore.py    # PandaScore async HTTP client (esports structured data)
+    └── match_resolver.py # Polymarket → PandaScore fuzzy match resolver (rapidfuzz)
 ```
 
 ---

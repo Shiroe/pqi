@@ -31,6 +31,18 @@ All core pipeline modules shipped: `polymarket.py`, `synthesizer.py`,
   snapshotted on every result alongside `perceived_win_rate_at_run`,
   `kelly_stake_full`, `kelly_stake_scaled`, `kelly_multiplier`. Surfaced
   in `display_council_result` and `history show <#>`.
+- **Temporal disambiguation + PandaScore structured-data layer**
+  (session 28) — three-layer defense against the council
+  paraphrasing past-tense H2H scorelines as the current match's
+  outcome. Synthesizer system prompt enforces tense rules; mechanical
+  regex tagger annotates contaminated buckets when status is
+  upcoming (cross-source-corroborated by PandaScore when available);
+  council briefing leads with EVENT TEMPORAL DISAMBIGUATION followed
+  by STRUCTURED MATCH DATA. Cache schema extended with
+  `structured_status` for status-aware invalidation. Esports only —
+  opt out via `PANDASCORE_ENABLED=false`. Non-esports markets
+  unaffected. New deps: `rapidfuzz>=3.0`. New files:
+  `pqi/ingestion/pandascore.py`, `pqi/ingestion/match_resolver.py`.
 
 ---
 
