@@ -61,6 +61,52 @@ TAVILY_SEARCHES_PER_MARKET: int = int(os.getenv("TAVILY_SEARCHES_PER_MARKET", "5
 TAVILY_SNIPPET_CAP: int = int(os.getenv("TAVILY_SNIPPET_CAP", "5000"))
 
 # ---------------------------------------------------------------------------
+# PandaScore (structured esports data)
+# ---------------------------------------------------------------------------
+# When PANDASCORE_ENABLED is true and the API key is set, the synthesizer
+# attempts to resolve esports markets to PandaScore's structured match record
+# (canonical team names, scheduled time, status, H2H, recent form). A
+# trustworthy match is then attached to the briefing as
+# `BriefingDocument.structured_match` and surfaced to the council as
+# STRUCTURED MATCH DATA. Failure modes (no match found, API error, low
+# fuzzy confidence) are non-fatal — the pipeline falls back to the
+# Tavily-only briefing exactly as it does today.
+
+# Code constant — the public REST endpoint.
+PANDASCORE_BASE_URL: str = "https://api.pandascore.co"
+
+PANDASCORE_API_KEY: str = os.getenv("PANDASCORE_API_KEY", "")
+"""PandaScore API token. Free-tier accounts are sufficient for our
+read-only usage (~1000 req/hour). Empty string disables the resolver
+without raising — pipeline runs Tavily-only."""
+
+PANDASCORE_ENABLED: bool = os.getenv("PANDASCORE_ENABLED", "true").lower() in {
+    "1", "true", "yes",
+}
+"""Master switch for the structured-data resolver. Defaults true so the
+key alone is enough to turn it on. Set false to keep the key but
+disable the resolver (e.g. for A/B comparison runs)."""
+
+PANDASCORE_FUZZY_THRESHOLD: int = int(os.getenv("PANDASCORE_FUZZY_THRESHOLD", "80"))
+"""Minimum rapidfuzz token_set_ratio confidence (0-100) for the
+market-question → provider-match resolution to be accepted. Below
+this the resolver returns None and the briefing falls back to
+Tavily-only. 80 is intentionally conservative — false positives
+(wrong match attached to briefing) are far costlier than false
+negatives (no structured data attached)."""
+
+PANDASCORE_WINDOW_HOURS: float = float(os.getenv("PANDASCORE_WINDOW_HOURS", "3.0"))
+"""Symmetric window (in hours) around the market's event_start_time
+in which PandaScore matches are considered candidates. Tight enough
+to avoid pulling a different scheduled meeting between the same
+parties, wide enough to absorb scheduling drift between Polymarket
+and PandaScore."""
+
+PANDASCORE_RECENT_FORM_COUNT: int = int(os.getenv("PANDASCORE_RECENT_FORM_COUNT", "10"))
+"""How many recent completed matches per team to inspect when computing
+the TeamForm snapshot in the structured record."""
+
+# ---------------------------------------------------------------------------
 # Polymarket Gamma API
 # ---------------------------------------------------------------------------
 
