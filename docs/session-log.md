@@ -4,6 +4,132 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 30 — Centralized Anthropic retry (529 OverloadedError + transient 5xx/429/transport)
+
+Reliability patch. A live analyze run crashed mid-pipeline with an
+`anthropic.APIStatusError: 529 overloaded_error` ("Overloaded"). The
+SDK does retry transient errors by default (2 attempts), but that
+budget was insufficient when the overload condition persisted across
+both attempts. The exception then bubbled up through
+`_run_single_agent` → `_call_llm` → `_chat_anthropic` and took the
+council run down with it.
+
+Worth labeling clearly because the two error codes look identical at
+a glance:
+
+- **429** = `RateLimitError` — *we* exceeded our quota / RPM cap.
+  Backoff is the right response, but so is checking our usage.
+- **529** = `OverloadedError` (5xx; surfaces as
+  `InternalServerError` in the SDK) — *Anthropic* is shedding load.
+  Nothing we can do but back off.
+
+### Diagnosis
+
+Reading the traceback, the SDK had already retried twice (visible
+through internal `_retries_taken` / sleep timings ≈ 0.46s + 0.85s).
+A two-attempt retry over <2s window has no chance against a
+multi-minute overload — Anthropic's `retry-after` header in the 529
+response usually points 60s+ out. We need a longer, more elastic
+schedule.
+
+### Design
+
+Two design choices, per CTO_Agent.md:
+
+1. **Centralize the retry in `pqi/llm/client.py`, not in
+   `agents/council.py`.** The synthesizer + search architect call
+   the same `chat()` surface; centralizing means they get the same
+   resilience for free. Council's existing per-agent retry stays —
+   it handles a different concern (parse failures), and layering
+   transport retry beneath it gives a defense-in-depth budget.
+2. **Disable the SDK's built-in retry (`max_retries=0`) so this
+   layer owns the policy end-to-end.** Otherwise the worst-case
+   latency doubles silently and the schedule we expose via env
+   stops matching reality.
+
+### Patch
+
+- **`pqi/config.py`** — three new tunables:
+  - `ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "5"))`
+  - `ANTHROPIC_RETRY_BASE_DELAY: float = float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY", "1.0"))`
+  - `ANTHROPIC_RETRY_MAX_DELAY: float = float(os.getenv("ANTHROPIC_RETRY_MAX_DELAY", "30.0"))`
+  Mirrors `AGENT_MAX_RETRIES`/30s cap so council and client share
+  worst-case behavior.
+
+- **`.env.example`** — documented all three with the worst-case
+  schedule (1, 2, 4, 8, 16, 30s → ~61s) and the explicit "SDK
+  built-in retry is disabled" note.
+
+- **`pqi/llm/client.py::_chat_anthropic`** —
+  - `client = anthropic.AsyncAnthropic(api_key=..., max_retries=0)`
+  - Retryable tuple: `APIConnectionError`, `APITimeoutError`,
+    `RateLimitError`, `InternalServerError` (covers 5xx incl. 529).
+  - Generic `APIStatusError` arm: retry only when
+    `status_code >= 500`; otherwise re-raise immediately so 4xx
+    surfaces fast and doesn't burn quota.
+  - WARNING log per retry: `anthropic call failed (attempt N/total): … — retrying in Xs`.
+  - ERROR log on exhaustion: `anthropic call failed after N attempts: …` precedes the propagated exception.
+  - Cache-stats DEBUG line preserved unchanged on success path.
+  - Loop body is `for attempt in range(1 + max_retries): try: …; break; except retryable: …; except APIStatusError: …`.
+
+### Layered budgets
+
+The council's existing `AGENT_MAX_RETRIES`-driven loop in
+`_run_single_agent` continues to wrap the client. So a single agent
+can absorb up to:
+
+```
+AGENT_MAX_RETRIES * (1 + ANTHROPIC_MAX_RETRIES) = 5 * 6 = 30 attempts
+```
+
+…before being dropped. That's intentional:
+
+- Inner loop (this session): handles **transport** failures —
+  retries the same prompt because the failure was network/server.
+- Outer loop (existing): handles **parse** failures — also retries
+  the LLM call, but the relevant signal is "the model returned
+  malformed JSON," which is independent of whether transport was
+  healthy.
+
+Sharing one budget would conflate the two.
+
+### Verification
+
+Mock-based functional tests covering all three behaviors:
+
+| Scenario                              | Expected                          | Result |
+|---------------------------------------|-----------------------------------|--------|
+| `InternalServerError` × 2, then 200   | Returns success on attempt 3      | PASS   |
+| `InternalServerError` × 6 (exhaust)   | Raises `InternalServerError`      | PASS   |
+| `BadRequestError` (4xx, non-retryable)| Raises immediately on attempt 1   | PASS   |
+
+Backoff was time-shrunk to `0.001s` for the test loop. Production
+schedule unchanged.
+
+### Files touched
+
+- `pqi/config.py` (+3 keys)
+- `.env.example` (+1 documented section)
+- `pqi/llm/client.py` (+`asyncio` import, `max_retries=0`, retry loop, log lines)
+
+### Cost
+
+Zero unless something fails. On a healthy Anthropic the success
+path is byte-identical to before — same single `messages.create()`
+call, same response object, same cache instrumentation. When a
+retry does fire, the cost is one extra request per retry attempt
+(billed normally — Anthropic does not refund failed 5xx requests
+in their public pricing).
+
+### Rollback
+
+`ANTHROPIC_MAX_RETRIES=0` reduces to one attempt with no SDK
+fallback (the SDK is permanently silenced in code). For a full
+revert, restore `anthropic.AsyncAnthropic(api_key=...)` (drop
+`max_retries=0`) and remove the retry loop in `_chat_anthropic`.
+
+---
+
 ## Session 29 — Persistent category-resolution cache
 
 Small QoL pass. Every `analyze -c <category>` run was paying ~3

@@ -64,6 +64,23 @@ no-op. The DEBUG log line `anthropic usage: input=… cache_read=…
 cache_create=…` confirms whether the cache engaged. Kill switch:
 `ANTHROPIC_PROMPT_CACHE_ENABLED=false`.
 
+**Centralized Anthropic retry (session 30):** every Anthropic call goes
+through an exponential-backoff retry loop inside `_chat_anthropic`. The
+SDK's built-in auto-retry is disabled (`max_retries=0` on
+`AsyncAnthropic`) so this layer owns the policy end-to-end. Retryable
+errors: `InternalServerError` (5xx incl. **529 OverloadedError** =
+Anthropic load shedding), `RateLimitError` (429), `APIConnectionError`,
+`APITimeoutError`, plus any `APIStatusError` with `status_code >= 500`.
+Non-retryable 4xx errors (`BadRequestError`, `AuthenticationError`,
+etc.) escape immediately — no point burning quota. Schedule:
+`delay = base * 2**attempt`, capped at `max_delay`. At the defaults
+(base=1s, cap=30s, retries=5) the wait sequence is 1, 2, 4, 8, 16, 30s
+→ ~61s worst-case before the final exception propagates. Tunables:
+`ANTHROPIC_MAX_RETRIES`, `ANTHROPIC_RETRY_BASE_DELAY`,
+`ANTHROPIC_RETRY_MAX_DELAY`. The council's per-agent retry
+(`AGENT_MAX_RETRIES`) still wraps this — so a transient outage has two
+budgets to chew through before an agent is dropped.
+
 ---
 
 ## Data Flow (step by step)
@@ -441,7 +458,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 29 — small QoL: persistent `~/.pqi/category_cache.json` short-circuits `resolve_category()` on warm calls. Cuts `analyze -c esports` startup latency from ~6s to ~0ms on cache hits. Only positive resolutions cached; misses fall through to live resolver. Session 28 (temporal disambiguation + PandaScore structured-data integration) remains the most recent substantive change.]
+**Last updated:** [session 30 — centralized exponential-backoff retry for Anthropic calls in `pqi/llm/client.py`. SDK auto-retry disabled (`max_retries=0`); this layer now owns the policy. Catches `InternalServerError` (5xx incl. 529 OverloadedError), `RateLimitError`, `APIConnectionError`, `APITimeoutError`, plus `APIStatusError` ≥500. Three new env keys: `ANTHROPIC_MAX_RETRIES` (5), `ANTHROPIC_RETRY_BASE_DELAY` (1.0s), `ANTHROPIC_RETRY_MAX_DELAY` (30.0s). Driver: a 529 OverloadedError stack trace crashed mid-pipeline despite the SDK's 2-attempt internal retry.]
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -506,7 +523,72 @@ preserved it: every addition is metadata-only or upstream of the
 aggregator. `CouncilResult.from_council_verdicts()` math unchanged
 since session 23.
 
-### Session 29 (this session)
+### Session 30 (this session)
+
+Reliability patch — a live analyze run crashed with an
+`anthropic.APIStatusError: 529 overloaded_error`
+(load shedding on Anthropic's side, **not** a rate limit; rate
+limits are 429). The Python SDK does retry transient failures by
+default (2 attempts with short jitter) but that was insufficient
+when the overload condition persisted across all attempts. The
+exception bubbled all the way up through `_run_single_agent` →
+`_call_llm` → `_chat_anthropic`, taking the whole council run
+down with it.
+
+Patch (single surface, no caller changes):
+
+- `pqi/config.py` — three new tunables: `ANTHROPIC_MAX_RETRIES`
+  (default 5), `ANTHROPIC_RETRY_BASE_DELAY` (default 1.0s),
+  `ANTHROPIC_RETRY_MAX_DELAY` (default 30.0s).
+- `.env.example` — documented all three with the worst-case
+  schedule (1, 2, 4, 8, 16, 30 → ~61s).
+- `pqi/llm/client.py::_chat_anthropic`:
+  - `AsyncAnthropic(max_retries=0)` to silence the SDK's built-in
+    retry — this layer owns the policy.
+  - Wrapped `client.messages.create(...)` in a retry loop.
+  - Retryable: `InternalServerError` (covers 5xx incl. 529),
+    `RateLimitError` (429), `APIConnectionError`, `APITimeoutError`.
+  - Generic `APIStatusError` arm: retry only when `status_code >= 500`,
+    otherwise re-raise immediately.
+  - WARNING log on each retry with attempt counter + delay; ERROR on
+    final exhaustion before the exception escapes.
+  - Cache stats (`anthropic usage:` line) preserved unchanged on
+    success path.
+
+**Why mirror the council retry instead of relying on SDK retry?**
+Two reasons. (a) The SDK's 2-attempt budget can't ride out a multi-
+minute Anthropic incident; ours can — 6 attempts at 1, 2, 4, 8, 16,
+30s gets us across ~1 minute of overload before failing the agent.
+(b) Centralizing the policy in `client.py` means the synthesizer +
+search architect get the same protection for free, not just council
+agents. Per CTO_Agent.md: client abstraction is preserved (no
+anthropic imports outside `client.py`), async integrity preserved
+(`asyncio.sleep`, never `time.sleep`), config strictness preserved
+(every tunable in `.env.example`).
+
+**Layered budgets:** the council's existing
+`AGENT_MAX_RETRIES`-driven loop in `_run_single_agent` still wraps
+the client. So a single agent can absorb up to
+`AGENT_MAX_RETRIES * (1 + ANTHROPIC_MAX_RETRIES) = 5 * 6 = 30`
+attempts before being dropped. That's intentional: the inner loop
+handles transport; the outer loop also handles parse failures
+(malformed JSON), and the two failure modes shouldn't share a
+budget.
+
+**Verification:** functional tests with mocked
+`InternalServerError` confirm (a) success after N retries,
+(b) exhaustion-then-raise at attempt 6, (c) non-retryable 4xx
+(e.g. `BadRequestError`) escapes immediately on attempt 1
+without burning quota. The success path is byte-identical when
+no errors occur.
+
+**Rollback:** `ANTHROPIC_MAX_RETRIES=0` in `.env` reduces the
+client to one attempt (still no SDK retry — the kill is one-way
+in the code). For a full revert, restore the line
+`anthropic.AsyncAnthropic(api_key=...)` (drop `max_retries=0`)
+and remove the retry loop.
+
+### Session 29
 
 Small QoL: `--category` resolution was wasting ~3 HTTP calls
 plus rate-limit sleeps every analyze run, even though Polymarket
@@ -719,6 +801,17 @@ No code revert needed.
   (5-min TTL) when `ANTHROPIC_PROMPT_CACHE_ENABLED=true`.
   Cache-hit/write counts logged at DEBUG via `usage.cache_*`. No
   behavioral change to outputs.
+- **Centralized Anthropic retry** (session 30, `pqi/llm/client.py`):
+  every Anthropic call wrapped in an exponential-backoff retry
+  loop (1, 2, 4, 8, 16, 30s; ~61s worst-case at the 5-retry
+  default). Retries 5xx (incl. 529 OverloadedError), 429, and
+  transient transport errors; non-retryable 4xx escapes
+  immediately. SDK's built-in auto-retry disabled
+  (`max_retries=0`) so this layer owns the schedule. Tunables:
+  `ANTHROPIC_MAX_RETRIES`, `ANTHROPIC_RETRY_BASE_DELAY`,
+  `ANTHROPIC_RETRY_MAX_DELAY`. Council's per-agent retry still
+  wraps this — two budgets to chew through before an agent is
+  dropped.
 - **Persistent category-resolution cache** (session 29,
   `~/.pqi/category_cache.json`): `resolve_category()` short-circuits
   on cache hits, eliminating the ~3 redundant Gamma API calls per
@@ -760,9 +853,45 @@ parallelism, bias-as-feature, statistical skepticism) for this project.
 Detailed reference material lives in docs/:
 - docs/api-reference.md — API endpoints, params, response formats (now includes PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 29)
+- docs/session-log.md — per-session changelog (current through session 30)
 - docs/roadmap.md — future work priorities, themed
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped session 26)
+
+## Session 30 context (completed)
+- Centralized exponential-backoff retry for every Anthropic call
+  in pqi/llm/client.py::_chat_anthropic. SDK auto-retry disabled
+  (max_retries=0 on AsyncAnthropic). Retries:
+  InternalServerError (5xx incl. 529 OverloadedError),
+  RateLimitError (429), APIConnectionError, APITimeoutError,
+  plus generic APIStatusError when status_code >= 500.
+  Non-retryable 4xx escapes immediately.
+- Schedule: delay = base * 2**attempt, capped at max_delay. At
+  the defaults (5 retries, 1.0s base, 30.0s cap) the wait
+  sequence is 1, 2, 4, 8, 16, 30s → ~61s worst case before the
+  exception is re-raised.
+- Three new env keys (in .env.example and config.py):
+  ANTHROPIC_MAX_RETRIES (5), ANTHROPIC_RETRY_BASE_DELAY (1.0),
+  ANTHROPIC_RETRY_MAX_DELAY (30.0).
+- Driver: a live analyze run crashed with anthropic 529
+  OverloadedError despite the SDK's default 2-retry. 529 is
+  load shedding on Anthropic's side, NOT a rate limit
+  (429 = rate limit). Now both fall under the same retryable
+  set so transient outages don't take the council down.
+- Council's existing AGENT_MAX_RETRIES loop in
+  agents/council.py::_run_single_agent still wraps the client.
+  So a single agent has up to 5 * (1+5) = 30 attempts before
+  being dropped. Inner retry handles transport; outer also
+  handles parse failures.
+- Verification: tests with mocked InternalServerError confirm
+  (a) success after N retries, (b) exhaustion-then-raise at
+  attempt 6, (c) non-retryable BadRequestError escapes
+  immediately on attempt 1.
+- Files touched: pqi/config.py (3 new keys), .env.example
+  (documented), pqi/llm/client.py (max_retries=0 + retry loop +
+  imports of asyncio).
+- No tests changed. The success path is byte-identical when no
+  errors occur, so existing CLI commands behave the same on a
+  healthy Anthropic.
 
 ## Session 29 context (completed)
 - Persistent category-resolution cache at
@@ -860,6 +989,16 @@ Detailed reference material lives in docs/:
   AGENT_WEIGHT_SHRINK (2.0).
 
 ## PRIORITY options (pick one with the user)
+- **Observe session-30 retry in the wild.** Next time a 529 or
+  429 fires during a live analyze run, confirm the WARNING log
+  line `anthropic call failed (attempt N/6): … — retrying in Xs`
+  appears and the council still completes. If retries exhaust,
+  the ERROR line `anthropic call failed after 6 attempts: …`
+  precedes the propagated exception, and the council's outer
+  AGENT_MAX_RETRIES loop should retry the call once more. If
+  you see neither log line on a real failure, the exception type
+  isn't in our retryable set — extend the `retryable` tuple in
+  `_chat_anthropic`.
 - **Verify session-28 PandaScore + temporal disambiguation
   end-to-end.** Get a PANDASCORE_API_KEY (free tier) into .env,
   then run `LOG_LEVEL=INFO python -m pqi.main -c counter-strike

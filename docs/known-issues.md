@@ -157,6 +157,36 @@ roadmap item tracks this.
 - Ollama: installed, llama3.1:8b available as fallback
 - LOCAL_LLM_CONCURRENCY: 1 (only affects Ollama; Anthropic runs fully parallel)
 
+## Anthropic API errors
+
+- **529 vs 429 (don't conflate):** `429 RateLimitError` means **we**
+  exceeded our quota / RPM cap and should slow down. `529
+  OverloadedError` (surfaces as `anthropic.InternalServerError` in
+  the SDK's exception hierarchy) means **Anthropic** is shedding
+  load — nothing on our side caused it; only patience helps. Both
+  are retryable but they tell us different things about whether to
+  also adjust usage.
+- **Centralized retry (session 30):** `pqi/llm/client.py::_chat_anthropic`
+  wraps every `messages.create()` in an exponential-backoff retry
+  loop. SDK auto-retry is disabled (`max_retries=0` on the
+  `AsyncAnthropic` client) so this layer owns the schedule
+  end-to-end. Retryable: `InternalServerError` (5xx incl. 529),
+  `RateLimitError` (429), `APIConnectionError`, `APITimeoutError`,
+  generic `APIStatusError` with `status_code >= 500`. Non-retryable
+  4xx (e.g. `BadRequestError`, `AuthenticationError`) escapes
+  immediately. Schedule at defaults: 1, 2, 4, 8, 16, 30s → ~61s
+  worst case. Tunable via `ANTHROPIC_MAX_RETRIES`,
+  `ANTHROPIC_RETRY_BASE_DELAY`, `ANTHROPIC_RETRY_MAX_DELAY`. The
+  council's per-agent retry (`AGENT_MAX_RETRIES`) still wraps the
+  client — two budgets to chew through before an agent is dropped.
+- **Where to look in logs:** WARNING line
+  `anthropic call failed (attempt N/total): … — retrying in Xs`
+  on each retry; ERROR line `anthropic call failed after N
+  attempts: …` precedes the propagated exception on exhaustion.
+  If you see neither line and a real Anthropic error crashed the
+  pipeline, the exception type isn't in the retryable set — extend
+  the tuple in `_chat_anthropic`.
+
 ## Persisted state files (load-bearing)
 
 - `~/.pqi/history.jsonl` — full-fidelity run history. Source of truth for

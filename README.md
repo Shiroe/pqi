@@ -480,6 +480,9 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
 | `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |
 | `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Wrap the Anthropic system prompt in a 5-min ephemeral cache block (no behavior change; ~10% input price on cache hits) |
+| `ANTHROPIC_MAX_RETRIES`       | `5`     | Max additional retries per Anthropic call on transient failures (5xx incl. 529, 429, connection / timeout errors) |
+| `ANTHROPIC_RETRY_BASE_DELAY`  | `1.0`   | Base delay (s) for exponential retry backoff (`delay = base * 2**attempt`)           |
+| `ANTHROPIC_RETRY_MAX_DELAY`   | `30.0`  | Cap on per-attempt backoff (s); worst-case cumulative wait at defaults ≈ 61s         |
 | `PANDASCORE_API_KEY`          | _(empty)_ | PandaScore bearer token. Empty disables the resolver — esports analyses fall back to Tavily-only |
 | `PANDASCORE_ENABLED`          | `true`  | Master switch for the PandaScore resolver (false bypasses even if key is set)        |
 | `PANDASCORE_FUZZY_THRESHOLD`  | `75`    | Min `min(token_set_ratio_a, token_set_ratio_b)` to accept a match candidate          |
@@ -651,6 +654,39 @@ calls within 5 minutes = working as intended. If both stay `0`, the prefix is
 below the model's minimum cacheable size (~1024–2048 tokens depending on
 model) and the `cache_control` field is silently ignored. Disable with
 `ANTHROPIC_PROMPT_CACHE_ENABLED=false` for debugging.
+
+### Reliability / retry (Anthropic only)
+
+Every Anthropic call is wrapped in a centralized exponential-backoff retry
+loop inside `pqi/llm/client.py`. The Anthropic SDK's built-in auto-retry is
+disabled (`max_retries=0` on the client) so this layer owns the policy
+end-to-end — no double-retry, no surprise jitter.
+
+What gets retried:
+
+- **5xx server errors** including `529 OverloadedError` (Anthropic load
+  shedding — distinct from rate limiting)
+- **429 RateLimitError**
+- `APIConnectionError` and `APITimeoutError` (transport-level transient)
+
+Non-retryable 4xx errors (`BadRequestError`, `AuthenticationError`, etc.)
+escape immediately — there's no point re-sending a malformed request.
+
+Schedule: `delay = base * 2**attempt`, capped at `max_delay`. At the
+defaults (`ANTHROPIC_MAX_RETRIES=5`, `ANTHROPIC_RETRY_BASE_DELAY=1.0`,
+`ANTHROPIC_RETRY_MAX_DELAY=30.0`) the wait sequence is **1, 2, 4, 8, 16,
+30 seconds → ~61s worst-case** before the final exception propagates. The
+council's per-agent retry loop (`AGENT_MAX_RETRIES`, default 5) still
+wraps this — so a single agent has up to `5 * 6 = 30` total attempts
+before being dropped.
+
+Each retry logs at `WARNING`:
+
+```
+anthropic call failed (attempt 1/6): Overloaded — retrying in 1.0s
+```
+
+…and on exhaustion, an `ERROR` line precedes the propagated exception.
 
 ---
 
