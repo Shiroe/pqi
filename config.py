@@ -52,6 +52,24 @@ ANTHROPIC_MAX_TOKENS: int = int(os.getenv("ANTHROPIC_MAX_TOKENS", "2048"))
 response — truncation at this ceiling produces unterminated-string parse
 errors. 2048 gives ~2× headroom over typical two-sided council verdicts."""
 
+# Centralized Anthropic retry — wraps every client.messages.create() call
+# so transient 5xx (incl. 529 OverloadedError), 429 RateLimitError,
+# connection errors and timeouts don't propagate as crashes. The SDK's
+# built-in retry is disabled (max_retries=0 on the client) to avoid
+# double-retry; this layer owns the policy. See pqi/llm/client.py.
+ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "5"))
+"""Max additional retries per Anthropic call after the first attempt.
+Mirrors AGENT_MAX_RETRIES so council and synthesizer share retry budgets."""
+
+ANTHROPIC_RETRY_BASE_DELAY: float = float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY", "1.0"))
+"""Base delay (seconds) for exponential backoff: delay = base * 2**attempt,
+capped at ANTHROPIC_RETRY_MAX_DELAY. 1.0s → 1, 2, 4, 8, 16, 30 (cap)."""
+
+ANTHROPIC_RETRY_MAX_DELAY: float = float(os.getenv("ANTHROPIC_RETRY_MAX_DELAY", "30.0"))
+"""Cap on the per-attempt backoff (seconds). 30s matches AGENT_MAX_RETRIES'
+existing cap so a worst-case retry storm has predictable upper-bound
+latency: 1+2+4+8+16+30 ≈ 61s before giving up at the default 5 retries."""
+
 # ---------------------------------------------------------------------------
 # Tavily (news search)
 # ---------------------------------------------------------------------------

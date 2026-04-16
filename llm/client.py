@@ -7,8 +7,15 @@ Dispatches to the correct backend based on the LLM_BACKEND env var:
   "anthropic"  → Anthropic Messages API via the anthropic SDK
 
 All callers import and await chat() — never import anthropic or httpx elsewhere.
+
+Anthropic calls are wrapped with a centralized exponential-backoff retry
+loop (see _chat_anthropic). The SDK's built-in auto-retry is disabled
+(max_retries=0 on the AsyncAnthropic client) so this layer owns the
+policy end-to-end. Retryable errors: 5xx (incl. 529 OverloadedError),
+429 RateLimitError, transient connection / timeout errors.
 """
 
+import asyncio
 import logging
 
 import httpx
@@ -40,7 +47,17 @@ async def _chat_ollama(system: str, user: str, model: str, json_mode: bool = Fal
 
 
 async def _chat_anthropic(system: str, user: str, model: str) -> str:
-    """Send a chat request to the Anthropic Messages API and return the response text."""
+    """Send a chat request to the Anthropic Messages API and return the response text.
+
+    Wraps the underlying messages.create() call with an exponential-backoff
+    retry loop. Retryable errors (transient on Anthropic's side or in
+    transit) get up to ANTHROPIC_MAX_RETRIES additional attempts; after
+    that the final exception is re-raised so the caller's own retry
+    layer (e.g. council._run_single_agent) can decide what to do.
+
+    Non-retryable errors (4xx other than 429, validation errors) are
+    re-raised immediately — no point burning quota on them.
+    """
     import anthropic  # local import — SDK may not be installed in ollama-only setups
 
     if not config.ANTHROPIC_API_KEY:
@@ -49,7 +66,13 @@ async def _chat_anthropic(system: str, user: str, model: str) -> str:
             "Add it to your .env file before using the anthropic backend."
         )
 
-    client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+    # Disable the SDK's built-in retry (default: 2). This module owns the
+    # policy; double-retry would silently double the worst-case latency
+    # and obscure the backoff schedule we expose via env.
+    client = anthropic.AsyncAnthropic(
+        api_key=config.ANTHROPIC_API_KEY,
+        max_retries=0,
+    )
 
     # Wrap the system prompt as a cached ephemeral block when enabled.
     # The cache is keyed by the exact prefix bytes — repeated calls within the
@@ -67,12 +90,63 @@ async def _chat_anthropic(system: str, user: str, model: str) -> str:
     else:
         system_param = system
 
-    response = await client.messages.create(
-        model=model,
-        system=system_param,
-        messages=[{"role": "user", "content": user}],
-        max_tokens=config.ANTHROPIC_MAX_TOKENS,
+    # Retryable error set: 5xx (incl. 529 OverloadedError = anthropic load
+    # shedding), 429 (RateLimitError), connection drops, read timeouts.
+    # InternalServerError / APIStatusError are catch-alls for anything ≥500.
+    retryable = (
+        anthropic.APIConnectionError,
+        anthropic.APITimeoutError,
+        anthropic.RateLimitError,
+        anthropic.InternalServerError,
     )
+
+    max_retries = config.ANTHROPIC_MAX_RETRIES
+    base = config.ANTHROPIC_RETRY_BASE_DELAY
+    cap = config.ANTHROPIC_RETRY_MAX_DELAY
+    total_attempts = 1 + max_retries
+
+    for attempt in range(total_attempts):
+        try:
+            response = await client.messages.create(
+                model=model,
+                system=system_param,
+                messages=[{"role": "user", "content": user}],
+                max_tokens=config.ANTHROPIC_MAX_TOKENS,
+            )
+            break
+        except retryable as exc:
+            if attempt >= max_retries:
+                logger.error(
+                    "anthropic call failed after %d attempts: %s",
+                    total_attempts,
+                    exc,
+                )
+                raise
+            delay = min(base * (2**attempt), cap)
+            logger.warning(
+                "anthropic call failed (attempt %d/%d): %s — retrying in %.1fs",
+                attempt + 1,
+                total_attempts,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except anthropic.APIStatusError as exc:
+            # Generic catch — only retry on 5xx; surface 4xx (≠429) immediately.
+            status = getattr(exc, "status_code", None)
+            if status is not None and status >= 500 and attempt < max_retries:
+                delay = min(base * (2**attempt), cap)
+                logger.warning(
+                    "anthropic %s (attempt %d/%d): %s — retrying in %.1fs",
+                    status,
+                    attempt + 1,
+                    total_attempts,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise
 
     # Surface cache stats so we can verify the cache is engaging without
     # waiting on the dashboard CSV. cache_read_input_tokens > 0 means we hit
