@@ -47,6 +47,10 @@ ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 ANTHROPIC_PROMPT_CACHE_ENABLED: bool = (
     os.getenv("ANTHROPIC_PROMPT_CACHE_ENABLED", "true").lower() == "true"
 )
+ANTHROPIC_MAX_TOKENS: int = int(os.getenv("ANTHROPIC_MAX_TOKENS", "2048"))
+"""Max output tokens per Anthropic call. Must cover the agent's full JSON
+response — truncation at this ceiling produces unterminated-string parse
+errors. 2048 gives ~2× headroom over typical two-sided council verdicts."""
 
 # ---------------------------------------------------------------------------
 # Tavily (news search)

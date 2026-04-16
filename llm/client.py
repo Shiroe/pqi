@@ -71,7 +71,7 @@ async def _chat_anthropic(system: str, user: str, model: str) -> str:
         model=model,
         system=system_param,
         messages=[{"role": "user", "content": user}],
-        max_tokens=1024,
+        max_tokens=config.ANTHROPIC_MAX_TOKENS,
     )
 
     # Surface cache stats so we can verify the cache is engaging without
