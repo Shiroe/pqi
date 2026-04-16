@@ -226,6 +226,53 @@ def _format_briefing(briefing: BriefingDocument) -> str:
             f"{items}\n"
         )
 
+    # Optional STRUCTURED MATCH DATA — authoritative identifiers from the
+    # PandaScore match_resolver. When present, the canonical names, status,
+    # and form snapshots are far more trustworthy than anything the news
+    # summary might imply. Agents should use this to disambiguate team
+    # variants in snippets and as a reality-check on the news narrative.
+    structured_block = ""
+    if briefing.structured_match is not None:
+        sm = briefing.structured_match
+        lines: list[str] = [
+            "\nSTRUCTURED MATCH DATA (PandaScore — authoritative identifiers):",
+            f"- Canonical matchup: {sm.team_a_name} vs {sm.team_b_name}"
+            + (f" ({sm.match_format})" if sm.match_format else ""),
+            f"- Status: {sm.status.upper()}",
+            f"- Scheduled: {sm.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        ]
+        if sm.tournament_name:
+            lines.append(f"- Tournament: {sm.tournament_name}")
+        if sm.status == "finished":
+            if sm.final_score:
+                lines.append(f"- Final score: {sm.final_score}")
+            if sm.winner_name:
+                lines.append(f"- Winner: {sm.winner_name}")
+        elif sm.status in {"scheduled", "running"}:
+            lines.append(
+                f"- NOTE: Match is {sm.status.upper()} — any past-tense "
+                "scoreline in the briefing is from a PRIOR encounter."
+            )
+
+        if sm.team_a_recent_form is not None:
+            f = sm.team_a_recent_form
+            total = f.wins + f.losses
+            lines.append(
+                f"- {sm.team_a_name} recent form: {f.wins}W-{f.losses}L "
+                f"(last {total} matches)"
+            )
+        if sm.team_b_recent_form is not None:
+            f = sm.team_b_recent_form
+            total = f.wins + f.losses
+            lines.append(
+                f"- {sm.team_b_name} recent form: {f.wins}W-{f.losses}L "
+                f"(last {total} matches)"
+            )
+        lines.append(
+            f"- Resolver fuzzy confidence: {sm.fuzzy_score}/100"
+        )
+        structured_block = "\n".join(lines) + "\n"
+
     # Price history block (conditional — only if CLOB data was fetched)
     price_history_block = ""
     if briefing.price_history is not None:
@@ -272,6 +319,7 @@ def _format_briefing(briefing: BriefingDocument) -> str:
         f"END DATE: {m.end_date.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"{timing_block}\n"
         f"{disambiguation_block}"
+        f"{structured_block}"
         f"{price_history_block}"
         f"VOLUME (USD): ${m.volume_usd:,.0f}\n"
         f"\nRESOLUTION CRITERIA:\n{m.resolution_criteria}\n"
