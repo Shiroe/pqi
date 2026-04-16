@@ -799,11 +799,73 @@ class CategoryMatch:
         return f"CategoryMatch({self.match_type!r}, {self.value!r})"
 
 
+# --- Category cache --------------------------------------------------------
+# Persistent JSON cache of {query_clean: {match_type, value, resolved_at}}.
+# Tag/series IDs on Polymarket are effectively immutable, so we cache only
+# positive resolutions and never expire them. Misses fall through to the
+# live three-pass resolver. To force a refresh, delete the file.
+
+def _load_category_cache() -> dict:
+    from pathlib import Path
+    path = Path(config.CATEGORY_CACHE_PATH)
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("category cache unreadable (%s); ignoring", exc)
+        return {}
+
+
+def _save_category_cache(cache: dict) -> None:
+    from pathlib import Path
+    path = Path(config.CATEGORY_CACHE_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, sort_keys=True)
+        tmp.replace(path)
+    except OSError as exc:
+        logger.warning("could not persist category cache: %s", exc)
+
+
+def _cache_get_category(query_clean: str) -> CategoryMatch | None:
+    entry = _load_category_cache().get(query_clean)
+    if not entry:
+        return None
+    match_type = entry.get("match_type")
+    value = entry.get("value")
+    if match_type not in {"series", "tag"} or not value:
+        return None
+    return CategoryMatch(match_type, str(value))
+
+
+def _cache_put_category(query_clean: str, match: CategoryMatch) -> None:
+    cache = _load_category_cache()
+    cache[query_clean] = {
+        "match_type": match.match_type,
+        "value": match.value,
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_category_cache(cache)
+
+
 async def resolve_category(query: str) -> CategoryMatch | None:
     """
     Resolve a user-supplied category string to either a series_id or a tag_id.
 
-    Strategy (three passes):
+    Hits a persistent JSON cache (`config.CATEGORY_CACHE_PATH`) first. On
+    miss, falls through to the three-pass live resolver and writes the
+    positive result back to the cache. Misses are NOT cached, so a category
+    that didn't exist when first queried (or was misspelled) will retry on
+    the next run.
+
+    Live strategy (three passes):
       1. Exact series slug match via GET /series?slug=<query>
       2. Partial series slug/title match via GET /series?limit=200
       3. Tag match via GET /tags (paginated) — exact then partial slug/label match.
@@ -813,6 +875,11 @@ async def resolve_category(query: str) -> CategoryMatch | None:
     """
     query_clean = query.strip().lower()
     query_norm = query_clean.replace(" ", "-")
+
+    cached = _cache_get_category(query_clean)
+    if cached is not None:
+        logger.debug("resolve_category(%r): cache hit → %s", query, cached)
+        return cached
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Pass 1: exact series slug match
@@ -825,7 +892,9 @@ async def resolve_category(query: str) -> CategoryMatch | None:
             if results and results[0].get("slug", "").lower() == query_clean:
                 series_id = str(results[0]["id"])
                 logger.debug("resolve_category(%r): exact series match → id=%s", query, series_id)
-                return CategoryMatch("series", series_id)
+                match = CategoryMatch("series", series_id)
+                _cache_put_category(query_clean, match)
+                return match
 
         await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
 
@@ -866,8 +935,10 @@ async def resolve_category(query: str) -> CategoryMatch | None:
         )
         # Series takes priority over tag
         if series_result:
+            _cache_put_category(query_clean, series_result)
             return series_result
         if tag_result:
+            _cache_put_category(query_clean, tag_result)
             return tag_result
 
         await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
@@ -901,7 +972,9 @@ async def resolve_category(query: str) -> CategoryMatch | None:
                 "resolve_category(%r): partial tag match %r (id=%s)",
                 query, partial_tag_match.get("slug"), tag_id,
             )
-            return CategoryMatch("tag", tag_id)
+            match = CategoryMatch("tag", tag_id)
+            _cache_put_category(query_clean, match)
+            return match
 
     logger.warning("resolve_category(%r): no match found", query)
     return None

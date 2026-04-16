@@ -202,6 +202,10 @@ KELLY_MULTIPLIER: float = float(os.getenv("KELLY_MULTIPLIER", "0.5"))
 
 CACHE_DB_PATH: str = os.getenv("CACHE_DB_PATH", str(Path.home() / ".pqi" / "cache.db"))
 CACHE_PRICE_DELTA: float = float(os.getenv("CACHE_PRICE_DELTA", "0.02"))
+CATEGORY_CACHE_PATH: str = os.getenv(
+    "CATEGORY_CACHE_PATH",
+    str(Path.home() / ".pqi" / "category_cache.json"),
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -293,6 +297,7 @@ if __name__ == "__main__":
         ("BEAR_WEIGHT", str(BEAR_WEIGHT)),
         ("CACHE_DB_PATH", CACHE_DB_PATH),
         ("CACHE_PRICE_DELTA", str(CACHE_PRICE_DELTA)),
+        ("CATEGORY_CACHE_PATH", CATEGORY_CACHE_PATH),
         ("LOG_LEVEL", LOG_LEVEL),
     ]
     col = max(len(k) for k, _ in rows) + 2
