@@ -4,6 +4,79 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 29 — Persistent category-resolution cache
+
+Small QoL pass. Every `analyze -c <category>` run was paying ~3
+HTTP calls plus rate-limit sleeps to re-resolve a category string
+to a `series_id` or `tag_id` — even though Polymarket's tag and
+series IDs are effectively immutable (e.g. `esports` is tag id
+`64` and has been for the project's entire life).
+
+### Patch
+
+- **`pqi/config.py`** — new `CATEGORY_CACHE_PATH: str` (default
+  `~/.pqi/category_cache.json`).
+- **`.env.example`** — documented the key.
+- **`pqi/market/polymarket.py`** — four module-level helpers:
+  - `_load_category_cache()` — reads JSON, returns `{}` on
+    missing/malformed file (logs warning).
+  - `_save_category_cache(cache)` — atomic `tmp + replace()`
+    write under `mkdir(parents=True, exist_ok=True)`.
+  - `_cache_get_category(query_clean)` — returns `CategoryMatch
+    | None`. Validates `match_type in {"series","tag"}` and a
+    truthy `value`.
+  - `_cache_put_category(query_clean, match)` — read-modify-write
+    of one entry. Stamps `resolved_at` for human inspection.
+- `resolve_category()` short-circuits at the top on cache hit,
+  and each of the three live passes (exact series, partial series
+  + exact tag in parallel, partial tag pagination) writes its
+  positive result back via `_cache_put_category` before returning.
+  Misses (the final `return None`) are intentionally NOT cached —
+  bad spellings, typos, and not-yet-indexed categories should
+  retry on the next run.
+
+### Cache shape
+
+One entry per cleaned-and-lowercased query string:
+
+```json
+{
+  "esports": {
+    "match_type": "tag",
+    "value": "64",
+    "resolved_at": "2026-04-16T14:14:51.213426+00:00"
+  }
+}
+```
+
+### Verification
+
+```
+=== first call: CategoryMatch('tag', '64') in 5924ms ===
+=== second call: CategoryMatch('tag', '64') in 0ms ===
+```
+
+DEBUG log on the warm path:
+`resolve_category('esports'): cache hit → CategoryMatch('tag', '64')`.
+
+### Why no CLI `--refresh-categories` flag
+
+Tag/series IDs don't churn on Polymarket — the only realistic
+invalidation reason is "I think Polymarket renamed something."
+Deleting the file (`rm ~/.pqi/category_cache.json`) is a single
+command and survives just fine without a flag. Adding one would
+expand the CLI surface for a near-zero use case.
+
+### Why misses aren't cached
+
+A `None` result usually means a typo or a category that doesn't
+exist yet. Caching that result would lock the user out of ever
+finding it once Polymarket adds it. Cost of retry on the next
+run is the same ~3 calls — bounded — so the asymmetry favors
+re-trying.
+
+---
+
 ## Session 28 — Temporal disambiguation + PandaScore structured-data integration
 
 Bug-fix session triggered by a critical incident: the council

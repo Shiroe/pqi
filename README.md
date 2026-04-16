@@ -489,6 +489,7 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `TAVILY_SNIPPET_CAP`          | `5000`  | Max chars of search snippets sent to LLM                                             |
 | `EVENT_ENRICHMENT_MAX`        | `30`    | Max parallel /events/{id} detail calls for enrichment                                |
 | `CACHE_PRICE_DELTA`           | `0.02`  | Price movement threshold to invalidate cached results                                |
+| `CATEGORY_CACHE_PATH`         | `~/.pqi/category_cache.json` | JSON cache of resolved `--category` lookups. Only positive resolutions are cached; misses retry the live resolver. Delete the file to force a refresh |
 | `PRICE_HISTORY_INTERVAL`      | `1w`    | CLOB price history window (1d, 1w, 1m)                                               |
 | `PRICE_HISTORY_FIDELITY`      | `60`    | Price history resolution in minutes (60 = hourly)                                    |
 
@@ -501,6 +502,15 @@ if the market's YES price has moved less than `CACHE_PRICE_DELTA` (default 2%) s
 the last run. Use `--no-cache` to force a fresh council run.
 
 Cache path is configurable via `CACHE_DB_PATH`.
+
+### Category resolution cache
+
+`--category` lookups (e.g. `esports` → tag id `64`) are persisted to
+`~/.pqi/category_cache.json`. Tag/series IDs on Polymarket are effectively
+immutable, so the cache has no TTL — only positive resolutions are written,
+misses fall through to the live three-pass resolver and retry on the next run.
+Delete the file to force a fresh lookup, or override the path with
+`CATEGORY_CACHE_PATH`.
 
 ---
 

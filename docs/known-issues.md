@@ -169,6 +169,16 @@ roadmap item tracks this.
   with a defensive `ALTER TABLE` migration so existing databases
   upgrade in place on next open. Deleting it only costs
   re-analysis cost, not correctness.
+- `~/.pqi/category_cache.json` — persistent cache of `--category`
+  string → `series_id` / `tag_id` resolutions (session 29). Tag
+  and series IDs on Polymarket are effectively immutable, so the
+  cache has no TTL. Only positive resolutions are written; misses
+  (`None`) intentionally bypass the cache so misspellings or
+  newly-added categories retry on the next run. Atomic
+  `tmp + replace()` writes; tolerant of unreadable / malformed
+  files (logs warning, treats as empty). Deleting it only costs
+  one cold lookup on next use. Override path with
+  `CATEGORY_CACHE_PATH`.
 - **`~/.pqi/stats.json` — EV gate input.** Persisted `PerceivedStats`
   snapshot (true_win_rate, sample_size, kelly_fraction_at_p75, below_min_samples).
   Refreshed by `history sync` / `history stats` via `stats.recompute_from_history`.

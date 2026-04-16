@@ -441,7 +441,7 @@ as a literal.
 
 ## Current State
 
-**Last updated:** [session 28 — temporal disambiguation + PandaScore structured-data integration shipped end-to-end. Fixes the council's temporal-blindness bug where past-tense H2H scorelines were paraphrased as the current match's outcome. Three-layer defense: Pydantic contract → LLM system prompt → mechanical regex fallback. Esports-only path; non-esports markets unaffected.]
+**Last updated:** [session 29 — small QoL: persistent `~/.pqi/category_cache.json` short-circuits `resolve_category()` on warm calls. Cuts `analyze -c esports` startup latency from ~6s to ~0ms on cache hits. Only positive resolutions cached; misses fall through to live resolver. Session 28 (temporal disambiguation + PandaScore structured-data integration) remains the most recent substantive change.]
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -506,7 +506,43 @@ preserved it: every addition is metadata-only or upstream of the
 aggregator. `CouncilResult.from_council_verdicts()` math unchanged
 since session 23.
 
-### Session 28 (this session)
+### Session 29 (this session)
+
+Small QoL: `--category` resolution was wasting ~3 HTTP calls
+plus rate-limit sleeps every analyze run, even though Polymarket
+tag/series IDs are effectively immutable (e.g. `esports` → tag
+id `64` for the lifetime of the project).
+
+Patch:
+
+- `pqi/config.py` — new `CATEGORY_CACHE_PATH: str` (default
+  `~/.pqi/category_cache.json`).
+- `.env.example` — documented the key.
+- `pqi/market/polymarket.py` — `_load_category_cache`,
+  `_save_category_cache`, `_cache_get_category`,
+  `_cache_put_category` helpers (atomic tmp+rename writes,
+  tolerant of unreadable / malformed files). `resolve_category()`
+  short-circuits on cache hit at the top of the function. Each of
+  the three live passes now writes its positive result back before
+  returning. Misses (None) are NOT cached — bad spellings or
+  not-yet-indexed categories will retry on the next run.
+
+Cache shape (one entry per cleaned-and-lowercased query):
+
+```json
+{
+  "esports": {"match_type": "tag", "value": "64", "resolved_at": "2026-04-16T..."}
+}
+```
+
+Verification: cold `resolve_category("esports")` ~5.9s → warm
+call 0ms. `cache hit → CategoryMatch('tag', '64')` log line on
+the warm path.
+
+To force a refresh: `rm ~/.pqi/category_cache.json`. No CLI flag
+added — keeping the surface narrow.
+
+### Session 28
 
 Bug-fix session. The CS market "Will 1WIN beat Nuclear TigeRES?"
 returned a 99% YES verdict at HIGH confidence with the council
@@ -683,6 +719,12 @@ No code revert needed.
   (5-min TTL) when `ANTHROPIC_PROMPT_CACHE_ENABLED=true`.
   Cache-hit/write counts logged at DEBUG via `usage.cache_*`. No
   behavioral change to outputs.
+- **Persistent category-resolution cache** (session 29,
+  `~/.pqi/category_cache.json`): `resolve_category()` short-circuits
+  on cache hits, eliminating the ~3 redundant Gamma API calls per
+  `analyze -c <category>` warm run. Only positive resolutions are
+  cached; misses fall through unchanged. Override path via
+  `CATEGORY_CACHE_PATH`.
 - **Temporal disambiguation + PandaScore structured-data layer**
   (session 28): three-layer defense against the council
   paraphrasing past-tense H2H scorelines as the current match's
@@ -718,9 +760,23 @@ parallelism, bias-as-feature, statistical skepticism) for this project.
 Detailed reference material lives in docs/:
 - docs/api-reference.md — API endpoints, params, response formats (now includes PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 28)
+- docs/session-log.md — per-session changelog (current through session 29)
 - docs/roadmap.md — future work priorities, themed
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped session 26)
+
+## Session 29 context (completed)
+- Persistent category-resolution cache at
+  ~/.pqi/category_cache.json. resolve_category() in
+  pqi/market/polymarket.py checks the cache first, falls through
+  to the live three-pass resolver on miss, writes positive
+  results back. Only positive resolutions cached; None stays
+  uncached so misspellings or not-yet-indexed categories retry.
+  Override path with CATEGORY_CACHE_PATH. Verified ~5.9s cold →
+  0ms warm for `esports`.
+- Files touched: pqi/config.py (new CATEGORY_CACHE_PATH),
+  .env.example (documented), pqi/market/polymarket.py (4 new
+  module-level helpers + 4 short-circuit/write-back insertions
+  in resolve_category).
 
 ## Session 28 context (completed)
 - Bug fix for the council temporal-blindness bug: a CS market
