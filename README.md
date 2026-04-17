@@ -458,7 +458,7 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | Variable                      | Default | Effect                                                                               |
 | ----------------------------- | ------- | ------------------------------------------------------------------------------------ |
 | `MIN_COUNCIL_PROBABILITY`     | `0.60`  | Minimum council probability to issue a market-aligned BUY                            |
-| `MIN_CONTRARIAN_PROBABILITY`  | `0.70`  | Minimum council probability for a contrarian BUY (against market)                    |
+| `MIN_CONTRARIAN_PROBABILITY`  | `0.60`  | Minimum council probability for a contrarian BUY (against market)                    |
 | `MIN_CONTRARIAN_CONFIDENCE`   | `0.80`  | Minimum per-side confidence for a contrarian BUY                                     |
 | `CONFIDENCE_HIGH_THRESHOLD`   | `0.67`  | Mean confidence required for HIGH label                                              |
 | `EDGE_THRESHOLD`              | `0.07`  | **Deprecated and unused** — kept only so existing `.env` files don't error on import |
