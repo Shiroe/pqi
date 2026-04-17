@@ -398,7 +398,7 @@ class CouncilResult(BaseModel):
         min_expected_roi: float = 0.15,
         min_contrarian_roi: float = 0.20,
         min_council_probability: float = 0.60,
-        min_contrarian_probability: float = 0.70,
+        min_contrarian_probability: float = 0.65,
         min_contrarian_confidence: float = 0.80,
         agent_weights: dict[str, float] | None = None,
         perceived_win_rate: float | None = None,

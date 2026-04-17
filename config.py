@@ -200,7 +200,7 @@ Set to 0.0 to disable the nudge while keeping the file machinery on."""
 # Probability-first recommendation gates
 MIN_COUNCIL_PROBABILITY: float = float(os.getenv("MIN_COUNCIL_PROBABILITY", "0.60"))
 MIN_CONTRARIAN_PROBABILITY: float = float(
-    os.getenv("MIN_CONTRARIAN_PROBABILITY", "0.70")
+    os.getenv("MIN_CONTRARIAN_PROBABILITY", "0.65")
 )
 MIN_CONTRARIAN_CONFIDENCE: float = float(os.getenv("MIN_CONTRARIAN_CONFIDENCE", "0.80"))
 
