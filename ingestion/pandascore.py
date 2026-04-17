@@ -166,8 +166,12 @@ async def get_team_past_matches(
     Returns up to `count` items (PandaScore caps `per_page` at 100), or
     [] on failure.
     """
-    path = f"/teams/{team_id}/matches/past"
-    params = {"sort": "-scheduled_at", "per_page": min(count, 100)}
+    path = f"/teams/{team_id}/matches"
+    params = {
+        "filter[past]": "true",
+        "sort": "-scheduled_at",
+        "per_page": min(count, 100),
+    }
     data = await _get(client, path, params)
     if not isinstance(data, list):
         return []
