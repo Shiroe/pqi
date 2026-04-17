@@ -62,30 +62,62 @@ logger = logging.getLogger(__name__)
 #   - Anything NOT in this dict returns None from `_game_slug_for` — the
 #     resolver short-circuits and the briefing falls back to Tavily-only.
 
+csgo = "csgo"
+lol = "lol"
+lolWildRift = "lol-wild-rift"
+mlbb = "mlbb"
+dota2 = "dota2"
+valorant = "valorant"
+r6siege = "r6siege"
+overwatch = "ow"
+pubg = "pubg"
+rocketleague = "rl"
+kingOfGlory = "kog"
+starcraft2 = "starcraft-2"
+starcraft1 = "starcraft-brood-war"
+fifa = "fifa"
+codMW = "codmw"
+
 GAME_MAPPING: dict[str, str] = {
     # Counter-Strike (PandaScore slug kept as `cs-go` post-CS2 transition)
-    "cs2":       "cs-go",
-    "csgo":      "cs-go",
-    "counter-strike": "cs-go",
+    "cs2": csgo,
+    "csgo": csgo,
+    "counter-strike": csgo,
     # League of Legends
-    "lol":       "league-of-legends",
-    "league of legends": "league-of-legends",
+    "lol": lol,
+    "league of legends": lol,
     # Valorant
-    "valorant":  "valorant",
-    "val":       "valorant",
+    "valorant": valorant,
+    "val": valorant,
     # Dota 2
-    "dota2":     "dota-2",
-    "dota":      "dota-2",
-    "dota 2":    "dota-2",
+    "dota2": dota2,
+    "dota": dota2,
+    "dota 2": dota2,
     # Rainbow Six Siege
-    "r6":        "r6-siege",
-    "r6siege":   "r6-siege",
-    "rainbow six siege": "r6-siege",
-    "rainbow six": "r6-siege",
+    "r6": r6siege,
+    "r6siege": r6siege,
+    "rainbow six siege": r6siege,
+    "rainbow six": r6siege,
     # Mobile Legends: Bang Bang
-    "mlbb":      "mlbb",
-    "mobile legends": "mlbb",
-    "mobile legends bang bang": "mlbb",
+    "mlbb": mlbb,
+    "mobile legends": mlbb,
+    "mobile legends bang bang": mlbb,
+    # Overwatch
+    "overwatch": overwatch,
+    # PUBG
+    "pubg": pubg,
+    # Rocket League
+    "rocket-league": rocketleague,
+    # King of glory
+    "king-of-glory": kingOfGlory,
+    # Starcraft 2
+    "starcraft-2": starcraft2,
+    # Starcraft: Brood war
+    "starcraft-brood-war": starcraft1,
+    # FIFA
+    "fifa": fifa,
+    # Call of Duty: Modern Warfare
+    "codmw": codMW,
 }
 
 
@@ -107,7 +139,7 @@ _VS_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _PREFIX_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^[A-Za-z0-9_+ ]+:\s+"),     # "Valorant: ", "CS2: "
+    re.compile(r"^[A-Za-z0-9_+ ]+:\s+"),  # "Valorant: ", "CS2: "
     re.compile(r"^(Will|Does|Do|Can|Is)\s+", re.IGNORECASE),
 )
 
@@ -206,10 +238,7 @@ def _pick_best_candidate(
 ) -> tuple[dict, int] | None:
     """Score each candidate and return (winner_dict, score) or None
     when nothing scores above zero."""
-    scored = [
-        (m, _score_candidate(party_a, party_b, m))
-        for m in candidates
-    ]
+    scored = [(m, _score_candidate(party_a, party_b, m)) for m in candidates]
     scored = [s for s in scored if s[1] > 0]
     if not scored:
         return None
@@ -236,7 +265,9 @@ def _winner_for_team(match: dict, team_id: int | str) -> str:
     return "win" if str(winner_id) == str(team_id) else "loss"
 
 
-def _build_team_form(team_name: str, raw_matches: list[dict], team_id: int | str) -> TeamForm | None:
+def _build_team_form(
+    team_name: str, raw_matches: list[dict], team_id: int | str
+) -> TeamForm | None:
     """Reduce a list of recent finished matches to a TeamForm snapshot.
     Returns None when nothing is usable."""
     completed = [m for m in raw_matches if _is_completed(m)]
@@ -283,14 +314,18 @@ def _build_h2h(raw_matches: list[dict], limit: int = 10) -> list[H2HMatch]:
             except (TypeError, ValueError, AttributeError):
                 pass
         tournament = m.get("tournament") or {}
-        tournament_name = tournament.get("name") if isinstance(tournament, dict) else None
+        tournament_name = (
+            tournament.get("name") if isinstance(tournament, dict) else None
+        )
         out.append(
             H2HMatch(
                 match_id=str(m.get("id", "")),
                 scheduled_at=scheduled,
                 winner_name=winner_name if isinstance(winner_name, str) else None,
                 score_summary=score_summary,
-                tournament_name=tournament_name if isinstance(tournament_name, str) else None,
+                tournament_name=tournament_name
+                if isinstance(tournament_name, str)
+                else None,
             )
         )
         if len(out) >= limit:
@@ -375,8 +410,10 @@ async def resolve_match(market: MarketData) -> StructuredMatchRecord | None:
         if not candidates:
             logger.info(
                 "resolve_match: no %s matches in ±%.1fh of %s for market %s",
-                slug, config.PANDASCORE_WINDOW_HOURS,
-                market.event_start_time.isoformat(), market.id,
+                slug,
+                config.PANDASCORE_WINDOW_HOURS,
+                market.event_start_time.isoformat(),
+                market.id,
             )
             return None
 
@@ -388,8 +425,11 @@ async def resolve_match(market: MarketData) -> StructuredMatchRecord | None:
             logger.info(
                 "resolve_match: best candidate score %d below threshold %d "
                 "for market %s (parties %r vs %r)",
-                score, config.PANDASCORE_FUZZY_THRESHOLD,
-                market.id, party_a, party_b,
+                score,
+                config.PANDASCORE_FUZZY_THRESHOLD,
+                market.id,
+                party_a,
+                party_b,
             )
             return None
 
@@ -401,14 +441,22 @@ async def resolve_match(market: MarketData) -> StructuredMatchRecord | None:
         team_b_name = names[1] if len(names) >= 2 else party_b
         team_a_id = _opponent_id(match, position=0)
         team_b_id = _opponent_id(match, position=1)
-        match_format = (match.get("number_of_games") and f"BO{match.get('number_of_games')}") or None
-        tournament_name = (match.get("tournament") or {}).get("name") if isinstance(match.get("tournament"), dict) else None
+        match_format = (
+            match.get("number_of_games") and f"BO{match.get('number_of_games')}"
+        ) or None
+        tournament_name = (
+            (match.get("tournament") or {}).get("name")
+            if isinstance(match.get("tournament"), dict)
+            else None
+        )
         winner_name = None
         final_score = None
         if status == "finished":
             winner = match.get("winner") or {}
             if isinstance(winner, dict):
-                winner_name = winner.get("name") if isinstance(winner.get("name"), str) else None
+                winner_name = (
+                    winner.get("name") if isinstance(winner.get("name"), str) else None
+                )
             results = match.get("results") or []
             if isinstance(results, list) and len(results) >= 2:
                 try:
@@ -432,27 +480,35 @@ async def resolve_match(market: MarketData) -> StructuredMatchRecord | None:
 
         form_count = config.PANDASCORE_RECENT_FORM_COUNT
         a_form_task: asyncio.Future[list[dict]] = (
-            asyncio.ensure_future(pandascore.get_team_past_matches(client, team_a_id, form_count))
+            asyncio.ensure_future(
+                pandascore.get_team_past_matches(client, team_a_id, form_count)
+            )
             if team_a_id is not None
             else _resolved_future_empty()
         )
         b_form_task: asyncio.Future[list[dict]] = (
-            asyncio.ensure_future(pandascore.get_team_past_matches(client, team_b_id, form_count))
+            asyncio.ensure_future(
+                pandascore.get_team_past_matches(client, team_b_id, form_count)
+            )
             if team_b_id is not None
             else _resolved_future_empty()
         )
         h2h_raw, a_recent_raw, b_recent_raw = await asyncio.gather(
-            h2h_task, a_form_task, b_form_task,
+            h2h_task,
+            a_form_task,
+            b_form_task,
         )
 
     h2h = _build_h2h(h2h_raw, limit=10)
     team_a_form = (
         _build_team_form(team_a_name, a_recent_raw, team_a_id)
-        if team_a_id is not None else None
+        if team_a_id is not None
+        else None
     )
     team_b_form = (
         _build_team_form(team_b_name, b_recent_raw, team_b_id)
-        if team_b_id is not None else None
+        if team_b_id is not None
+        else None
     )
 
     record = StructuredMatchRecord(
@@ -475,7 +531,12 @@ async def resolve_match(market: MarketData) -> StructuredMatchRecord | None:
     )
     logger.info(
         "resolve_match: %s → PandaScore %s (%s vs %s, status=%s, fuzzy=%d)",
-        market.id, match_id, team_a_name, team_b_name, status, score,
+        market.id,
+        match_id,
+        team_a_name,
+        team_b_name,
+        status,
+        score,
     )
     return record
 
