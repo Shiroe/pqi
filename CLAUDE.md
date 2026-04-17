@@ -314,7 +314,9 @@ Gate order inside `from_council_verdicts()`:
 2. **Price ceiling**: `side_price > MAX_TRADEABLE_PRICE` (0.90) → PASS.
    Near-resolved; ROI doesn't justify execution risk.
 3. **Contrarian** (council disagrees with market): requires all of
-   `council_prob >= MIN_CONTRARIAN_PROBABILITY` (0.65, session 31),
+   `council_prob >= MIN_CONTRARIAN_PROBABILITY` (0.60, session 32;
+   session 31's 0.65 was -EV in retrospective, the +$0.081/share
+   signal lives in the 0.60–0.65 band),
    `side_conf >= MIN_CONTRARIAN_CONFIDENCE` (0.80),
    `expected_roi >= MIN_CONTRARIAN_ROI` (0.20). Label: `CONTRARIAN`.
 4. **Market-aligned**: requires
@@ -323,7 +325,7 @@ Gate order inside `from_council_verdicts()`:
    `expected_roi >= MIN_EXPECTED_ROI` (0.10).
 5. **EV gate (final, banded — session 31)**: after a BUY clears all
    prior gates, reject it if `side_price >= band_wr` → PASS with reason
-   `"Big Drawdown Risk: … ≥ XX.X% [band L-H, n=K] (-EV)"`. `band_wr`
+   `"Big Drawdown Risk: … ≥ band L-H WR XX.X% [n=K] (-EV)"`. `band_wr`
    is the Beta-binomial smoothed win rate for the price band containing
    `side_price`, drawn from `PerceivedStats.band_stats` and computed
    against the global rate with pseudo-count `BAND_SHRINKAGE_K` (default
@@ -469,9 +471,15 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 31 — banded-WR EV gate (Beta-binomial
-smoothed per-price-band thresholds) + Kelly aligned to the banded
-threshold + contrarian min-prob loosened 0.70 → 0.65 + PandaScore
+**Last updated:** session 32 — contrarian min-prob retuned `0.65 →
+0.60` (session 31's 0.65 was -EV on the resolved sample; the positive
+signal sits in the 0.60–0.65 band) and the banded EV gate's
+`pass_reason` format reworked to `≥ band L-H WR XX.X% [n=K]` so the
+comparison is unambiguously against the band WR (not the global
+`PerceivedTrueWinRate`).
+
+Session 31 — banded-WR EV gate (Beta-binomial smoothed per-price-band
+thresholds) + Kelly aligned to the banded threshold + PandaScore
 `/teams/{id}/matches/past` endpoint fix.
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
@@ -489,22 +497,38 @@ stats` renders a shadow panel + per-agent drift/Brier table.
 **Descriptive only — scoring still aggregates from the single
 `probability` field.** Never wire `probability_no` into
 `CouncilResult.from_council_verdicts()` until step 5 passes the
-pre-registered acceptance criteria on held-out data. Steps 5–6 are
-gated on resolved-sample count (check the shadow panel before
-starting).
+pre-registered acceptance criteria on held-out data. Session-32
+reassessment (628 independent, 406 resolved, per-agent `|drift|`
+0.01–0.06): step 5 is blocked on **signal quality** not sample
+count — aggregate autonomy has converged toward mirror collapse,
+so the pre-registered ΔBrier ≤ −0.005 criterion is mathematically
+unreachable on the current persona output. Fix the SHARED_PREAMBLE
+autonomy framing before running the backtest.
 
 Sessions 22–24 established the pre-EV scoring contract as stable.
 Sessions 25 (A.9 dynamic weights), 26 (Option B 1–4), 28 (PandaScore
 + temporal disambiguation), 29 (category cache), 30 (Anthropic retry)
 preserved it — every addition was metadata-only or upstream of the
-aggregator. Session 31 is the first aggregator-touching change since
+aggregator. Session 31 was the first aggregator-touching change since
 session 23: the EV gate's threshold became band-specific and Kelly
-was realigned to the banded rate. The gate still runs last and still
-only converts existing BUY recommendations to PASS (it never creates
-a BUY), so upstream behavior is unchanged.
+was realigned to the banded rate. Session 32 retuned one gate knob
+(`MIN_CONTRARIAN_PROBABILITY` back to 0.60) and reworded a
+user-facing string, but kept the aggregator math identical. The EV
+gate still runs last and still only converts existing BUY
+recommendations to PASS (it never creates a BUY), so upstream
+behavior is unchanged.
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 32** — contrarian min-prob retuned `0.65 → 0.60` (session
+  31's 0.65 was -EV on resolved history; the profitable signal sits
+  in the 0.60–0.65 band). Big Drawdown Risk `pass_reason` format
+  reworked to `≥ band L-H WR X% [n=K] (-EV)` so the comparison is
+  unambiguously against the band WR rather than the global
+  `PerceivedTrueWinRate`. Star signal in analyze list verified
+  (already banded since session 31). Option B shadow reassessed:
+  signal has converged toward mirror collapse, backtest blocked on
+  signal quality not sample count.
 - **Session 31** — banded EV gate replaces the single global
   `PerceivedTrueWinRate` threshold with per-price-band smoothed rates
   (Beta-binomial with pseudo-count `BAND_SHRINKAGE_K`, default 5).
@@ -587,22 +611,44 @@ parallelism, bias-as-feature, statistical skepticism) for this project.
 Detailed reference material lives in docs/:
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 31)
+- docs/session-log.md — per-session changelog (current through session 32)
 - docs/roadmap.md — future work priorities, themed
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
 ## PRIORITY options (pick one with the user)
-- **Observe session-31 banded EV gate in the wild.** On the next
-  `analyze` run with a BUY that the gate touches, confirm the
-  `pass_reason` string (or the accepted rationale) mentions the band:
-  `"… [band L-H, n=K] (-EV)"`. Expected qualitative shifts vs the old
-  global gate on current history (global=0.69, 55 BUYs):
-  - 0.80–0.95 band → smoothed 0.897, previously blocked, now rescues.
-  - 0.50–0.60 band → smoothed 0.497, previously allowed, now blocks.
-  Verify at least one example on each direction before treating the
-  change as settled. If `history stats` shows an unexpectedly thin
-  band (e.g. 0.09–0.50 still n=0), that's fine — `wr_for_price()`
-  falls back to the global rate.
+- **Observe session-32 contrarian 0.60 gate in the wild.** After the
+  loosening, a CONTRARIAN BUY only fires when council prob ≥ 0.60 AND
+  side confidence ≥ 0.80 AND expected ROI ≥ 0.20 (the latter two
+  unchanged). Watch the first few CONTRARIAN BUYs that land — they
+  should skew toward the 0.60–0.65 band where the +$0.081/share
+  signal was observed. If the next 5–10 resolutions are trending
+  negative PnL, revisit the confidence (0.80) and ROI (0.20) gates
+  rather than the prob floor — those are the risk-side guards.
+- **Observe session-32 new `pass_reason` format.** Next BUY that the
+  banded EV gate downgrades to PASS should print
+  `"Big Drawdown Risk: YES price X% ≥ band L-H WR Y% [n=K] (-EV)"`
+  in the recommendation panel. The only path that still uses the
+  `PerceivedTrueWinRate` literal is when `perceived_stats` is absent
+  or the side price is outside `[0.09, 0.95]` — effectively cold-start
+  or an exotic price.
+- **Do NOT land `scripts/b_shadow_backtest.py` yet.** The session-32
+  shadow reassessment found that Option B's per-agent drift has
+  converged toward mirror collapse (|drift| 0.01–0.06, signed ±0.02).
+  YES/NO Brier differ by ≤ 0.01 across every agent — the
+  pre-registered ΔBrier ≤ −0.005 CI95<0 criterion is mathematically
+  unreachable with the current signal. Running the backtest now
+  will produce a rejection on a degenerate signal, not a real test
+  of B-math. Fix the signal first (next priority) or accept that
+  Option B stays descriptive-only.
+- **Iterate on Option B autonomy framing.** If the plan is to make
+  Option B earn its way into scoring, the SHARED_PREAMBLE autonomy
+  block needs sharper instruction — worked examples (`p_yes=0.70,
+  p_no=0.25 when TeamA evidence is deep and TeamB is sparse`) and
+  possibly a forced evidence-quality pre-step. Roll out per §6 step
+  3: `rules_lawyer → statistician → sentiment → specialist →
+  contrarian → bull → bear`, 10–20 analyses per persona, re-check
+  aggregate `|drift|` in `history stats`. Gate the backtest on
+  aggregate `|drift| > 0.10` for at least two agents.
 - **Retrospective: sanity-check `BAND_SHRINKAGE_K=5`.** After a
   handful of additional resolved rows, rerun the comparison between
   K=3 / K=5 / K=10 against realized outcomes. Only adjust K with
@@ -623,13 +669,6 @@ Detailed reference material lives in docs/:
   both teams when their names resolve — previously a broken path
   silently returned empty form. Resolver miss is fine — pipeline
   degrades to `structured_match=None`.
-- **Option B step 5 — shadow backtest.** GATED on ~100–150
-  independent resolved rows. Run `pqi history stats` first; if
-  per-agent `n_res` is near-zero, defer. When ready, land
-  `scripts/b_shadow_backtest.py` mirroring
-  `scripts/a1_backtest.py`'s structure (chronological 70/30 split,
-  bootstrap ΔBrier CI, pre-registered criteria). Candidate B-math
-  list lives in `docs/option_b_migration_plan.md` §7.
 - **Theme A · Modeling & Calibration:** A.4 (Bear monitoring, pure
   stats), A.10 (dynamic-weight feedback-loop monitoring — protects
   A.9 from self-reinforcement; matters more now that A.9 is live).
@@ -637,21 +676,22 @@ Detailed reference material lives in docs/:
 - **Theme B:** B.1 (streaming TUI) is the Phase 3 entry point.
 
 ## Instructions
-- Pick the next priority with the user before starting. If Option B
-  step 5 comes up, first run `pqi history stats` and read the
-  Option B shadow table — don't start the backtest until the
-  independent-sample budget is met.
+- Pick the next priority with the user before starting. If the
+  conversation turns to Option B step 5, reference the session-32
+  shadow reassessment in docs/session-log.md first — the backtest
+  cannot pass the pre-registered criteria on the current signal.
 - Update ## Current State and write a fresh ## Next Session Prompt
   at end of session. Log meaningful decisions in docs/session-log.md.
 - Session 31 touched the aggregator for the first time since session
-  23 (banded threshold + Kelly realignment). The gate still runs
-  last and still only converts BUY → PASS (never the other way), so
-  upstream contracts are preserved. Any further aggregator changes
-  need explicit sign-off.
+  23 (banded threshold + Kelly realignment). Session 32 adjusted a
+  gate knob (`MIN_CONTRARIAN_PROBABILITY`) and a user-facing string
+  but kept the aggregator math identical. Any further aggregator
+  changes still need explicit sign-off.
 - Option B rollout order is strict per
   docs/option_b_migration_plan.md. Never wire probability_no into
   scoring until step 5 passes pre-registered criteria on held-out
-  data.
+  data — and step 5 is blocked on the signal-quality gap, not the
+  sample-count gap.
 - PandaScore is non-fatal: any resolver failure must leave
   structured_match=None and let the pipeline continue. Don't add
   exceptions or hard gates — degraded behavior is the contract.

@@ -4,6 +4,135 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 32 — Contrarian 0.65 → 0.60 + banded EV gate pass_reason rewrite + Option B shadow reassessment
+
+Two small aggregator-adjacent changes plus a documentation decision on
+Option B. No schema or contract changes.
+
+### Contrarian min-prob retuned `0.65 → 0.60`
+
+Session 31 loosened `MIN_CONTRARIAN_PROBABILITY` from 0.70 to 0.65 on
+the rationale that the 0.70 gate never fired on resolved history while
+rejected-contrarian candidates at prob ≥ 0.60 would have produced
++$0.081/share on 34 rows. User retrospective on more recent data showed
+the profitable signal sits specifically in the 0.60–0.65 band — the
+0.65 threshold landed above it and was bleeding money on live runs.
+
+Reverted to the value the original retrospective actually validated.
+The higher-variance low-probability tail is still guarded by
+`MIN_CONTRARIAN_CONFIDENCE=0.80` and `MIN_CONTRARIAN_ROI=0.20`, both
+unchanged — the looser probability floor doesn't change the confidence
+or ROI bar a candidate must still clear.
+
+Files:
+
+- `config.py` — default `"0.65" → "0.60"`.
+- `models.py` — `from_council_verdicts` default `min_contrarian_probability=0.65 → 0.60`.
+- `.env.example` — default + rationale comment refreshed.
+- `README.md` — env var table updated.
+
+### Big Drawdown Risk `pass_reason` format reworked
+
+The banded EV gate's `pass_reason` string put the threshold value
+adjacent to the side price with band metadata trailing in brackets:
+
+```
+Big Drawdown Risk: YES price 77.5% ≥ 72.3% [band 0.70-0.80, n=15] (-EV)
+```
+
+Read naturally, this reads as `77.5% ≥ 72.3%` with band info as an
+aside — easy to misread `72.3%` as the global `PerceivedTrueWinRate`
+(which is 69.1% on current history, close enough to the band-specific
+72.3% to cause confusion). Reworded so the comparison is unambiguously
+against the band's WR:
+
+```
+Big Drawdown Risk: YES price 77.5% ≥ band 0.70-0.80 WR 72.3% [n=15] (-EV)
+```
+
+Fallback path (when `perceived_stats` is absent or the side price is
+outside `[0.09, 0.95]` and no band matches) keeps the literal
+`PerceivedTrueWinRate` wording so the two paths remain
+distinguishable.
+
+Verified against synthetic `PerceivedStats` with `side_price=0.775` in
+band `0.70–0.80 (smoothed_wr=72.3%)` — the recommendation downgrades
+to PASS with the new string.
+
+Files:
+
+- `models.py` — single-branch rewrite of the banded `pass_reason`
+  format. Fallback string unchanged. No change to `gate_threshold`
+  math, no change to `kelly_wr` threading, no change to
+  `gate_band` selection.
+
+### Star signal on analyze list view — verification (no code change)
+
+User asked to confirm the analyze list shows ⭐ when the price band's
+smoothed WR is above the market's favored-side price — e.g. 72%
+favored side with band 0.70–0.80 WR 73% should star.
+
+Current `_signal_glyph` (`main.py:318–336`) already does this:
+
+```python
+fav = max(yes_price, 1.0 - yes_price)
+ceiling = _star_ceiling_for_price(fav, stats=stats)
+if 0.55 <= fav <= ceiling:
+    return "⭐"
+```
+
+where `_star_ceiling_for_price` → `stats.wr_for_price(fav)` → the
+matching band's smoothed WR. All three analyze-list renderers
+(`display_market_list`, `display_event_list`, sub-market picker) pass
+`stats = _load_perceived_stats_safe()` into `_signal_glyph`. No code
+change needed — feature is live since session 31.
+
+### Option B shadow — reassessment
+
+Not a code change, but worth logging. `pqi history stats` now shows
+**628 independent verdicts (25.0% of 2507 total; 406 resolved)** with
+all 7 agents emitting. Per-agent resolved counts sit at 55–60 — below
+the 100–150 target from `docs/option_b_migration_plan.md` §7, but
+close.
+
+The blocker surfaced from the shadow panel is not sample size but
+**signal quality**:
+
+| Agent | \|drift\| | signed drift | YES Brier | NO Brier |
+|---|---|---|---|---|
+| Rules Lawyer | 0.01 | −0.00 | 0.249 | 0.254 |
+| Bull | 0.03 | −0.01 | 0.246 | 0.246 |
+| Bear | 0.06 | −0.03 | 0.285 | 0.290 |
+| (others) | 0.02–0.03 | ±0.02 | ~equal | ~equal |
+
+Session 26 close observed max `|drift| = 0.12` on the first 9 rows.
+With 628 rows the aggregate drift has **converged toward mirror
+collapse** — agents are still internally computing `P(NO) = 1 −
+P(YES)` regardless of the autonomy block in `SHARED_PREAMBLE`. YES
+and NO Brier values differ by ≤ 0.01 across the board, which means
+the pre-registered acceptance criterion (ΔBrier ≤ −0.005, bootstrap
+CI95 below 0 on both train and holdout) is mathematically
+unreachable with the current signal.
+
+Decision: **do not land `scripts/b_shadow_backtest.py` on the current
+persona output.** The blocker is upstream — the autonomy framing in
+the persona prompts isn't producing autonomous outputs, and no
+aggregation change downstream can recover signal that was never
+emitted. Either iterate on the SHARED_PREAMBLE autonomy block (with
+worked examples, evidence-quality pre-step, etc.) until aggregate
+`|drift|` exceeds ~0.10 for at least two agents, or accept that
+Option B stays descriptive-only and the probability field stays
+single-sided.
+
+This is consistent with the session-25 framing: probability-transform
+candidates on the current schema failed β backtest, Option B was
+meant to move the signal upstream by having agents emit independent
+pairs, but the agents are not in fact producing independent pairs at
+scale. Surfacing it here so a future session doesn't re-run the
+backtest on a signal that's guaranteed to fail the bar.
+
+---
+
 ## Session 31 — Banded-WR EV gate + Kelly realignment + contrarian 0.70 → 0.65 + PandaScore past-matches fix
 
 First aggregator-touching change since session 23. The single global
