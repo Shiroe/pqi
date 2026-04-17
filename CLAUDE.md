@@ -314,18 +314,25 @@ Gate order inside `from_council_verdicts()`:
 2. **Price ceiling**: `side_price > MAX_TRADEABLE_PRICE` (0.90) → PASS.
    Near-resolved; ROI doesn't justify execution risk.
 3. **Contrarian** (council disagrees with market): requires all of
-   `council_prob >= MIN_CONTRARIAN_PROBABILITY` (0.70),
+   `council_prob >= MIN_CONTRARIAN_PROBABILITY` (0.65, session 31),
    `side_conf >= MIN_CONTRARIAN_CONFIDENCE` (0.80),
    `expected_roi >= MIN_CONTRARIAN_ROI` (0.20). Label: `CONTRARIAN`.
 4. **Market-aligned**: requires
    `council_prob >= MIN_COUNCIL_PROBABILITY` (0.60),
    `side_conf >= CONFIDENCE_HIGH_THRESHOLD` (0.67),
    `expected_roi >= MIN_EXPECTED_ROI` (0.10).
-5. **EV gate (final)**: after a BUY clears all prior gates, reject it if
-   `side_price >= PerceivedTrueWinRate` → PASS with reason "Big Drawdown
-   Risk (-EV)". The gate only fires when `EV_GATE_ENABLED=true` AND
+5. **EV gate (final, banded — session 31)**: after a BUY clears all
+   prior gates, reject it if `side_price >= band_wr` → PASS with reason
+   `"Big Drawdown Risk: … ≥ XX.X% [band L-H, n=K] (-EV)"`. `band_wr`
+   is the Beta-binomial smoothed win rate for the price band containing
+   `side_price`, drawn from `PerceivedStats.band_stats` and computed
+   against the global rate with pseudo-count `BAND_SHRINKAGE_K` (default
+   5). Bands: [0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95].
+   When `perceived_stats` is absent or `BAND_SHRINKAGE_K=0`, the gate
+   falls back to the scalar `PerceivedTrueWinRate` (legacy behavior).
+   The gate only fires when `EV_GATE_ENABLED=true` AND
    `sample_size >= MIN_WIN_RATE_SAMPLES` (default 20). Below that
-   threshold the gate is dormant and behavior matches the pre-EV system.
+   threshold the gate is dormant.
 6. Otherwise → PASS with dynamic pass_reason.
 
 Signal type on market-aligned BUYs is ROI-banded:
@@ -349,18 +356,30 @@ Overall `confidence_level` label uses the higher of the two per-side means.
 `pqi/stats.py` owns the EV inputs. Three pure functions:
 
 - `recompute_from_history(min_samples)` — walks `history.jsonl`, counts
-  `correct_buy` vs `wrong_buy` (non-legacy, resolved), writes a fresh
-  `PerceivedStats` to `~/.pqi/stats.json` (atomic tmp+rename).
+  `correct_buy` vs `wrong_buy` (non-legacy, resolved), computes per-band
+  smoothed win rates against the global rate (Beta-binomial, pseudo-count
+  `BAND_SHRINKAGE_K`), and writes a fresh `PerceivedStats` — including
+  `band_stats` — to `~/.pqi/stats.json` (atomic tmp+rename).
 - `load_perceived_stats()` — returns `PerceivedStats | None`; tolerates
   missing/malformed file (cold-start safety).
 - `kelly_fraction(win_rate, price, multiplier=1.0)` — `f* = (bp - q) / b`.
   Returns 0.0 when -EV, on degenerate prices, or when the scaled result is
   ≤ 0. Apply `KELLY_MULTIPLIER` (default 0.5 = half-Kelly) for the UI stake.
 
+Band boundaries `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]`
+are a code constant in `stats.py` — changing them is a re-analysis
+decision, not a tuning knob. Smoothing strength is tuned via
+`BAND_SHRINKAGE_K` (default 5): `smoothed_wr = (wins + k·global_wr) /
+(n + k)`. A band with `n=0` falls back to the global rate exactly; thin
+bands are pulled toward global; dense bands dominate.
+
 Recompute is triggered after every `history sync` (including `--auto`
 background) and at the top of `history stats`. `scoring.py` loads stats
-lazily at build time and passes `perceived_win_rate` to the model only
-when the gate is active — models.py stays pure.
+lazily at build time and passes both `perceived_win_rate` (scalar
+fallback) and the full `perceived_stats` object to the model only when
+the gate is active — models.py stays pure. Kelly sizing also uses the
+banded threshold so gate-accepted bets always have non-zero advisory
+stake (half-Kelly absorbs per-band estimation noise).
 
 ---
 
@@ -450,9 +469,10 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 30 — centralized exponential-backoff retry
-for Anthropic calls in `pqi/llm/client.py` (catches 529 / 5xx / 429 /
-transport; SDK auto-retry disabled).
+**Last updated:** session 31 — banded-WR EV gate (Beta-binomial
+smoothed per-price-band thresholds) + Kelly aligned to the banded
+threshold + contrarian min-prob loosened 0.70 → 0.65 + PandaScore
+`/teams/{id}/matches/past` endpoint fix.
 
 All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
 TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
@@ -476,12 +496,25 @@ starting).
 Sessions 22–24 established the pre-EV scoring contract as stable.
 Sessions 25 (A.9 dynamic weights), 26 (Option B 1–4), 28 (PandaScore
 + temporal disambiguation), 29 (category cache), 30 (Anthropic retry)
-preserved it — every addition is metadata-only or upstream of the
-aggregator. `CouncilResult.from_council_verdicts()` math has not
-changed since session 23.
+preserved it — every addition was metadata-only or upstream of the
+aggregator. Session 31 is the first aggregator-touching change since
+session 23: the EV gate's threshold became band-specific and Kelly
+was realigned to the banded rate. The gate still runs last and still
+only converts existing BUY recommendations to PASS (it never creates
+a BUY), so upstream behavior is unchanged.
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 31** — banded EV gate replaces the single global
+  `PerceivedTrueWinRate` threshold with per-price-band smoothed rates
+  (Beta-binomial with pseudo-count `BAND_SHRINKAGE_K`, default 5).
+  Bands `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]`
+  are a code constant. Kelly sizing now uses the same banded rate so
+  rescued bets get non-zero advisory stake. Contrarian min probability
+  loosened `0.70 → 0.65` (confidence 0.80 and ROI 0.20 unchanged).
+  PandaScore past-matches endpoint fixed from
+  `/teams/{id}/matches/past` to `/teams/{id}/matches?filter[past]=true`.
+  New env: `BAND_SHRINKAGE_K` (5.0).
 - **Session 30** — centralized exponential-backoff retry for Anthropic
   calls; SDK auto-retry disabled; catches 529 / 5xx / 429 / transport.
   New env: `ANTHROPIC_MAX_RETRIES` (5), `ANTHROPIC_RETRY_BASE_DELAY`
@@ -509,10 +542,14 @@ changed since session 23.
 - Probability-first recommendation: BUY YES / BUY NO / PASS with
   ROI-banded signal types (HIGH VALUE / MODERATE VALUE / LOW MARGIN /
   CONTRARIAN).
-- **Dynamic EV gate** (session 22): `PerceivedTrueWinRate` from
-  `~/.pqi/stats.json` rejects BUYs where `side_price ≥ win_rate`
-  ("Big Drawdown Risk (-EV)"). Kelly stake surfaced in recommendation
-  panel. Gated by `MIN_WIN_RATE_SAMPLES`.
+- **Banded EV gate** (session 31, extends session 22): rejects BUYs
+  where `side_price ≥ band_wr`, with `band_wr` the Beta-binomial
+  smoothed rate for the price band containing `side_price`
+  (`BAND_SHRINKAGE_K` pseudo-count, default 5). Falls back to the
+  scalar `PerceivedTrueWinRate` when `perceived_stats` is absent or
+  `BAND_SHRINKAGE_K=0`. Kelly uses the same banded threshold so the
+  gate and the advisory stake stay aligned. Gated by
+  `MIN_WIN_RATE_SAMPLES`.
 - **WR-based edges** (session 23): `edge` / `no_edge` =
   `PerceivedTrueWinRate − side_price`; per-run snapshots of WR /
   Kelly persisted on every `CouncilResult`.
@@ -550,11 +587,26 @@ parallelism, bias-as-feature, statistical skepticism) for this project.
 Detailed reference material lives in docs/:
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 30)
+- docs/session-log.md — per-session changelog (current through session 31)
 - docs/roadmap.md — future work priorities, themed
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
 ## PRIORITY options (pick one with the user)
+- **Observe session-31 banded EV gate in the wild.** On the next
+  `analyze` run with a BUY that the gate touches, confirm the
+  `pass_reason` string (or the accepted rationale) mentions the band:
+  `"… [band L-H, n=K] (-EV)"`. Expected qualitative shifts vs the old
+  global gate on current history (global=0.69, 55 BUYs):
+  - 0.80–0.95 band → smoothed 0.897, previously blocked, now rescues.
+  - 0.50–0.60 band → smoothed 0.497, previously allowed, now blocks.
+  Verify at least one example on each direction before treating the
+  change as settled. If `history stats` shows an unexpectedly thin
+  band (e.g. 0.09–0.50 still n=0), that's fine — `wr_for_price()`
+  falls back to the global rate.
+- **Retrospective: sanity-check `BAND_SHRINKAGE_K=5`.** After a
+  handful of additional resolved rows, rerun the comparison between
+  K=3 / K=5 / K=10 against realized outcomes. Only adjust K with
+  fresh data — don't tune on the same 55-row slice that picked it.
 - **Observe session-30 retry in the wild.** Next 529/429 should log
   `anthropic call failed (attempt N/6): … — retrying in Xs` and the
   council should still complete. If the exception propagates without
@@ -566,13 +618,11 @@ Detailed reference material lives in docs/:
   Confirm (a) cyan "PandaScore: TeamA vs TeamB (status, fuzzy=NN)"
   line, (b) briefing in DEBUG includes EVENT TEMPORAL DISAMBIGUATION
   + STRUCTURED MATCH DATA blocks, (c) SCHEDULED matches don't get
-  past-tense paraphrases. Resolver miss is fine — pipeline degrades
-  to `structured_match=None`.
-- **Verify session-27 cache.** LOG_LEVEL=DEBUG, watch
-  `anthropic usage: …`. `cache_create>0` on first agent;
-  `cache_read>0` on repeats within 5 min. If both stay 0, the prefix
-  is below the model's min cacheable size — see
-  `docs/session-log.md` §Session 27.
+  past-tense paraphrases. The session-31 past-matches endpoint fix
+  (`filter[past]=true`) means team form should now be populated for
+  both teams when their names resolve — previously a broken path
+  silently returned empty form. Resolver miss is fine — pipeline
+  degrades to `structured_match=None`.
 - **Option B step 5 — shadow backtest.** GATED on ~100–150
   independent resolved rows. Run `pqi history stats` first; if
   per-agent `n_res` is near-zero, defer. When ready, land
@@ -581,9 +631,8 @@ Detailed reference material lives in docs/:
   bootstrap ΔBrier CI, pre-registered criteria). Candidate B-math
   list lives in `docs/option_b_migration_plan.md` §7.
 - **Theme A · Modeling & Calibration:** A.4 (Bear monitoring, pure
-  stats), A.5 (EV gate threshold tuning, stats-only), A.10
-  (dynamic-weight feedback-loop monitoring — protects A.9 from
-  self-reinforcement; matters more now that A.9 is live).
+  stats), A.10 (dynamic-weight feedback-loop monitoring — protects
+  A.9 from self-reinforcement; matters more now that A.9 is live).
 - **Theme C · Operational Tooling:** C.1–C.6 are isolated QoL items.
 - **Theme B:** B.1 (streaming TUI) is the Phase 3 entry point.
 
@@ -594,9 +643,11 @@ Detailed reference material lives in docs/:
   independent-sample budget is met.
 - Update ## Current State and write a fresh ## Next Session Prompt
   at end of session. Log meaningful decisions in docs/session-log.md.
-- Don't edit models.py verdict logic (the `from_council_verdicts`
-  aggregator) without explicit sign-off. The session-23 contract is
-  stable; sessions 25, 26, 28 are additive-only and preserve it.
+- Session 31 touched the aggregator for the first time since session
+  23 (banded threshold + Kelly realignment). The gate still runs
+  last and still only converts BUY → PASS (never the other way), so
+  upstream contracts are preserved. Any further aggregator changes
+  need explicit sign-off.
 - Option B rollout order is strict per
   docs/option_b_migration_plan.md. Never wire probability_no into
   scoring until step 5 passes pre-registered criteria on held-out

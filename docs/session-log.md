@@ -4,6 +4,159 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 31 — Banded-WR EV gate + Kelly realignment + contrarian 0.70 → 0.65 + PandaScore past-matches fix
+
+First aggregator-touching change since session 23. The single global
+`PerceivedTrueWinRate` threshold in the EV gate is replaced with
+per-price-band smoothed win rates. Kelly sizing is realigned to the
+same banded rate so a BUY the gate rescues gets a non-zero advisory
+stake. `MIN_CONTRARIAN_PROBABILITY` default is loosened `0.70 → 0.65`.
+A broken PandaScore past-matches endpoint path is also fixed so
+team-form lookups stop silently returning empty.
+
+### Motivation
+
+A user retrospective on 55 resolved BUYs surfaced that the global-WR
+EV gate is effectively sign-flipped relative to observed performance:
+
+| Band        | n  | raw WR | global WR | gate decision    |
+|-------------|----|--------|-----------|------------------|
+| 0.50–0.60   | 8  | 0.375  | 0.691     | **allowed** (losing band) |
+| 0.60–0.70   | 19 | 0.684  | 0.691     | allowed (fair)   |
+| 0.70–0.80   | 15 | 0.733  | 0.691     | allowed (fair)   |
+| 0.80–0.95   | 10 | 1.000  | 0.691     | **blocked** (profitable band) |
+
+Global-WR-vs-price is exactly the wrong shape for this data: cheap
+favorites underperform the mean and expensive favorites over-perform
+it, so a single threshold pinned at the mean blocks the profitable
+band and allows the losing one.
+
+The fix is to compare `side_price` against a *band-specific* smoothed
+WR rather than the global mean. Smoothing uses Beta-binomial with the
+global rate as prior mean and a pseudo-count `BAND_SHRINKAGE_K`:
+
+```
+smoothed_wr = (wins + k * global_wr) / (n + k)
+```
+
+A band with `n=0` falls back to `global_wr` exactly; thin bands are
+pulled toward it; dense bands dominate. `K=5` was the best-observed
+tradeoff in the retrospective (K=10 over-shrinks the profitable
+0.80+ band; K=20 reproduces the sign-flipped global behavior).
+
+### Bands
+
+Code constant in `stats.py` — changing them is a re-analysis decision,
+not a tuning knob:
+
+```python
+PRICE_BANDS: list[tuple[float, float]] = [
+    (0.09, 0.50),   # cheap underdog region
+    (0.50, 0.60),   # flip region — observed underperforming
+    (0.60, 0.70),   # near-par
+    (0.70, 0.80),   # moderate favorite
+    (0.80, 0.95),   # deep favorite — observed over-performing
+]
+```
+
+Top bound is 0.95 so every tradeable price finds a band;
+`MAX_TRADEABLE_PRICE=0.90` has already filtered the rest.
+
+### Files
+
+- `stats.py` — new `PRICE_BANDS` constant; new `_side_price_and_won`
+  extractor (mirrors `classify_outcome` per-entry logic);
+  `_compute_band_stats` buckets resolved BUYs by side-price, then
+  applies Beta-binomial smoothing. `recompute_from_history` now
+  populates `band_stats` + `shrinkage_k` on the persisted
+  `PerceivedStats`. Disabled when `BAND_SHRINKAGE_K ≤ 0` (gate falls
+  back to scalar global WR).
+- `models.py` — new `BandStat` model. `PerceivedStats` gains
+  `band_stats`, `shrinkage_k`, and `wr_for_price()` (pure lookup with
+  global fallback for out-of-band prices). `from_council_verdicts`
+  accepts `perceived_stats` alongside the existing scalar
+  `perceived_win_rate`; EV gate now compares against
+  `gate_threshold = perceived_stats.wr_for_price(side_price)` when
+  stats are supplied. `pass_reason` carries the band identifier:
+  `"Big Drawdown Risk: YES price 55.0% ≥ 49.7% [band 0.50-0.60, n=8] (-EV)"`.
+  Kelly sizing now also uses `gate_threshold` — so a BUY rescued by
+  a higher banded rate gets a non-zero advisory stake, and a BUY
+  that scraped past a weak band gets a smaller one. Half-Kelly
+  (`kelly_multiplier`, default 0.5) absorbs the estimation noise.
+- `scoring.py` — threads the loaded `PerceivedStats` through alongside
+  the scalar WR. Legacy scalar path is preserved for tests and cold-
+  start callers where `perceived_stats=None`.
+- `config.py` / `.env.example` — new `BAND_SHRINKAGE_K=5.0`.
+
+### Contrarian tuning
+
+`MIN_CONTRARIAN_PROBABILITY` loosened `0.70 → 0.65`. The CONTRARIAN
+branch requires all three of: council prob ≥ threshold, side
+confidence ≥ 0.80, expected ROI ≥ 0.20. With only a handful of
+resolved contrarian rows in history we're operating on judgment, not
+data — 0.70 was tight enough to effectively never trigger; 0.65 is
+the loosest value that still enforces "council meaningfully disagrees
+with market" and preserves the ROI + confidence guards that actually
+do most of the filtering.
+
+### PandaScore endpoint fix
+
+`ingestion/pandascore.py::get_team_past_matches` was hitting
+`/teams/{id}/matches/past`. The correct endpoint is
+`/teams/{id}/matches?filter[past]=true` — the `/past` suffix variant
+returns 404 silently (caught and returned as `[]`), which meant
+recent-form counts for both teams were uniformly zero. Fix:
+
+```python
+path = f"/teams/{team_id}/matches"
+params = {
+    "filter[past]": "true",
+    "sort": "-scheduled_at",
+    "per_page": min(count, 100),
+}
+```
+
+Non-fatal change: prior runs degraded to empty form; new runs
+populate it correctly.
+
+### Contract compatibility
+
+The banded gate still runs *last* in `from_council_verdicts` and still
+only converts existing BUY recommendations to PASS — it never creates
+a BUY. Upstream gates (price floor, price ceiling, contrarian,
+market-aligned) are unchanged. The `PerceivedStats` schema gained
+`band_stats` + `shrinkage_k` as optional fields with safe defaults
+(`[]` and `0.0`), so `stats.json` files written before session 31
+continue to load, just without banding — the fallback in
+`wr_for_price()` returns `true_win_rate` in that case.
+
+### Verification
+
+Synthetic end-to-end with the above band stats:
+
+- price=0.80 (banded=89.7%, global=65%) → BUY YES, kelly_scaled=0.225
+  (rescued + sized non-zero).
+- price=0.80 with `perceived_stats=None` (legacy) → PASS
+  ("≥ PerceivedTrueWinRate 65.0% (-EV)").
+- price=0.55 (banded=49.7%, global=65%) → PASS
+  ("≥ 49.7% [band 0.50-0.60, n=8] (-EV)") — correctly blocks the
+  band global was allowing through.
+
+Real `recompute_from_history` on 55 BUYs produced the expected band
+thresholds: 0.50–0.60 → 0.497, 0.60–0.70 → 0.686, 0.70–0.80 → 0.723,
+0.80–0.95 → 0.897.
+
+### Next
+
+- Observe the banded `pass_reason` in live `analyze` output — both a
+  rescue (price ≥ 0.80 with a BUY that would have been blocked) and
+  a block (price ≈ 0.55 where the gate now PASSes).
+- After more resolved rows land, sanity-check `K=5` against `K=3` and
+  `K=10` on fresh data — don't tune on the same 55-row slice that
+  picked it.
+
+---
+
 ## Session 30 — Centralized Anthropic retry (529 OverloadedError + transient 5xx/429/transport)
 
 Reliability patch. A live analyze run crashed mid-pipeline with an
