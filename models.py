@@ -522,12 +522,12 @@ class CouncilResult(BaseModel):
                 reasons = []
                 if council_favored_prob < min_contrarian_probability:
                     reasons.append(
-                        f"Contrarian call: council prob {council_favored_prob:.0%} "
+                        f"Contrarian call: council prob {council_favored_prob:.2%} "
                         f"< {min_contrarian_probability:.0%} threshold"
                     )
                 if side_conf < min_contrarian_confidence:
                     reasons.append(
-                        f"Contrarian call: {rec_side}-side confidence {side_conf:.0%} "
+                        f"Contrarian call: {rec_side}-side confidence {side_conf:.2%} "
                         f"< {min_contrarian_confidence:.0%} threshold"
                     )
                 if expected_roi < min_contrarian_roi:
@@ -556,12 +556,12 @@ class CouncilResult(BaseModel):
             reasons = []
             if council_favored_prob < min_council_probability:
                 reasons.append(
-                    f"Council prob too low: {council_favored_prob:.0%} "
+                    f"Council prob too low: {council_favored_prob:.2%} "
                     f"for {rec_side} (need ≥{min_council_probability:.0%})"
                 )
             if side_conf < confidence_high:
                 reasons.append(
-                    f"{rec_side}-side confidence too low: {side_conf:.0%} "
+                    f"{rec_side}-side confidence too low: {side_conf:.2%} "
                     f"(need ≥{confidence_high:.0%})"
                 )
             if expected_roi < min_expected_roi:
