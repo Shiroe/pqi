@@ -214,6 +214,17 @@ KELLY_MULTIPLIER: float = float(os.getenv("KELLY_MULTIPLIER", "0.5"))
 """Kelly safety scaler applied to the advisory stake shown in the UI.
 0.5 = half-Kelly (recommended), 1.0 = full Kelly."""
 
+BAND_SHRINKAGE_K: float = float(os.getenv("BAND_SHRINKAGE_K", "5.0"))
+"""Beta-binomial pseudo-count for per-price-band WR smoothing (session 31+).
+The EV gate compares `side_price` against the band-specific smoothed rate
+    smoothed_wr = (wins + k * global_wr) / (n + k)
+K controls how much the global rate pulls thin bands: K=0 disables banding
+entirely (gate reverts to a single global threshold), K=5 gives observed
+data 8/13 weight vs prior at n=8, K=20 pulls everything hard toward global.
+Tuned against session-31 retrospective: K=5 is the best observed tradeoff
+between letting real price-band signal through and resisting thin-band
+overfit."""
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------

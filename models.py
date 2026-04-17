@@ -402,6 +402,7 @@ class CouncilResult(BaseModel):
         min_contrarian_confidence: float = 0.80,
         agent_weights: dict[str, float] | None = None,
         perceived_win_rate: float | None = None,
+        perceived_stats: PerceivedStats | None = None,
         kelly_multiplier: float = 0.5,
     ) -> CouncilResult:
         """
@@ -575,14 +576,38 @@ class CouncilResult(BaseModel):
         # Applied only after all other gates have cleared a BUY. Rejects buys
         # where the side price is ≥ the historical hit rate: at that price
         # we're mathematically -EV even if every other signal lines up.
-        if recommendation != "PASS" and perceived_win_rate is not None:
-            if side_price >= perceived_win_rate:
+        #
+        # When `perceived_stats` is supplied (session 31+), the threshold is
+        # the band-specific smoothed WR for this bet's `side_price`. Otherwise
+        # we fall back to the scalar `perceived_win_rate` (legacy contract,
+        # kept for tests and cold-start callers).
+        gate_threshold: float | None
+        gate_band: BandStat | None = None
+        if perceived_stats is not None:
+            gate_threshold = perceived_stats.wr_for_price(side_price)
+            for band in perceived_stats.band_stats:
+                if band.lo <= side_price < band.hi:
+                    gate_band = band
+                    break
+        else:
+            gate_threshold = perceived_win_rate
+
+        if recommendation != "PASS" and gate_threshold is not None:
+            if side_price >= gate_threshold:
                 recommendation = "PASS"
                 signal_type = None
-                pass_reason = (
-                    f"Big Drawdown Risk: {rec_side} price {side_price:.1%} "
-                    f"≥ PerceivedTrueWinRate {perceived_win_rate:.1%} (-EV)"
-                )
+                if gate_band is not None:
+                    pass_reason = (
+                        f"Big Drawdown Risk: {rec_side} price {side_price:.1%} "
+                        f"≥ {gate_threshold:.1%} "
+                        f"[band {gate_band.lo:.2f}-{gate_band.hi:.2f}, "
+                        f"n={gate_band.n}] (-EV)"
+                    )
+                else:
+                    pass_reason = (
+                        f"Big Drawdown Risk: {rec_side} price {side_price:.1%} "
+                        f"≥ PerceivedTrueWinRate {gate_threshold:.1%} (-EV)"
+                    )
 
         # ROI is only meaningful for BUY signals — zero it on PASS.
         if recommendation == "PASS":
@@ -592,13 +617,21 @@ class CouncilResult(BaseModel):
 
         # Kelly sizing — advisory only, applied to the recommended side's price.
         # Zero on PASS (nothing to size) or when no WR snapshot is available.
+        #
+        # Uses `gate_threshold` (banded smoothed WR when `perceived_stats` is
+        # provided, scalar `perceived_win_rate` otherwise) so Kelly stays
+        # consistent with the gate that cleared the bet: a BUY rescued by a
+        # higher banded WR gets a non-zero stake, and a BUY that scraped
+        # past a weak banded WR gets a smaller stake. Half-Kelly
+        # (`kelly_multiplier`) handles per-band estimation noise.
         kelly_full = 0.0
         kelly_scaled = 0.0
         kelly_mult_used = 0.0
-        if recommendation != "PASS" and perceived_win_rate is not None:
-            if 0.0 < side_price < 1.0 and perceived_win_rate > side_price:
+        kelly_wr = gate_threshold if gate_threshold is not None else perceived_win_rate
+        if recommendation != "PASS" and kelly_wr is not None:
+            if 0.0 < side_price < 1.0 and kelly_wr > side_price:
                 b = (1.0 - side_price) / side_price
-                p = perceived_win_rate
+                p = kelly_wr
                 q = 1.0 - p
                 f = (b * p - q) / b
                 if f > 0.0:
@@ -626,6 +659,34 @@ class CouncilResult(BaseModel):
         )
 
 
+class BandStat(BaseModel):
+    """Per-price-band rolling hit-rate slice of resolved BUY history.
+
+    The EV gate reads `smoothed_wr` for the band matching a bet's
+    `side_price`. Smoothing is Beta-binomial with the global `true_win_rate`
+    as the prior mean and `shrinkage_k` as the pseudo-count:
+
+        smoothed_wr = (wins + k * global_wr) / (n + k)
+
+    So a band with n=0 falls back to global exactly; thin bands are pulled
+    toward global; dense bands dominate.
+    """
+
+    lo: float = Field(..., ge=0.0, le=1.0)
+    """Inclusive lower bound of the price band (side_price ≥ lo)."""
+    hi: float = Field(..., ge=0.0, le=1.0)
+    """Exclusive upper bound of the price band (side_price < hi)."""
+    n: int = Field(..., ge=0)
+    """Resolved BUYs that landed in this band."""
+    wins: int = Field(..., ge=0)
+    """Resolved BUYs in this band where the intended side won."""
+    raw_wr: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Unsmoothed hit rate (`wins / n`). None when n=0."""
+    smoothed_wr: float = Field(..., ge=0.0, le=1.0)
+    """Beta-binomial smoothed hit rate — the actual threshold the EV gate
+    compares `side_price` against for bets in this band."""
+
+
 class PerceivedStats(BaseModel):
     """Rolling stats derived from resolved history — source of truth for
     the EV gate (PerceivedTrueWinRate) and the advisory Kelly sizing.
@@ -633,6 +694,11 @@ class PerceivedStats(BaseModel):
     Persisted to ~/.pqi/stats.json and refreshed after every history sync
     or `history stats` invocation. `below_min_samples` is True until enough
     resolved BUY outcomes have accumulated for the gate to activate.
+
+    `band_stats` (session 31+) carries the per-price-band smoothed win
+    rates the gate actually uses. `true_win_rate` is retained as the
+    global fallback and for display / Kelly sizing. Empty list when
+    banding is disabled (shrinkage_k = 0).
     """
 
     computed_at: datetime
@@ -649,6 +715,25 @@ class PerceivedStats(BaseModel):
     to any specific market. 0.0 when -EV at $0.75."""
     below_min_samples: bool = True
     """True when sample_size < MIN_WIN_RATE_SAMPLES — EV gate stays off."""
+    band_stats: list[BandStat] = Field(default_factory=list)
+    """Per-price-band smoothed win rates. Empty on cold-start or when
+    banding is disabled. When populated, `wr_for_price()` uses them in
+    preference to the global `true_win_rate`."""
+    shrinkage_k: float = Field(default=0.0, ge=0.0)
+    """Beta-binomial pseudo-count used to smooth `band_stats` toward
+    `true_win_rate`. 0.0 means banding is off and the gate uses the
+    global rate. See `config.BAND_SHRINKAGE_K`."""
+
+    def wr_for_price(self, side_price: float) -> float:
+        """Return the WR threshold the EV gate should compare against for a
+        given `side_price`. Uses the matching band's `smoothed_wr` when
+        `band_stats` are present; otherwise falls back to the global
+        `true_win_rate`. This is a pure lookup — the gate-dormant decision
+        (below_min_samples) lives upstream in scoring.py."""
+        for band in self.band_stats:
+            if band.lo <= side_price < band.hi:
+                return band.smoothed_wr
+        return self.true_win_rate
 
 
 # ---------------------------------------------------------------------------

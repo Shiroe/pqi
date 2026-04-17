@@ -43,13 +43,24 @@ def build_council_result(
 
     # EV gate input — only fed in when enabled AND we have enough samples.
     # Otherwise the gate stays dormant and behavior matches pre-EV scoring.
+    #
+    # Two pieces are threaded through:
+    #   perceived_win_rate — scalar global rate. Retained as the legacy
+    #     fallback threshold when `perceived_stats` is absent (tests /
+    #     cold-start callers). Also recorded on the result as the
+    #     `perceived_win_rate_at_run` snapshot.
+    #   perceived_stats    — full stats object. from_council_verdicts uses
+    #     its band_stats to pick the band-specific threshold for the gate
+    #     AND for Kelly sizing, so both decisions stay aligned.
     perceived_win_rate: float | None = None
+    perceived_stats = None
     if config.EV_GATE_ENABLED:
         from pqi.stats import load_perceived_stats
 
-        stats = load_perceived_stats()
-        if stats is not None and not stats.below_min_samples:
-            perceived_win_rate = stats.true_win_rate
+        loaded = load_perceived_stats()
+        if loaded is not None and not loaded.below_min_samples:
+            perceived_win_rate = loaded.true_win_rate
+            perceived_stats = loaded
 
     return CouncilResult.from_council_verdicts(
         market=market,
@@ -65,5 +76,6 @@ def build_council_result(
         min_contrarian_confidence=config.MIN_CONTRARIAN_CONFIDENCE,
         agent_weights=agent_weights,
         perceived_win_rate=perceived_win_rate,
+        perceived_stats=perceived_stats,
         kelly_multiplier=config.KELLY_MULTIPLIER,
     )
