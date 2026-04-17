@@ -122,10 +122,34 @@ GAME_MAPPING: dict[str, str] = {
 
 
 def _game_slug_for(category: str | None) -> str | None:
-    """Map a Polymarket category to a PandaScore slug, or None if unsupported."""
+    """Map a Polymarket category to a PandaScore slug, or None if unsupported.
+
+    Polymarket's category is usually a `seriesSlug` (e.g.
+    `lol-tcl-regular-season-2026`) or a tag label (e.g. `league of legends`).
+    Exact-match is tried first; on miss we tokenise both the category and each
+    GAME_MAPPING key on `[-_\\s]+` and look for the key's tokens as a
+    contiguous window inside the category's tokens. First match wins (dict
+    insertion order), which matches Polymarket's convention of placing the
+    game prefix at the start of `seriesSlug`s.
+    """
     if not category:
         return None
-    return GAME_MAPPING.get(category.strip().lower())
+    cleaned = category.strip().lower()
+    # Exact-match fast path: covers bare 'lol', 'valorant', 'league of legends'...
+    if cleaned in GAME_MAPPING:
+        return GAME_MAPPING[cleaned]
+    tokens = [t for t in re.split(r"[-_\s]+", cleaned) if t]
+    if not tokens:
+        return None
+    for key, slug in GAME_MAPPING.items():
+        key_tokens = [t for t in re.split(r"[-_\s]+", key) if t]
+        if not key_tokens:
+            continue
+        n = len(key_tokens)
+        for i in range(len(tokens) - n + 1):
+            if tokens[i : i + n] == key_tokens:
+                return slug
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -380,22 +404,32 @@ async def resolve_match(market: MarketData) -> StructuredMatchRecord | None:
     if not config.PANDASCORE_ENABLED or not config.PANDASCORE_API_KEY:
         return None
     if market.event_start_time is None:
-        logger.debug("resolve_match: %s has no event_start_time — skipping", market.id)
+        logger.info(
+            "PandaScore: skipped market %s — no event_start_time", market.id
+        )
         return None
 
     slug = _game_slug_for(market.category)
     if slug is None:
-        logger.debug(
-            "resolve_match: category %r not in GAME_MAPPING — skipping",
+        logger.info(
+            "PandaScore: game not found (category=%r) for market %s",
             market.category,
+            market.id,
         )
         return None
+    logger.info(
+        "PandaScore: game found = %s (category=%r) for market %s",
+        slug,
+        market.category,
+        market.id,
+    )
 
     parties = _extract_parties(market.question)
     if parties is None:
-        logger.debug(
-            "resolve_match: could not extract parties from question %r",
+        logger.info(
+            "PandaScore: could not extract parties from question %r for market %s",
             market.question[:80],
+            market.id,
         )
         return None
     party_a, party_b = parties
