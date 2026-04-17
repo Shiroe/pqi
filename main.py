@@ -70,7 +70,7 @@ def display_market_list(markets: list[MarketData]) -> None:
     table.add_column("Volume (USD)", justify="right", width=14)
 
     analyzed = _analyzed_market_ids()
-    ceiling = _star_ceiling()
+    stats = _load_perceived_stats_safe()
 
     for i, m in enumerate(markets, start=1):
         question = m.question
@@ -82,7 +82,7 @@ def display_market_list(markets: list[MarketData]) -> None:
             _format_end_date(m.end_date),
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
-            _signal_glyph(m.yes_price, ceiling),
+            _signal_glyph(m.yes_price, stats=stats),
             "[cyan]●[/cyan]" if str(m.id) in analyzed else "",
             f"${m.volume_usd:,.0f}",
         )
@@ -163,30 +163,44 @@ def display_council_result(result: CouncilResult) -> None:
     )
 
     # EV / Kelly lines — shown when we have persisted stats. For BUY results
-    # the Kelly number is sized to the actual trade price; on PASS we still
-    # show the win rate ceiling so the user understands the drawdown guard.
+    # the Kelly number is the one the aggregator actually computed from the
+    # banded threshold (so display always matches the gate decision).
     ev_line = ""
-    from pqi.stats import load_perceived_stats, kelly_fraction as _kelly
+    from pqi.stats import load_perceived_stats
 
     perceived = load_perceived_stats()
     if perceived is not None and perceived.sample_size > 0:
-        wr = perceived.true_win_rate
+        global_wr = perceived.true_win_rate
         gate_note = (
             " [dim](gate inactive — need more samples)[/dim]"
             if perceived.below_min_samples
             else ""
         )
+        # Banded ceiling for the recommended side's price (falls back to the
+        # global rate when `band_stats` is empty or no side is recommended).
+        band_price = yes_price if rec == "BUY YES" else (
+            no_price if rec == "BUY NO" else roi_side_price
+        )
+        band_wr = perceived.wr_for_price(band_price)
+        band_suffix = ""
+        for band in perceived.band_stats:
+            if band.lo <= band_price < band.hi:
+                band_suffix = (
+                    f" [dim](band {band.lo:.2f}-{band.hi:.2f}, n={band.n})[/dim]"
+                )
+                break
         ev_line = (
-            f"[bold]True Win Rate:[/bold] {wr:.1%} "
-            f"[dim](n={perceived.sample_size}, EV ceiling)[/dim]{gate_note}\n"
+            f"[bold]True Win Rate:[/bold] "
+            f"[magenta]{band_wr:.1%}[/magenta] "
+            f"[dim](global {global_wr:.1%}, n={perceived.sample_size}, EV ceiling)[/dim]"
+            f"{band_suffix}{gate_note}\n"
         )
         if rec in ("BUY YES", "BUY NO"):
-            trade_price = yes_price if rec == "BUY YES" else no_price
-            full_k = _kelly(wr, trade_price)
-            safe_k = _kelly(wr, trade_price, config.KELLY_MULTIPLIER)
+            # Use the persisted Kelly the aggregator computed against the
+            # same banded threshold the gate used.
             ev_line += (
-                f"[bold]Kelly stake:[/bold]   full {full_k:.1%} · "
-                f"@{config.KELLY_MULTIPLIER:g}x {safe_k:.1%} of bankroll\n"
+                f"[bold]Kelly stake:[/bold]   full {result.kelly_stake_full:.1%} · "
+                f"@{config.KELLY_MULTIPLIER:g}x {result.kelly_stake_scaled:.1%} of bankroll\n"
             )
     # Trend line (conditional — only if price history was fetched)
     trend_line = ""
@@ -267,40 +281,56 @@ def _analyzed_market_ids() -> set[str]:
         return set()
 
 
-def _star_ceiling() -> float:
-    """Upper price bound for the ⭐ signal — the point above which the EV gate
-    would reject a BUY. When `PerceivedStats` is active, this is the rolling
-    `true_win_rate` (star only on prices where we actually have an edge).
-    Falls back to the static 0.91 ROI-gate ceiling when stats are missing
-    or below the sample-size threshold, so cold-start behavior is unchanged.
-    """
+def _load_perceived_stats_safe():
+    """Best-effort loader for the persisted PerceivedStats snapshot. Returns
+    None when the file is missing, malformed, below the sample threshold,
+    or the EV gate is disabled — callers fall back to static defaults in
+    those cases so cold-start behavior stays unchanged."""
     if not config.EV_GATE_ENABLED:
-        return 0.91
+        return None
     try:
         from pqi.stats import load_perceived_stats
 
         stats = load_perceived_stats()
     except Exception:
-        return 0.91
+        return None
     if stats is None or stats.below_min_samples:
+        return None
+    return stats
+
+
+def _star_ceiling_for_price(fav_price: float, stats=None) -> float:
+    """Upper price bound for the ⭐ signal at a specific favored-side price.
+
+    The ceiling is the per-price-band smoothed win rate (`wr_for_price`)
+    when `PerceivedStats` is active — so a market in the 0.80–0.95 band
+    gets a higher ceiling than one in the 0.50–0.60 band, mirroring the
+    banded EV gate. Falls back to the static 0.91 ROI-gate ceiling when
+    stats are missing or below the sample-size threshold.
+    """
+    if stats is None:
+        stats = _load_perceived_stats_safe()
+    if stats is None:
         return 0.91
-    return stats.true_win_rate
+    return stats.wr_for_price(fav_price)
 
 
-def _signal_glyph(yes_price: float, ceiling: float = 0.91) -> str:
+def _signal_glyph(yes_price: float, stats=None) -> str:
     """Tradeable-zone signal for the market list.
 
-    ⭐ — favored side is in the actionable band [0.55, ceiling]: the council
-         has room to confirm/contradict and the price is at or below our
-         edge ceiling (PerceivedTrueWinRate when active, else 0.91).
+    ⭐ — favored side is in the actionable band [0.55, band_ceiling]: the
+         council has room to confirm/contradict and the price is at or
+         below the band-specific EV ceiling (PerceivedStats.wr_for_price
+         when active, else the static 0.91 ROI-gate ceiling).
     🔻 — favored side is at 100% (or ≥99%): market is effectively resolved,
          no edge available, listed only as noise.
-    (blank) — coin-flip zone (favored < 0.55) or above the ceiling but < 1.0.
-              Not actionable but worth glancing at.
+    (blank) — coin-flip zone (favored < 0.55) or above the band ceiling
+              but < 1.0. Not actionable but worth glancing at.
     """
     fav = max(yes_price, 1.0 - yes_price)
     if fav >= 0.99:
         return "🔻"
+    ceiling = _star_ceiling_for_price(fav, stats=stats)
     if 0.55 <= fav <= ceiling:
         return "⭐"
     return ""
@@ -395,7 +425,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
     table.add_column("Volume (USD)", justify="right", width=14)
 
     analyzed = _analyzed_market_ids()
-    ceiling = _star_ceiling()
+    stats = _load_perceived_stats_safe()
 
     for i, g in enumerate(groups, start=1):
         # Single-market events show the market question; multi-market show event title
@@ -420,7 +450,7 @@ def display_event_list(groups: list[EventGroup]) -> None:
             str(len(g.markets)),
             f"{pm.yes_price:.0%}",
             f"{1.0 - pm.yes_price:.0%}",
-            _signal_glyph(pm.yes_price, ceiling),
+            _signal_glyph(pm.yes_price, stats=stats),
             ("[cyan]●[/cyan]" if any(str(m.id) in analyzed for m in g.markets) else ""),
             f"${g.total_volume:,.0f}",
         )
@@ -474,7 +504,7 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
     sub_table.add_column("Volume", justify="right", width=12)
 
     analyzed = _analyzed_market_ids()
-    ceiling = _star_ceiling()
+    stats = _load_perceived_stats_safe()
 
     for i, m in enumerate(sorted_markets, start=1):
         sub_table.add_row(
@@ -482,7 +512,7 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
             m.question,
             f"{m.yes_price:.0%}",
             f"{1.0 - m.yes_price:.0%}",
-            _signal_glyph(m.yes_price, ceiling),
+            _signal_glyph(m.yes_price, stats=stats),
             "[cyan]●[/cyan]" if str(m.id) in analyzed else "",
             f"${m.volume_usd:,.0f}",
         )
@@ -1503,6 +1533,46 @@ def history_stats(
         )
 
     console.print(Panel(summary, title="Council overview", border_style="cyan"))
+
+    # Per-price-band hit-rate breakdown (session 31+). These are the actual
+    # thresholds the EV gate compares `side_price` against, so users can see
+    # why a given BUY got rescued or blocked.
+    if perceived is not None and perceived.band_stats:
+        band_table = Table(
+            title=(
+                f"Per-price-band win rate  "
+                f"[dim](K={perceived.shrinkage_k:g}, global {perceived.true_win_rate:.1%})[/dim]"
+            ),
+            box=box.ROUNDED,
+        )
+        band_table.add_column("Band", style="cyan")
+        band_table.add_column("n", justify="right")
+        band_table.add_column("Wins", justify="right", style="green")
+        band_table.add_column("Losses", justify="right", style="red")
+        band_table.add_column("Raw WR", justify="right")
+        band_table.add_column("Smoothed WR", justify="right", style="magenta")
+        band_table.add_column("Gate vs mid-band", justify="center")
+
+        for band in perceived.band_stats:
+            losses = band.n - band.wins
+            raw_str = f"{band.raw_wr:.1%}" if band.raw_wr is not None else "—"
+            # Qualitative hint for the mid-point of the band: does a bet
+            # priced at the band's midpoint clear the smoothed threshold?
+            mid = (band.lo + band.hi) / 2.0
+            if mid < band.smoothed_wr:
+                gate_hint = "[green]✓ allowed[/green]"
+            else:
+                gate_hint = "[red]✗ blocked[/red]"
+            band_table.add_row(
+                f"{band.lo:.2f}–{band.hi:.2f}",
+                str(band.n),
+                str(band.wins),
+                str(losses),
+                raw_str,
+                f"{band.smoothed_wr:.1%}",
+                gate_hint,
+            )
+        console.print(band_table)
 
     if not stats:
         console.print("[yellow]No resolved entries with per-agent detail yet.[/yellow]")
