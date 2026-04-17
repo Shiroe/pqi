@@ -143,8 +143,8 @@ class StructuredMatchRecord(BaseModel):
     is about — not a prior encounter. Lets us key the cache off the
     structured-data view, not the LLM-derived briefing."""
     game: str
-    """Provider's game/category slug (e.g. "cs2", "lol", "valorant",
-    "dota2", "r6siege", "mlbb")."""
+    """Provider's game/category slug (e.g. "cs-go", "league-of-legends",
+    "valorant", "dota-2", "r6-siege", "mlbb")."""
     scheduled_at: datetime
     """Provider's scheduled start time, UTC. Cross-check against the
     market's `event_start_time`."""

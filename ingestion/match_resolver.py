@@ -52,41 +52,36 @@ logger = logging.getLogger(__name__)
 #   - Polymarket categories observed in the wild on esports markets.
 #
 # Notes:
-#   - Polymarket sometimes uses "csgo" as a category alias for current-day
-#     Counter-Strike (CS2). PandaScore retired the "csgo" slug when CS2
-#     launched, so both alias entries point to "cs2".
-#   - "lol" is League of Legends; "valorant" is the canonical PandaScore
-#     slug; "dota2" without dash; "r6siege" is Rainbow Six Siege; "mlbb"
-#     is Mobile Legends: Bang Bang.
+#   - LHS keys are Polymarket categories (lowercase, as observed in the wild).
+#     RHS values are PandaScore slugs verified against the `/videogames`
+#     endpoint response. Never invent a slug — look it up first.
+#   - PandaScore kept the `cs-go` slug through the CS2 transition. All three
+#     Polymarket aliases ("cs2", "csgo", "counter-strike") map to it.
+#   - League of Legends is `league-of-legends` upstream. PandaScore's
+#     `lol-wild-rift` slug is a different game and is NOT mapped here.
 #   - Anything NOT in this dict returns None from `_game_slug_for` — the
 #     resolver short-circuits and the briefing falls back to Tavily-only.
-#     Never silently invent a slug; verify with `list_videogames` first.
-#
-# The runtime check at module load (`_validate_game_slugs`) confirms each
-# slug is still present upstream and logs a WARNING for any missing
-# entries — surfaces upstream changes immediately rather than letting them
-# manifest as 404s in production.
 
 GAME_MAPPING: dict[str, str] = {
-    # Counter-Strike (both aliases point to PandaScore's CS2 slug)
-    "cs2":       "cs2",
-    "csgo":      "cs2",
-    "counter-strike": "cs2",
+    # Counter-Strike (PandaScore slug kept as `cs-go` post-CS2 transition)
+    "cs2":       "cs-go",
+    "csgo":      "cs-go",
+    "counter-strike": "cs-go",
     # League of Legends
-    "lol":       "lol",
-    "league of legends": "lol",
+    "lol":       "league-of-legends",
+    "league of legends": "league-of-legends",
     # Valorant
     "valorant":  "valorant",
     "val":       "valorant",
     # Dota 2
-    "dota2":     "dota2",
-    "dota":      "dota2",
-    "dota 2":    "dota2",
+    "dota2":     "dota-2",
+    "dota":      "dota-2",
+    "dota 2":    "dota-2",
     # Rainbow Six Siege
-    "r6":        "r6siege",
-    "r6siege":   "r6siege",
-    "rainbow six siege": "r6siege",
-    "rainbow six": "r6siege",
+    "r6":        "r6-siege",
+    "r6siege":   "r6-siege",
+    "rainbow six siege": "r6-siege",
+    "rainbow six": "r6-siege",
     # Mobile Legends: Bang Bang
     "mlbb":      "mlbb",
     "mobile legends": "mlbb",
