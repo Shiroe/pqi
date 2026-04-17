@@ -146,6 +146,32 @@ Real `recompute_from_history` on 55 BUYs produced the expected band
 thresholds: 0.50–0.60 → 0.497, 0.60–0.70 → 0.686, 0.70–0.80 → 0.723,
 0.80–0.95 → 0.897.
 
+### UI follow-up (same session)
+
+After the aggregator change landed we noticed three display surfaces
+were still pinned to the global rate, so a user reading the CLI would
+see a different story from the one the gate actually told:
+
+- **Analyze list ⭐ signal** — `_star_ceiling()` (scalar) became
+  `_star_ceiling_for_price(fav)` backed by `wr_for_price`. The star now
+  follows the band specific to each market's favored-side price.
+  Concretely: favorites at 0.80–0.89 get stars (banded ceiling 89.7%);
+  favorites at 0.52–0.58 no longer do (banded ceiling 49.7%). Reverse
+  of the pre-session-31 behavior. Out-of-band prices fall back to the
+  global rate via `wr_for_price`.
+- **`display_council_result` EV/Kelly panel** — the "True Win Rate"
+  line now shows the band-specific ceiling for the trade's side price,
+  with the global rate and `(band L-H, n=K)` shown alongside for
+  context. The Kelly line stopped recomputing against the global rate
+  and now reads `result.kelly_stake_full` / `kelly_stake_scaled`, which
+  the aggregator already sizes against the banded threshold. This
+  removes the last place display could disagree with the gate decision.
+- **`history stats`** — new `Per-price-band win rate` table under the
+  Council overview panel renders band, n, wins, losses, raw WR, and
+  smoothed WR, plus a qualitative "Gate vs mid-band" hint so the user
+  can see at a glance which bands the gate currently allows or blocks.
+  Skipped when `band_stats` is empty (banding disabled or cold start).
+
 ### Next
 
 - Observe the banded `pass_reason` in live `analyze` output — both a
