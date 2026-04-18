@@ -471,15 +471,21 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 33 — planning + documentation only, no code
-changes. Triaged a v2.0 architecture RFC
-(`docs/esports_intel_engine_report.md`) and its external review
-(`docs/cto_review_esports_engine.md`); synthesized the keep/defer
-decisions into `docs/scaling_assessment.md`; expanded `CTO_Agent.md`
-with quantitative/strategic/architectural reviewer capabilities; and
-laid out five phase docs in `docs/phases/` to enable async work.
-**Phase 0 (edge validation via DuckDB analytics) is active as the
-next code workstream.**
+**Last updated:** session 34 — Phase 0 Task 0.1 shipped: DuckDB
+analytics layer (`pqi/analytics_sql.py`) with pre-registered `history`
+and `verdicts` views, `pqi query "<SQL>"` CLI subcommand, 5 starter
+queries in `docs/analytics_queries.md`, `duckdb>=1.0` pinned.
+Full-history aggregations at ~230ms (target <1s). No pipeline,
+scoring, aggregator, or contract changes — read-only analytics surface.
+Unblocks Task 0.2 (pre-event CLV backfill) and the rest of Phase 0.
+
+Session 33 — planning + documentation only. Triaged a v2.0
+architecture RFC (`docs/esports_intel_engine_report.md`) and its
+external review (`docs/cto_review_esports_engine.md`); synthesized the
+keep/defer decisions into `docs/scaling_assessment.md`; expanded
+`CTO_Agent.md` with quantitative/strategic/architectural reviewer
+capabilities; and laid out five phase docs in `docs/phases/` to enable
+async work.
 
 Session 32 — contrarian min-prob retuned `0.65 → 0.60` (session 31's
 0.65 was -EV on the resolved sample; the positive signal sits in the
@@ -494,7 +500,7 @@ roadmap naming are complete. The new phase framing in
 
 | New phase | Status | Doc |
 | --- | --- | --- |
-| Phase 0 — edge validation | **active** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
+| Phase 0 — edge validation | **active (Task 0.1 ✓; 0.2 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
 | Phase 1 — signal quality (Option B autonomy fix) | parallel-able with P0 | [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md) |
 | Phase 2 — execution edge (MFE, listener) | blocked on P0 | [`docs/phases/phase_2_execution_edge.md`](docs/phases/phase_2_execution_edge.md) |
 | Phase 3 — deployment portability (Docker/VPS) | blocked on P0 verdict | [`docs/phases/phase_3_deployment_portability.md`](docs/phases/phase_3_deployment_portability.md) |
@@ -534,10 +540,22 @@ was realigned to the banded rate. Session 32 retuned one gate knob
 user-facing string, but kept the aggregator math identical. The EV
 gate still runs last and still only converts existing BUY
 recommendations to PASS (it never creates a BUY), so upstream
-behavior is unchanged.
+behavior is unchanged. Session 34 added a read-only SQL layer
+(`analytics_sql.py`, `pqi query`) — no pipeline or aggregator touch.
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 34** — Phase 0 Task 0.1 shipped. Added DuckDB analytics
+  layer (`analytics_sql.py`) with `history` and `verdicts`
+  pre-registered views; `pqi query "<SQL>"` CLI subcommand with rich
+  rendering + `--limit/-n` truncation; 5 starter queries documented
+  in `docs/analytics_queries.md`; `duckdb>=1.0` pinned. DuckDB needs
+  `timestampformat='%Y-%m-%dT%H:%M:%S.%f%z'` + `sample_size=-1` to
+  read our JSONL — captured as a module constant. Full-history
+  aggregations clock at ~230ms (target <1s). Surface-level findings
+  noted in session-log (feed task 0.5 retrospective): `[0.50, 0.60)`
+  band realizing 33% on n=9, Bear at 49% lean rate vs other agents
+  60–67%, April monthly PnL -0.575/share across 65 BUYs.
 - **Session 33** — planning + docs only. Expanded `CTO_Agent.md`
   into a capable reviewer persona (quantitative validation, strategic
   edge, architectural judgment). Triaged the v2.0 RFC and its
@@ -616,8 +634,13 @@ behavior is unchanged.
 - History system: persistence, resolution sync, per-agent accuracy,
   postmortem.
 - SQLite cache with price-delta + structured-status invalidation.
+- **DuckDB analytics layer** (session 34, `pqi/analytics_sql.py`):
+  pre-registered `history` + `verdicts` views over
+  `~/.pqi/history.jsonl`; 5 starter queries in
+  `docs/analytics_queries.md`. Read-only; no pipeline coupling.
 - CLI: `analyze` (with `--category`, `--top`, `--live`,
-  `--starts-within`, …), `categories`, `history` (list/show/sync/stats).
+  `--starts-within`, …), `categories`, `query "<SQL>"`, `history`
+  (list/show/sync/stats).
 
 ### Environment
 
@@ -639,25 +662,43 @@ Detailed reference material lives in docs/:
 - docs/scaling_assessment.md — v2.0 RFC triage, prediction vs execution
   edge framework, why DuckDB over Postgres, explicit rejections
 - docs/phases/README.md — phase index, dependency graph, template pointer
-- docs/phases/phase_0_edge_validation.md — **active** workstream
+- docs/phases/phase_0_edge_validation.md — **active (Task 0.1 ✓; 0.2 next)**
 - docs/phases/phase_1_signal_quality.md — parallel-able (Option B autonomy fix)
 - docs/phases/phase_2_execution_edge.md — blocked on P0
 - docs/phases/phase_3_deployment_portability.md — blocked on P0 verdict
 - docs/phases/phase_4_scaling_triggers.md — reactive only
+- docs/analytics_queries.md — starter queries for `pqi query` (session 34)
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 33)
+- docs/session-log.md — per-session changelog (current through session 34)
 - docs/roadmap.md — themed catalog (A/B/C); phase section indexes phases
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
-## PRIORITY — Phase 0: edge validation
+## PRIORITY — Phase 0: edge validation (Task 0.2)
 
-Default entry point: `docs/phases/phase_0_edge_validation.md`. Phase 0
-is the "does our edge actually exist?" workstream — DuckDB wire-up,
-CLV backfill, reliability diagram, per-band calibration,
-retrospective. Replaces ad-hoc Python scripts for history analysis.
-Verdict from Phase 0 unblocks Phases 2/3. Start with task 0.1
-(DuckDB wire-up) — it's the enabler for the rest.
+Default entry point: `docs/phases/phase_0_edge_validation.md`.
+
+Task 0.1 (DuckDB wire-up) shipped in session 34 — the `pqi query`
+CLI and `analytics_sql.py` with `history` + `verdicts` views are
+live. 5 starter queries documented. Full-history aggregations
+~230ms. See `docs/analytics_queries.md` to get oriented.
+
+**Task 0.2 — Pre-event CLV backfill** is next. First step: inventory
+`event_start_time` coverage with a quick `pqi query`, e.g.
+
+  pqi query "SELECT COUNT(*) FILTER (WHERE result.market.event_start_time
+  IS NOT NULL) AS have_est, COUNT(*) AS total FROM history WHERE
+  legacy=false AND result.recommendation LIKE 'BUY%' AND
+  resolution.final_yes_price IS NOT NULL"
+
+Then write `scripts/backfill_clv.py` per the phase doc implementation
+sketch — reads each resolved BUY, hits CLOB hourly at
+`event_start_time`, computes `clv = price_at_start - entry_price`,
+persists to `~/.pqi/clv.jsonl`. Expose as a joinable DuckDB view.
+
+After 0.2, tasks 0.3 (reliability diagram), 0.4 (per-band
+calibration vs stats.json), 0.5 (retrospective) — all leverage the
+DuckDB layer.
 
 Parallel-able with Phase 0: `docs/phases/phase_1_signal_quality.md`
 (Option B autonomy fix). Phase 1 is the SHARED_PREAMBLE autonomy
@@ -667,6 +708,20 @@ reassessment found the current signal has converged toward mirror
 collapse (|drift| 0.01–0.06) and the pre-registered ΔBrier ≤ −0.005
 criterion is mathematically unreachable on the current persona
 output. Fix the signal, then test B-math.
+
+## Session-34 surface findings (feed task 0.5 retrospective)
+
+Running the starter queries produced three observations worth
+structured follow-up:
+
+- **`[0.50, 0.60)` band realized 33% (3/9) at mean price 56%** —
+  either genuinely -EV or Beta-binomial is over-shrinking to global.
+  n=9 is thin; task 0.4 will sharpen.
+- **Bear agent lean rate 49.1% (n=342)** vs other agents 60–67% —
+  consistent with session-32 mirror-collapse finding. Feeds Phase 1
+  priority.
+- **April 2026 total PnL per share: -0.575 across 65 BUYs** (≈
+  -0.9¢/share avg). Small sample, but marginal-at-best edge.
 
 ## Monitoring tasks (low priority; observe, don't code)
 These are from earlier sessions; pick up if the signal appears
@@ -702,7 +757,7 @@ Phase 2 deliverables. Theme C items are isolated QoL — pick any
 between phases if they bite you.
 
 ## Instructions
-- Default to Phase 0 task 0.1 (DuckDB wire-up) unless the user
+- Default to Phase 0 task 0.2 (CLV backfill) unless the user
   redirects. Phase docs are designed for async work — each has
   entry criteria + task acceptance + session state, so you can pick
   up where the last session left off.
@@ -710,6 +765,9 @@ between phases if they bite you.
   signal quality (prompt-level, no aggregator risk). Reference the
   session-32 shadow reassessment in docs/session-log.md if the
   conversation turns to running the Option B backtest prematurely.
+- When reaching for history analytics, use `pqi query "<SQL>"` on
+  the `history` / `verdicts` views before writing a fresh Python
+  script. See docs/analytics_queries.md for patterns.
 - Update ## Current State and write a fresh ## Next Session Prompt
   at end of session. Log meaningful decisions in docs/session-log.md
   and the phase doc's "Session state" section.

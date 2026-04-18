@@ -1,9 +1,9 @@
 # Phase 0: Edge Validation via Analytics Infrastructure
 
-**Status:** active (not started)
+**Status:** active (Task 0.1 done; 0.2 next)
 **Estimated effort:** 1–2 weeks of focused work
 **Owner:** TBD
-**Last updated:** 2026-04-18
+**Last updated:** 2026-04-19
 
 ---
 
@@ -91,14 +91,17 @@ ops cost vs Postgres.
 
 **Acceptance criteria:**
 
-- [ ] `pqi query "SELECT category, COUNT(*) FROM history GROUP BY
-      category"` works end-to-end with nice output
-- [ ] Document at least 5 starter queries in
+- [x] `pqi query "SELECT category, COUNT(*) FROM history GROUP BY
+      category"` works end-to-end with nice output (note: uses
+      `result.market.category` — nested fields accessed via dot
+      notation; documented in `docs/analytics_queries.md`)
+- [x] Document at least 5 starter queries in
       `docs/analytics_queries.md`: per-category hit rate, per-agent
       lean rate, monthly PnL, per-band realized rate, missed
       opportunities (PASSes that would have won)
-- [ ] Query performance acceptable (<1 s for full-history
-      aggregations at current size)
+- [x] Query performance acceptable (<1 s for full-history
+      aggregations at current size) — ~230ms per cold call on 423
+      rows / 13MB
 
 **Files touched:**
 
@@ -413,29 +416,45 @@ If any answer is "no," that task is not done.
 
 ## Session state
 
-**Last work session:** *not yet started (planning session 33 only)*
+**Last work session:** session 34 (2026-04-19)
 
 **Done:**
 
 - Scaling assessment + phase plan committed (session 33).
 - Phase 0 scope approved.
+- **Task 0.1 — DuckDB wire-up (session 34).** `analytics_sql.py`
+  module landed with `history` + `verdicts` pre-registered views.
+  `pqi query "<SQL>"` CLI subcommand works end-to-end via rich
+  rendering. 5 starter queries published in
+  `docs/analytics_queries.md`. `duckdb>=1.0` pinned in
+  `requirements.txt`. Full-history aggregations clock at ~230ms
+  (target was <1s). See session-log §Session 34 for the DuckDB
+  timestamp-inference gotcha and surface-level findings.
 
 **In-progress:** *nothing*
 
-**Next action:** Begin Task 0.1 — DuckDB wire-up. First step: add
-`duckdb` to `requirements.txt`, write a 10-line probe script that
-runs `SELECT * FROM read_json_auto('~/.pqi/history.jsonl') LIMIT 5`
-to confirm the nested-`verdicts` read pattern works. Iterate from
-there.
+**Next action:** Task 0.2 — Pre-event CLV backfill. First step:
+inventory `event_start_time` population rate on resolved BUYs via
+`pqi query "SELECT COUNT(*) FILTER (WHERE result.market.event_start_time
+IS NOT NULL), COUNT(*) FROM history WHERE legacy=false AND
+result.recommendation LIKE 'BUY%' AND resolution.final_yes_price IS NOT
+NULL"` — Gamma returns `None` on some markets, so document the
+coverage gap before writing `scripts/backfill_clv.py`.
 
 **Notes for next session:**
 
-- Check `history.jsonl` schema — `verdicts` is a list of
-  `AgentVerdict` dicts. Try `SELECT UNNEST(verdicts) FROM
-  read_json_auto(...)` first to see what DuckDB produces.
-- Confirm `event_start_time` population rate on resolved rows
-  before starting Task 0.2 (Gamma returns `None` sometimes —
-  document the percentage).
+- DuckDB's `read_json_auto` needs
+  `timestampformat='%Y-%m-%dT%H:%M:%S.%f%z'` + `sample_size=-1`;
+  captured as a module constant in `analytics_sql.py`. Don't
+  reinvent.
+- Nested access in `history`: `result.market.*`, `resolution.*`,
+  `analysis.*`. Flat per-verdict access via the `verdicts` view.
+- Early finding: `[0.50, 0.60)` band realized rate 33% on n=9 —
+  flag for Task 0.4 (per-band calibration). Sample is thin; will be
+  sharper after more BUYs land there.
+- Task 0.5 retrospective should explicitly quote these numbers once
+  0.2–0.4 are in. Don't retune `BAND_SHRINKAGE_K` on the same data
+  that produced the current band stats.
 - Phase 0 and Phase 1 can run in parallel — if you want to
   parallel-track, pick Task 1.1 (SHARED_PREAMBLE autonomy rewrite)
   from `docs/phases/phase_1_signal_quality.md` and alternate.

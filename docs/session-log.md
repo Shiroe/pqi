@@ -4,6 +4,106 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 34 — Phase 0 Task 0.1: DuckDB analytics layer (`pqi query`)
+
+First code workstream under the Phase 0 plan drafted in session 33.
+Added a SQL layer over `~/.pqi/history.jsonl` so ad-hoc analytics stops
+requiring a bespoke Python script. No changes to scoring, aggregator,
+gate order, persisted state, or any pipeline contract.
+
+### What landed
+
+- **`pqi/analytics_sql.py`** — new module. Opens an in-memory DuckDB
+  connection with two pre-registered views:
+  - `history` — raw top-level rows; nested fields reached via dot
+    notation (`result.market.category`, `resolution.winning_side`).
+  - `verdicts` — flattened `(run_id, timestamp, category, question,
+    entry_yes_price, recommendation, pass_reason, signal_type,
+    final_score, no_score, winning_side, final_yes_price)` × each
+    agent verdict under `v.*`, via `UNNEST(result.verdicts)`.
+    Non-legacy only.
+  Public API: `query(sql, history_path=None) -> DuckDBPyRelation` and
+  `render_table(relation, title, max_rows) -> (rich.Table, truncated)`.
+
+- **`pqi query "<SQL>"` CLI subcommand** (`main.py`). Wraps the helper
+  + rich rendering. Flags: `--limit/-n` (default 100) for row cap.
+  Truncation notice when the cap hits. Errors surface as red
+  one-liners with the DuckDB binder message.
+
+- **`docs/analytics_queries.md`** — published the 5 starter queries
+  required by Phase 0 Task 0.1:
+  1. per-category BUY hit rate,
+  2. per-agent lean rate (with 0.45–0.55 dead band),
+  3. monthly PnL per share,
+  4. realized rate by EV-gate price band,
+  5. missed opportunities (PASSes on the eventual winner with council
+     ≥ 0.65 conviction).
+  Plus a tips section covering nested-field access, legacy filtering,
+  directional-winner semantics, and how to audit `stats.json` banded
+  thresholds against realized per-band rates.
+
+- **`requirements.txt`** — pinned `duckdb>=1.0`.
+
+### DuckDB read contract (one-time gotcha)
+
+Auto-inference on `read_json_auto` misidentifies our ISO8601 timestamps
+(it samples a nested date field with `Z` format, then rejects the
+top-level `+00:00` offsets). Fixed by pinning
+`timestampformat='%Y-%m-%dT%H:%M:%S.%f%z'` and `sample_size=-1`
+(full-file schema pass, ~50ms on the current 13MB file). Captured as
+a module-level constant in `analytics_sql.py` so CLI users don't have
+to think about it.
+
+### Timing
+
+Full-history aggregations (423 rows, 13MB) land at ~230ms each cold —
+well under the Phase 0 <1s acceptance target. Each `query()` call
+opens a fresh connection and rereads the JSONL; connection caching
+is not warranted until profiling shows it matters.
+
+### Early findings (pre-retrospective, surface-only)
+
+Running the starter queries against current history produced
+observations worth Phase 0 task 0.5 (retrospective):
+
+- **Per-band realized rate is non-monotonic against the smoothed
+  threshold.** `[0.50, 0.60)` band: 3/9 wins = 33% realized at mean
+  price 56%. Either this band's BUYs are genuinely -EV (signal
+  quality) or the Beta-binomial shrinkage is over-correcting toward a
+  global rate that doesn't apply here. Sample is thin (n=9); flag for
+  0.4.
+- **Bear agent flat at 49% lean rate** (n=342 with 0.45–0.55 dead
+  band) vs other agents 60–67%. Consistent with the Session-32 Option
+  B reassessment finding that aggregate |drift| has converged toward
+  mirror collapse. Feeds Phase 1 priority.
+- **Monthly PnL April: -0.575 total per-share across 65 BUYs** (≈
+  -0.9¢/share average). Marginal at best; the edge is small enough
+  that gate calibration tuning matters more than adding agents.
+
+These are descriptive; 0.3/0.4/0.5 will do the structured treatment.
+
+### What did NOT change
+
+- `scoring.py`, aggregator, gate order, Kelly formula, Option B
+  contract, CLOB reader, PandaScore resolver, cache schema, EV gate,
+  persona prompts, env defaults for any gate threshold.
+- `history.jsonl` format — read-only analytics layer.
+
+### Files touched
+
+- New: `analytics_sql.py`, `docs/analytics_queries.md`.
+- Edit: `main.py` (one new `query` command block), `requirements.txt`
+  (one dependency).
+
+### Next for Phase 0
+
+Task 0.2 (pre-event CLV backfill) is the natural next step — the
+DuckDB layer is the substrate, CLV is the first real measurement.
+Phase doc `docs/phases/phase_0_edge_validation.md` has the
+implementation sketch.
+
+---
+
 ## Session 32 — Contrarian 0.65 → 0.60 + banded EV gate pass_reason rewrite + Option B shadow reassessment
 
 Two small aggregator-adjacent changes plus a documentation decision on

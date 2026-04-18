@@ -25,6 +25,9 @@ py-clob-client>=0.1
 # Cache
 aiosqlite>=0.20
 
+# Analytics — SQL layer over ~/.pqi/history.jsonl (Phase 0, `pqi query`)
+duckdb>=1.0
+
 # Fuzzy match for the structured-data resolver (esports market question →
 # PandaScore canonical match). Pure-C extension, ~0 import cost, MIT-licensed.
 rapidfuzz>=3.0

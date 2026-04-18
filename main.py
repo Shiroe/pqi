@@ -849,6 +849,55 @@ def categories(
 
 
 # ---------------------------------------------------------------------------
+# `pqi query` — SQL over history.jsonl via DuckDB
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def query(
+    sql: str = typer.Argument(..., help="SQL to run against the `history` / `verdicts` views."),
+    limit: int = typer.Option(
+        100, "--limit", "-n", help="Max rows to render in the table output."
+    ),
+) -> None:
+    """
+    Run an ad-hoc SQL query against ~/.pqi/history.jsonl.
+
+    Two views are pre-registered:
+
+      history   — raw top-level rows (nested: result.*, resolution.*, analysis.*)
+      verdicts  — UNNESTed per-agent rows (non-legacy only); access verdict
+                  fields via v.* (e.g. v.agent_name, v.probability,
+                  v.probability_source).
+
+    Examples:
+
+      pqi query "SELECT category, COUNT(*) FROM history GROUP BY category"
+      pqi query "SELECT v.agent_name, AVG(v.probability) FROM verdicts GROUP BY v.agent_name"
+
+    See docs/analytics_queries.md for a starter set.
+    """
+    from pqi.analytics_sql import query as run_query, render_table
+
+    try:
+        rel = run_query(sql)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    except Exception as exc:  # DuckDB errors are varied; surface them
+        console.print(f"[red]Query failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    table, truncated = render_table(rel, max_rows=limit)
+    console.print(table)
+    if truncated:
+        console.print(
+            f"[dim]Output truncated at --limit {limit}. "
+            f"Add LIMIT or raise -n to see more.[/dim]"
+        )
+
+
+# ---------------------------------------------------------------------------
 # `pqi history` sub-app
 # ---------------------------------------------------------------------------
 
