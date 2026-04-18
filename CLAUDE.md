@@ -471,23 +471,41 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 32 — contrarian min-prob retuned `0.65 →
-0.60` (session 31's 0.65 was -EV on the resolved sample; the positive
-signal sits in the 0.60–0.65 band) and the banded EV gate's
-`pass_reason` format reworked to `≥ band L-H WR XX.X% [n=K]` so the
-comparison is unambiguously against the band WR (not the global
-`PerceivedTrueWinRate`).
+**Last updated:** session 33 — planning + documentation only, no code
+changes. Triaged a v2.0 architecture RFC
+(`docs/esports_intel_engine_report.md`) and its external review
+(`docs/cto_review_esports_engine.md`); synthesized the keep/defer
+decisions into `docs/scaling_assessment.md`; expanded `CTO_Agent.md`
+with quantitative/strategic/architectural reviewer capabilities; and
+laid out five phase docs in `docs/phases/` to enable async work.
+**Phase 0 (edge validation via DuckDB analytics) is active as the
+next code workstream.**
 
-Session 31 — banded-WR EV gate (Beta-binomial smoothed per-price-band
-thresholds) + Kelly aligned to the banded threshold + PandaScore
-`/teams/{id}/matches/past` endpoint fix.
+Session 32 — contrarian min-prob retuned `0.65 → 0.60` (session 31's
+0.65 was -EV on the resolved sample; the positive signal sits in the
+0.60–0.65 band) and the banded EV gate's `pass_reason` format
+reworked to `≥ band L-H WR XX.X% [n=K]`. Session 31 — banded-WR EV
+gate + Kelly aligned to the banded threshold + PandaScore
+past-matches endpoint fix.
 
-All Phase 1 and Phase 2 features are complete. Phase 3 (continuous-run
-TUI + auto-trader) is scoped in `docs/roadmap.md` Theme B but not yet
-started. See [`docs/session-log.md`](docs/session-log.md) for
-per-session details and [`docs/roadmap.md`](docs/roadmap.md) for the
-themed plan (A. Modeling & Calibration, B. TUI + Trading,
-C. Operational Tooling).
+All Phase 1 (MVP) and legacy Phase 2 (Post-MVP) features per the old
+roadmap naming are complete. The new phase framing in
+`docs/phases/` (sessions 33+) supersedes that naming:
+
+| New phase | Status | Doc |
+| --- | --- | --- |
+| Phase 0 — edge validation | **active** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
+| Phase 1 — signal quality (Option B autonomy fix) | parallel-able with P0 | [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md) |
+| Phase 2 — execution edge (MFE, listener) | blocked on P0 | [`docs/phases/phase_2_execution_edge.md`](docs/phases/phase_2_execution_edge.md) |
+| Phase 3 — deployment portability (Docker/VPS) | blocked on P0 verdict | [`docs/phases/phase_3_deployment_portability.md`](docs/phases/phase_3_deployment_portability.md) |
+| Phase 4 — scaling triggers (Postgres/Redis/microservices) | reactive only | [`docs/phases/phase_4_scaling_triggers.md`](docs/phases/phase_4_scaling_triggers.md) |
+
+See [`docs/session-log.md`](docs/session-log.md) for per-session
+details, [`docs/scaling_assessment.md`](docs/scaling_assessment.md)
+for the scaling-decision rationale, and
+[`docs/roadmap.md`](docs/roadmap.md) for the themed catalog (A.
+Modeling & Calibration, B. TUI + Trading, C. Operational Tooling),
+which the phases index.
 
 **Option B shadow layer** (session 26, steps 1–4 per
 [`docs/option_b_migration_plan.md`](docs/option_b_migration_plan.md)):
@@ -520,6 +538,14 @@ behavior is unchanged.
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 33** — planning + docs only. Expanded `CTO_Agent.md`
+  into a capable reviewer persona (quantitative validation, strategic
+  edge, architectural judgment). Triaged the v2.0 RFC and its
+  external review; captured keep/defer rationale in
+  `docs/scaling_assessment.md`. Wrote 5 phase docs under
+  `docs/phases/` designed for async work (entry criteria + task
+  acceptance + session state per doc). Phase 0 (DuckDB-driven edge
+  validation) is the next code workstream.
 - **Session 32** — contrarian min-prob retuned `0.65 → 0.60` (session
   31's 0.65 was -EV on resolved history; the profitable signal sits
   in the 0.60–0.65 band). Big Drawdown Risk `pass_reason` format
@@ -605,93 +631,97 @@ behavior is unchanged.
 
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
-Also read CTO_Agent.md — it frames the reviewer posture (contract-as-law,
-parallelism, bias-as-feature, statistical skepticism) for this project.
+Also read CTO_Agent.md — session-33 rewrite made it a capable
+reviewer persona (contract-as-law, quantitative validation, strategic
+edge, architectural judgment, plus the original code-review stance).
 
 Detailed reference material lives in docs/:
+- docs/scaling_assessment.md — v2.0 RFC triage, prediction vs execution
+  edge framework, why DuckDB over Postgres, explicit rejections
+- docs/phases/README.md — phase index, dependency graph, template pointer
+- docs/phases/phase_0_edge_validation.md — **active** workstream
+- docs/phases/phase_1_signal_quality.md — parallel-able (Option B autonomy fix)
+- docs/phases/phase_2_execution_edge.md — blocked on P0
+- docs/phases/phase_3_deployment_portability.md — blocked on P0 verdict
+- docs/phases/phase_4_scaling_triggers.md — reactive only
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 32)
-- docs/roadmap.md — future work priorities, themed
+- docs/session-log.md — per-session changelog (current through session 33)
+- docs/roadmap.md — themed catalog (A/B/C); phase section indexes phases
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
-## PRIORITY options (pick one with the user)
-- **Observe session-32 contrarian 0.60 gate in the wild.** After the
-  loosening, a CONTRARIAN BUY only fires when council prob ≥ 0.60 AND
-  side confidence ≥ 0.80 AND expected ROI ≥ 0.20 (the latter two
-  unchanged). Watch the first few CONTRARIAN BUYs that land — they
-  should skew toward the 0.60–0.65 band where the +$0.081/share
-  signal was observed. If the next 5–10 resolutions are trending
-  negative PnL, revisit the confidence (0.80) and ROI (0.20) gates
-  rather than the prob floor — those are the risk-side guards.
-- **Observe session-32 new `pass_reason` format.** Next BUY that the
-  banded EV gate downgrades to PASS should print
-  `"Big Drawdown Risk: YES price X% ≥ band L-H WR Y% [n=K] (-EV)"`
-  in the recommendation panel. The only path that still uses the
-  `PerceivedTrueWinRate` literal is when `perceived_stats` is absent
-  or the side price is outside `[0.09, 0.95]` — effectively cold-start
-  or an exotic price.
-- **Do NOT land `scripts/b_shadow_backtest.py` yet.** The session-32
-  shadow reassessment found that Option B's per-agent drift has
-  converged toward mirror collapse (|drift| 0.01–0.06, signed ±0.02).
-  YES/NO Brier differ by ≤ 0.01 across every agent — the
-  pre-registered ΔBrier ≤ −0.005 CI95<0 criterion is mathematically
-  unreachable with the current signal. Running the backtest now
-  will produce a rejection on a degenerate signal, not a real test
-  of B-math. Fix the signal first (next priority) or accept that
-  Option B stays descriptive-only.
-- **Iterate on Option B autonomy framing.** If the plan is to make
-  Option B earn its way into scoring, the SHARED_PREAMBLE autonomy
-  block needs sharper instruction — worked examples (`p_yes=0.70,
-  p_no=0.25 when TeamA evidence is deep and TeamB is sparse`) and
-  possibly a forced evidence-quality pre-step. Roll out per §6 step
-  3: `rules_lawyer → statistician → sentiment → specialist →
-  contrarian → bull → bear`, 10–20 analyses per persona, re-check
-  aggregate `|drift|` in `history stats`. Gate the backtest on
-  aggregate `|drift| > 0.10` for at least two agents.
-- **Retrospective: sanity-check `BAND_SHRINKAGE_K=5`.** After a
-  handful of additional resolved rows, rerun the comparison between
-  K=3 / K=5 / K=10 against realized outcomes. Only adjust K with
-  fresh data — don't tune on the same 55-row slice that picked it.
-- **Observe session-30 retry in the wild.** Next 529/429 should log
-  `anthropic call failed (attempt N/6): … — retrying in Xs` and the
-  council should still complete. If the exception propagates without
-  that log line, the type isn't in our `retryable` tuple — extend it
-  in `_chat_anthropic`.
-- **Verify session-28 PandaScore + temporal disambiguation
-  end-to-end.** With `PANDASCORE_API_KEY` set, run
-  `LOG_LEVEL=INFO python -m pqi.main -c counter-strike --live -v 0`.
-  Confirm (a) cyan "PandaScore: TeamA vs TeamB (status, fuzzy=NN)"
-  line, (b) briefing in DEBUG includes EVENT TEMPORAL DISAMBIGUATION
-  + STRUCTURED MATCH DATA blocks, (c) SCHEDULED matches don't get
-  past-tense paraphrases. The session-31 past-matches endpoint fix
-  (`filter[past]=true`) means team form should now be populated for
-  both teams when their names resolve — previously a broken path
-  silently returned empty form. Resolver miss is fine — pipeline
-  degrades to `structured_match=None`.
-- **Theme A · Modeling & Calibration:** A.4 (Bear monitoring, pure
-  stats), A.10 (dynamic-weight feedback-loop monitoring — protects
-  A.9 from self-reinforcement; matters more now that A.9 is live).
-- **Theme C · Operational Tooling:** C.1–C.6 are isolated QoL items.
-- **Theme B:** B.1 (streaming TUI) is the Phase 3 entry point.
+## PRIORITY — Phase 0: edge validation
+
+Default entry point: `docs/phases/phase_0_edge_validation.md`. Phase 0
+is the "does our edge actually exist?" workstream — DuckDB wire-up,
+CLV backfill, reliability diagram, per-band calibration,
+retrospective. Replaces ad-hoc Python scripts for history analysis.
+Verdict from Phase 0 unblocks Phases 2/3. Start with task 0.1
+(DuckDB wire-up) — it's the enabler for the rest.
+
+Parallel-able with Phase 0: `docs/phases/phase_1_signal_quality.md`
+(Option B autonomy fix). Phase 1 is the SHARED_PREAMBLE autonomy
+rewrite + rollout + conditional backtest. The backtest stays blocked
+until aggregate `|drift| > 0.10` for ≥ 2 agents — session-32
+reassessment found the current signal has converged toward mirror
+collapse (|drift| 0.01–0.06) and the pre-registered ΔBrier ≤ −0.005
+criterion is mathematically unreachable on the current persona
+output. Fix the signal, then test B-math.
+
+## Monitoring tasks (low priority; observe, don't code)
+These are from earlier sessions; pick up if the signal appears
+organically during Phase 0/1 work.
+
+- **Observe session-32 contrarian 0.60 gate in the wild.** A
+  CONTRARIAN BUY now fires when council prob ≥ 0.60 AND side
+  confidence ≥ 0.80 AND expected ROI ≥ 0.20. Early resolutions
+  should skew toward the 0.60–0.65 band. If first 5–10 trend
+  negative PnL, revisit the confidence/ROI guards, not the prob
+  floor. (Phase 0 retrospective task 0.5 formalizes this.)
+- **Observe session-32 `pass_reason` format.** Next banded-EV-gate
+  downgrade should print `"Big Drawdown Risk: … ≥ band L-H WR Y%
+  [n=K] (-EV)"`. Scalar `PerceivedTrueWinRate` path only fires on
+  absent perceived_stats or exotic prices outside [0.09, 0.95].
+- **Observe session-30 retry.** Next 529/429 should log
+  `anthropic call failed (attempt N/6): … — retrying in Xs`. If the
+  exception propagates without that log, extend the `retryable`
+  tuple in `_chat_anthropic`.
+- **Verify session-28 PandaScore + disambiguation end-to-end.** With
+  `PANDASCORE_API_KEY` set, run `LOG_LEVEL=INFO python -m pqi.main
+  -c counter-strike --live -v 0`. Confirm cyan "PandaScore: …" line,
+  DEBUG briefing with EVENT TEMPORAL DISAMBIGUATION + STRUCTURED
+  MATCH DATA blocks, no past-tense paraphrases on SCHEDULED matches.
+  Resolver miss → `structured_match=None` is the contract.
+
+## Deferred / theme-level (picked up via phase docs)
+
+Theme A items (A.4 Bear monitoring, A.7 confidence floor, A.8 Bull
+audit, A.10 dynamic-weight loop monitoring) feed Phase 0 task 0.5
+(retrospective). Theme B items (B.1 TUI, B.3–B.6 trading) become
+Phase 2 deliverables. Theme C items are isolated QoL — pick any
+between phases if they bite you.
 
 ## Instructions
-- Pick the next priority with the user before starting. If the
-  conversation turns to Option B step 5, reference the session-32
-  shadow reassessment in docs/session-log.md first — the backtest
-  cannot pass the pre-registered criteria on the current signal.
+- Default to Phase 0 task 0.1 (DuckDB wire-up) unless the user
+  redirects. Phase docs are designed for async work — each has
+  entry criteria + task acceptance + session state, so you can pick
+  up where the last session left off.
+- Phase 1 can proceed in parallel IF the user wants to work on
+  signal quality (prompt-level, no aggregator risk). Reference the
+  session-32 shadow reassessment in docs/session-log.md if the
+  conversation turns to running the Option B backtest prematurely.
 - Update ## Current State and write a fresh ## Next Session Prompt
-  at end of session. Log meaningful decisions in docs/session-log.md.
-- Session 31 touched the aggregator for the first time since session
-  23 (banded threshold + Kelly realignment). Session 32 adjusted a
-  gate knob (`MIN_CONTRARIAN_PROBABILITY`) and a user-facing string
-  but kept the aggregator math identical. Any further aggregator
-  changes still need explicit sign-off.
+  at end of session. Log meaningful decisions in docs/session-log.md
+  and the phase doc's "Session state" section.
+- Aggregator math (scoring formula, gate stack, Kelly formula) has
+  been stable since session 31's banded EV gate + session 32's
+  `MIN_CONTRARIAN_PROBABILITY` retune. Any further aggregator change
+  needs explicit sign-off.
 - Option B rollout order is strict per
   docs/option_b_migration_plan.md. Never wire probability_no into
   scoring until step 5 passes pre-registered criteria on held-out
-  data — and step 5 is blocked on the signal-quality gap, not the
-  sample-count gap.
+  data — and step 5 is blocked on the signal-quality gap, which
+  Phase 1 addresses.
 - PandaScore is non-fatal: any resolver failure must leave
   structured_match=None and let the pipeline continue. Don't add
   exceptions or hard gates — degraded behavior is the contract.

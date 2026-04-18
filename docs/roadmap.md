@@ -46,6 +46,41 @@ All core pipeline modules shipped: `polymarket.py`, `synthesizer.py`,
 
 ---
 
+## Execution Plan (phases)
+
+Session 33 introduced a phase-based execution overlay on top of the
+themes below. The **themes remain the catalog** — the full inventory
+of work items and their rationale — while the **phases define the
+strategic order** we work through them in, aligned with the
+priorities in `docs/scaling_assessment.md`.
+
+| Phase | Status | What it does | Doc |
+| --- | --- | --- | --- |
+| Phase 0 | **active** | Edge validation via DuckDB analytics, CLV backfill, reliability diagrams, per-band calibration | [`phases/phase_0_edge_validation.md`](phases/phase_0_edge_validation.md) |
+| Phase 1 | parallel-able with P0 | Signal quality: fix Option B mirror-collapse via SHARED_PREAMBLE autonomy rewrite, then conditional backtest | [`phases/phase_1_signal_quality.md`](phases/phase_1_signal_quality.md) |
+| Phase 2 | blocked on P0 | Execution edge: retroactive MFE analysis, read-only listener prototype | [`phases/phase_2_execution_edge.md`](phases/phase_2_execution_edge.md) |
+| Phase 3 | blocked on P0 verdict | Deployment portability: single-container VPS deploy | [`phases/phase_3_deployment_portability.md`](phases/phase_3_deployment_portability.md) |
+| Phase 4 | reactive | Scaling triggers: Postgres / Redis / microservices / cloud, each activated only by a measured threshold crossing | [`phases/phase_4_scaling_triggers.md`](phases/phase_4_scaling_triggers.md) |
+
+Theme ↔ phase map (so cross-references from the themes below stay
+usable):
+
+| Theme item | Phase home |
+| --- | --- |
+| A.1 Option B step 5 (backtest) | Phase 1 task 1.4 |
+| A.1 SHARED_PREAMBLE autonomy rewrite | Phase 1 task 1.1-1.3 |
+| A.4 Bear monitoring, A.7 confidence floor, A.8 Bull audit | Phase 0 task 0.5 (retrospective feeds these) |
+| A.5 EV gate tuning (per-band) | Phase 0 task 0.4 (per-band calibration) |
+| A.10 dynamic-weight monitoring | Phase 0 ongoing, formalized in P0 task 0.1 dashboards |
+| B.1 streaming TUI | Phase 2 task 2.2 (read-only listener is the first slice) |
+| B.3-B.6 trading integration | Phase 2 tasks 2.3-2.4 (manual review loop before any write calls) |
+| C.1-C.6 ops items | Phase 3 absorbs C.6 (concurrent-write lockfile); others stay as isolated QoL work |
+
+See [`phases/README.md`](phases/README.md) for the phase doc template
+and dependency graph.
+
+---
+
 ## Future Plans
 
 Future work is organized into three themes. Each item lists its
