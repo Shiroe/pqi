@@ -291,3 +291,17 @@ LIMIT 20
 - Performance: the 13MB current file aggregates in ~130ms cold. If this
   ever bites, a one-shot flattened sidecar (`~/.pqi/verdicts.jsonl`)
   can be emitted — but don't optimise pre-emptively.
+
+---
+
+## Companion artifacts
+
+- **Reliability diagram** (`python -m scripts.reliability_diagram`,
+  Phase 0 Task 0.3, session 36). Per-agent + council reliability table
+  bucketed into the EV-gate price bands, plus per-agent Brier and a
+  cross-agent correlation diagnostic for the mirror-collapse signal.
+  Operates over every non-legacy resolved row (full ~400-row set, not
+  just the 65 BUY-triggered ones) using directional-winner outcome
+  semantics. Output: ASCII to stdout + markdown to
+  `~/.pqi/reports/reliability_YYYYMMDD.md`. Pass `--no-write` to skip
+  the file write.

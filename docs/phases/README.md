@@ -16,7 +16,7 @@ items (Themes A/B/C) that the phases draw from.
 
 | Phase | Title | Status | Estimated effort |
 | --- | --- | --- | --- |
-| 0 | Edge Validation via Analytics Infrastructure | **active (Tasks 0.1 + 0.2 done; 0.3 next)** | 1–2 weeks |
+| 0 | Edge Validation via Analytics Infrastructure | **active (Tasks 0.1 + 0.2 + 0.3 done; 0.4 next)** | 1–2 weeks |
 | 1 | Signal Quality Fix (Option B Autonomy) | not started (can parallelize) | 2–4 weeks |
 | 2 | Execution Edge Prototype | blocked on Phase 0 | 3–6 weeks |
 | 3 | Deployment Portability | blocked on Phase 0 positive verdict | 3–5 days |

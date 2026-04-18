@@ -1,6 +1,6 @@
 # Phase 0: Edge Validation via Analytics Infrastructure
 
-**Status:** active (Tasks 0.1 + 0.2 done; 0.3 next)
+**Status:** active (Tasks 0.1 + 0.2 + 0.3 done; 0.4 next)
 **Estimated effort:** 1–2 weeks of focused work
 **Owner:** TBD
 **Last updated:** 2026-04-19
@@ -219,15 +219,19 @@ the highest-data-density signal about council quality.
 
 **Acceptance criteria:**
 
-- [ ] Reliability diagram produced for all 7 agents + council
-      aggregate
-- [ ] Per-bin n reported, low-n bins flagged
-- [ ] Clear visual (or table) showing over/underconfidence by bin
-      (e.g. "Bull at 70–80% bucket: realized 55%, n=38 — Bull is
-      overconfident on favorites")
-- [ ] Brier score computed per agent and for aggregate, written to
-      report
-- [ ] Results saved to `~/.pqi/reports/reliability_YYYYMMDD.md`
+- [x] Reliability diagram produced for all 7 agents + council
+      aggregate — `scripts/reliability_diagram.py` (session 36)
+- [x] Per-bin n reported, low-n bins flagged (`thin` when n<10)
+- [x] Clear visual (or table) showing over/underconfidence by bin —
+      Bull is overconfident on favorites (gap −0.10 to −0.22 across
+      [0.50, 0.95)); Bear is essentially noise outside [0.09, 0.50);
+      Council is well-calibrated through [0.09, 0.70) and slightly
+      underconfident on YES in [0.60, 0.95)
+- [x] Brier score computed per agent and for aggregate — Council
+      0.2176 (best, beats the 0.25 always-0.5 baseline by ~3pp);
+      Bear 0.2810 (worst, **above** the chance baseline); five
+      others tightly clustered 0.2180–0.2370
+- [x] Results saved to `~/.pqi/reports/reliability_YYYYMMDD.md`
       for versioning
 
 **Files touched:**
@@ -420,7 +424,7 @@ If any answer is "no," that task is not done.
 
 ## Session state
 
-**Last work session:** session 35 (2026-04-19)
+**Last work session:** session 36 (2026-04-19)
 
 **Done:**
 
@@ -448,18 +452,49 @@ If any answer is "no," that task is not done.
   valorant −0.032 (n=17), league-of-legends −0.001 (n=14),
   counter-strike −0.013 (n=8). CLV + outcome join shows no monotone
   win-rate gradient at n=22/bucket; re-check at 100+ BUYs.
+- **Task 0.3 — Reliability diagram (session 36).**
+  `scripts/reliability_diagram.py` (stdlib only) buckets per-agent +
+  council `final_score` predictions into the EV-gate-aligned bands
+  with `[0.00, 0.09)` and `[0.95, 1.00]` bookends so no prediction is
+  silently dropped. Outcome via directional-winner. Operates over 385
+  non-legacy resolved rows / 2,668 verdicts. Output: ASCII to stdout +
+  markdown at `~/.pqi/reports/reliability_YYYYMMDD.md`. Headline numbers:
+
+  | Metric | Value | Reading |
+  | --- | --- | --- |
+  | Council Brier | **0.2176** | Best of any agent — confidence-weighted aggregation buys ~3pp over the 0.25 always-0.5 baseline. |
+  | Bear Brier | **0.2810** | **Worse than chance.** Consistent with session-34's 49% lean rate finding. |
+  | Other agents Brier | 0.2180–0.2370 | Tight cluster: rules_lawyer 0.2180, sentiment 0.2196, specialist 0.2195, statistician 0.2199, contrarian 0.2215, bull 0.2370. |
+  | Council [0.09, 0.50) | n=187, realized 33%, mean pred 35% | Well-calibrated. |
+  | Council [0.50, 0.60) | n=93, realized 52%, mean pred 55% | Well-calibrated. |
+  | Council [0.60, 0.70) | n=88, realized 71%, mean pred 64% | **Underconfident on YES** (gap +0.063). |
+  | Bull [0.50, 0.95) | n=145+16, gap −0.10 to −0.22 | **Overconfident on favorites** across the whole upper tail. |
+  | Mean pairwise Pearson | 0.557 | Dragged down by Bear; see cluster below. |
+  | Pairs with r ≥ 0.85 | **9/21 (43%)** | Mirror collapse is **cluster-level, not uniform**. |
+
+  Cluster diagnosis: rules_lawyer / statistician / sentiment /
+  specialist / contrarian form a tightly correlated cluster (9 of 10
+  cluster-internal pairs at r ≥ 0.85). Bull retains weak independence
+  (~0.6 with the cluster). Bear is essentially uncorrelated
+  (−0.17 to +0.04) but its predictions are also the worst-calibrated
+  of any agent. Phase 1's SHARED_PREAMBLE autonomy fix should
+  preserve Bear's distinctness while improving its calibration —
+  destroying Bear's distinctness without fixing its calibration would
+  push council Brier upward.
 
 **In-progress:** *nothing*
 
-**Next action:** Task 0.3 — Reliability diagram. Write
-`scripts/reliability_diagram.py` that buckets per-agent + aggregate
-predicted probabilities against realized outcome. Use the EV-gate
-price bands `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]`
-for cross-comparison with Task 0.4. Output ASCII table +
-markdown report at `~/.pqi/reports/reliability_YYYYMMDD.md`;
-include per-agent Brier. Agent-level calibration uses the full
-~400-resolution set via directional winner semantics (see Q2 caveat),
-not just the 65 BUY-triggered rows.
+**Next action:** Task 0.4 — Per-band calibration check. Use
+`pqi query` against `verdicts` / `history` and the EV-gate band
+boundaries to compute realized BUY hit rate per band (alongside
+the per-agent prediction realisation rates already in the
+reliability report) and compare against the Beta-binomial
+smoothed thresholds in `~/.pqi/stats.json` (`band_stats`).
+Report per band: n, realized rate, banded threshold, 95% Wilson
+CI, delta. Flag bands where realized < implied-prob floor
+(suggesting the gate is under-rejecting). Do **not** retune
+`BAND_SHRINKAGE_K` on the same data that produced `band_stats`
+— Task 0.4 measures, Task 0.5 recommends.
 
 **Notes for next session:**
 
@@ -479,10 +514,24 @@ not just the 65 BUY-triggered rows.
   reports drift so the retrospective can caveat them.
 - Early finding: `[0.50, 0.60)` band realized rate 33% on n=9 —
   flag for Task 0.4 (per-band calibration). Sample is thin; will be
-  sharper after more BUYs land there.
+  sharper after more BUYs land there. Note: at the council-prediction
+  level, 93 rows in [0.50, 0.60) realized at 51.6% — the 33% number is
+  the BUY-survivorship subset, not the underlying calibration. Task
+  0.4 will quantify that gap.
 - Task 0.5 retrospective should explicitly quote the CLV + band
   numbers once 0.3–0.4 are in. Don't retune `BAND_SHRINKAGE_K` on
   the same data that produced the current band stats.
-- Phase 0 and Phase 1 can run in parallel — if you want to
-  parallel-track, pick Task 1.1 (SHARED_PREAMBLE autonomy rewrite)
-  from `docs/phases/phase_1_signal_quality.md` and alternate.
+- Reliability-diagram output is a versioned UTC-dated markdown file —
+  re-running on a different day produces a new report rather than
+  overwriting. Session-36 file: `~/.pqi/reports/reliability_20260418.md`.
+- Phase 1 (signal quality) is now the highest-leverage parallel
+  workstream. The 5-agent cluster collapse + Bear pathology are
+  signal-quality failures, not modeling failures — the
+  SHARED_PREAMBLE rewrite should be evaluated against (a) does
+  cluster pairwise drop below 0.85, (b) does Bear Brier fall toward
+  the rest of the cluster, (c) does council Brier hold or improve.
+  Re-run `scripts/reliability_diagram.py` after any prompt change to
+  measure delta.
+- Phase 0 and Phase 1 can still run in parallel — Task 0.4 (DuckDB
+  query + retrospective) doesn't touch agents, so a Phase 1 prompt
+  rewrite can land alongside.

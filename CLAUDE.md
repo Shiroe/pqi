@@ -471,20 +471,37 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 35 — Phase 0 Task 0.2 shipped:
-`scripts/backfill_clv.py` writes pre-event CLV to `~/.pqi/clv.jsonl`
-one row per resolved BUY (uniform schema). `analytics_sql.py`
-conditionally registers a third view `clv_by_row` when the sidecar
-exists; join to `history` / `verdicts` on `run_id`.
-`docs/analytics_queries.md` Q5 is now the CLV block (distribution,
-per-category, coverage audit, CLV-vs-outcome join). Coverage: 44/65
-resolved BUYs (67.7%); the 21 unavailable rows all hit permanent
-`no_tokens` (predate session-22 `clob_token_ids` persistence). Mean
-CLV −0.0167, stddev 0.064 on n=44; valorant −0.032 (n=17), LoL
-−0.001 (n=14), CS −0.013 (n=8). Bucket policy: last-before-target
-(avoids post-event resolution-spike leakage — see session-log §35
-for the concrete 0.835→0.9995 probe). No pipeline / aggregator /
-gate changes. **Next: Phase 0 Task 0.3 (reliability diagram).**
+**Last updated:** session 36 — Phase 0 Task 0.3 shipped:
+`scripts/reliability_diagram.py` (stdlib only) walks
+`~/.pqi/history.jsonl`, buckets per-agent and council-aggregate
+predictions into the EV-gate-aligned price bands (with
+`[0.00, 0.09)` and `[0.95, 1.00]` bookends), and emits an ASCII
+table + markdown report to `~/.pqi/reports/reliability_YYYYMMDD.md`.
+Operates over **385 resolved rows / 2,668 verdicts** via
+directional-winner outcome semantics. Headline numbers: **Council
+Brier 0.2176** (best of any agent — confidence weighting buys ~3pp
+over the 0.25 always-0.5 baseline). **Bear Brier 0.2810** (the lone
+agent above the chance baseline). Five-agent cluster
+{rules_lawyer, statistician, sentiment, specialist, contrarian}
+shows pairwise Pearson 0.80–0.92 — **partial mirror collapse,
+cluster-level not uniform.** Bull retains weak independence (~0.6
+with the cluster); Bear is essentially uncorrelated (−0.17 to
++0.04) but its predictions are also the worst-calibrated. Council
+is well-calibrated through `[0.09, 0.70)` and slightly
+underconfident on YES in `[0.60, 0.95)`. Bull is overconfident
+across the whole upper tail (`[0.80, 0.95)` n=16 realized 62.5%
+on a mean prediction of 84.4% — 22pp gap). No pipeline /
+aggregator / gate changes. **Next: Phase 0 Task 0.4 (per-band
+calibration vs `stats.json` band_stats).**
+
+Session 35 shipped Phase 0 Task 0.2 — pre-event CLV backfill.
+`scripts/backfill_clv.py` writes uniform-schema `~/.pqi/clv.jsonl`;
+`analytics_sql.py` conditionally registers `clv_by_row`; coverage
+44/65 (67.7%); 21 unavailable all permanent `no_tokens`
+(pre-session-22 rows); mean CLV −0.0167, stddev 0.064 on n=44.
+Bucket policy last-before-target (avoids post-event
+resolution-spike leakage — see session-log §35 for the 0.835→0.9995
+probe).
 
 Session 34 shipped Phase 0 Task 0.1 — DuckDB analytics layer
 (`pqi/analytics_sql.py`) with pre-registered `history` and
@@ -515,7 +532,7 @@ roadmap naming are complete. The new phase framing in
 
 | New phase | Status | Doc |
 | --- | --- | --- |
-| Phase 0 — edge validation | **active (Tasks 0.1 + 0.2 ✓; 0.3 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
+| Phase 0 — edge validation | **active (Tasks 0.1 + 0.2 + 0.3 ✓; 0.4 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
 | Phase 1 — signal quality (Option B autonomy fix) | parallel-able with P0 | [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md) |
 | Phase 2 — execution edge (MFE, listener) | blocked on P0 | [`docs/phases/phase_2_execution_edge.md`](docs/phases/phase_2_execution_edge.md) |
 | Phase 3 — deployment portability (Docker/VPS) | blocked on P0 verdict | [`docs/phases/phase_3_deployment_portability.md`](docs/phases/phase_3_deployment_portability.md) |
@@ -560,6 +577,26 @@ behavior is unchanged. Session 34 added a read-only SQL layer
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 36** — Phase 0 Task 0.3 shipped: reliability diagram.
+  `scripts/reliability_diagram.py` (stdlib only) bins per-agent +
+  council-aggregate predictions into the EV-gate-aligned bands plus
+  `[0.00, 0.09)` / `[0.95, 1.00]` bookends; outcome via directional-
+  winner. 385 resolved rows / 2,668 verdicts. Console + markdown
+  report at `~/.pqi/reports/reliability_YYYYMMDD.md`. Headline
+  numbers: Council Brier 0.2176 (best — confidence weighting buys
+  ~3pp over the 0.25 chance baseline), Bear Brier 0.2810 (the lone
+  agent above the chance baseline), Bull overconfident across the
+  whole upper tail (`[0.80, 0.95)` 22pp gap on n=16). Cross-agent
+  diversity diagnostic: mean pairwise Pearson 0.557 but **9/21 pairs
+  at r ≥ 0.85** — partial mirror collapse, cluster-level not uniform.
+  The 5-agent cluster {rules_lawyer, statistician, sentiment,
+  specialist, contrarian} sits at r 0.80–0.92 internally; Bull is
+  weakly attached (~0.6); Bear is uncorrelated (−0.17 to +0.04).
+  This refines the session-26/32 "uniform mirror collapse" framing:
+  2 of 7 agents retain measurable independence. Phase 1 priority
+  amplified — destroying Bull/Bear distinctness without fixing
+  Bear's calibration would push council Brier upward. Feeds Task
+  0.5 retrospective.
 - **Session 35** — Phase 0 Task 0.2 shipped: pre-event CLV
   backfill. `scripts/backfill_clv.py` (stdlib + httpx,
   `main() -> int`, atomic write) fetches CLOB `interval=max` per
@@ -674,7 +711,15 @@ behavior is unchanged. Session 34 added a read-only SQL layer
   one-shot stdlib+httpx script. CLOB `interval=max` per bought-side
   token, last-before-target bucket policy, uniform-schema JSONL
   output keyed by `run_id`. Idempotent with `--rebuild` escape.
-  Run via `python -m pqi.scripts.backfill_clv`.
+  Run via `python -m scripts.backfill_clv`.
+- **Reliability diagram** (session 36, `scripts/reliability_diagram.py`):
+  one-shot stdlib-only script. Buckets per-agent + council
+  predictions into the EV-gate bands (with bookends), computes per-
+  bin Wilson CIs, per-agent Brier, and a cluster-level mirror-
+  collapse diagnostic (fraction of pairs at r ≥ 0.85). Versioned
+  markdown report at `~/.pqi/reports/reliability_YYYYMMDD.md`. Run
+  via `python -m scripts.reliability_diagram` (or `--no-write` for
+  stdout only).
 - CLI: `analyze` (with `--category`, `--top`, `--live`,
   `--starts-within`, …), `categories`, `query "<SQL>"`, `history`
   (list/show/sync/stats).
@@ -699,76 +744,98 @@ Detailed reference material lives in docs/:
 - docs/scaling_assessment.md — v2.0 RFC triage, prediction vs execution
   edge framework, why DuckDB over Postgres, explicit rejections
 - docs/phases/README.md — phase index, dependency graph, template pointer
-- docs/phases/phase_0_edge_validation.md — **active (Task 0.1 ✓; 0.2 next)**
+- docs/phases/phase_0_edge_validation.md — **active (Tasks 0.1 + 0.2 + 0.3 ✓; 0.4 next)**
 - docs/phases/phase_1_signal_quality.md — parallel-able (Option B autonomy fix)
 - docs/phases/phase_2_execution_edge.md — blocked on P0
 - docs/phases/phase_3_deployment_portability.md — blocked on P0 verdict
 - docs/phases/phase_4_scaling_triggers.md — reactive only
-- docs/analytics_queries.md — starter queries for `pqi query` (sessions 34–35)
+- docs/analytics_queries.md — starter queries for `pqi query` (sessions 34–35) + companion-artifact pointer to `scripts/reliability_diagram.py` (session 36)
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 35)
+- docs/session-log.md — per-session changelog (current through session 36)
 - docs/roadmap.md — themed catalog (A/B/C); phase section indexes phases
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
-## PRIORITY — Phase 0: edge validation (Task 0.3)
+## PRIORITY — Phase 0: edge validation (Task 0.4)
 
 Default entry point: `docs/phases/phase_0_edge_validation.md`.
 
-Tasks 0.1 (DuckDB wire-up, session 34) and 0.2 (pre-event CLV
-backfill, session 35) are shipped. `pqi query` works over 3 views
-(`history`, `verdicts`, `clv_by_row`). CLV sidecar at `~/.pqi/clv.jsonl`
-covers 44/65 resolved BUYs; the 21 gap is all permanent `no_tokens`
-(future BUYs all have tokens). Preliminary signal: mean CLV −0.0167
-aggregate, worse in valorant (−0.032 on n=17) than LoL (−0.001 on
-n=14). See `docs/analytics_queries.md` Q5 for the query block.
+Tasks 0.1 (DuckDB wire-up, session 34), 0.2 (pre-event CLV backfill,
+session 35), and 0.3 (reliability diagram, session 36) are shipped.
+`pqi query` works over 3 views (`history`, `verdicts`, `clv_by_row`).
+The reliability report at `~/.pqi/reports/reliability_YYYYMMDD.md`
+covers 385 resolved rows / 2,668 verdicts; re-run any time via
+`python -m scripts.reliability_diagram`.
 
-**Task 0.3 — Reliability diagram** is next. Write
-`scripts/reliability_diagram.py`:
-- For each of the 7 agents + the council aggregate `final_score`:
-  bucket predicted `P(YES)` into the EV-gate price bands
-  `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]` (reuse
-  for cross-comparison with Task 0.4).
-- Realized rate per bin uses *directional winner* semantics
-  (`final_yes_price > entry_yes_price` ⇒ YES) so the full ~400-row
-  resolved set participates, not just the 65 BUY-triggered rows.
-- Compute Brier per agent and aggregate.
-- Output ASCII table + markdown report at
-  `~/.pqi/reports/reliability_YYYYMMDD.md`.
-- Expect mirror-collapse curves to be near-identical across agents
-  (Option B shadow showed `|drift|` 0.01–0.06); if confirmed, note
-  it as a Phase 1 priority amplifier in the report.
+**Task 0.4 — Per-band calibration check** is next. The reliability
+diagram already gives per-(agent, band) realized rates over the full
+prediction surface. Task 0.4 narrows to the BUY-triggered subset and
+joins against the live EV-gate threshold:
+- Use `pqi query` against `verdicts` / `history` (and read
+  `~/.pqi/stats.json` `band_stats` directly — it's a small JSON).
+- Per band `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]`,
+  for resolved BUYs only (recommendation LIKE 'BUY%', winning_side
+  IS NOT NULL), compute: `n`, realized hit rate, banded threshold in
+  use, 95% Wilson CI on realized rate, delta (realized − threshold).
+- Flag bands where realized < implied-prob floor (suggests the gate
+  is under-rejecting) or where realized > threshold by ≥ 1 CI width
+  (suggests the gate is over-rejecting).
+- Save table to `docs/retrospectives/phase_0_edge_2026_04.md` (start
+  the file; Task 0.5 will round it out into a verdict). **Do not
+  retune `BAND_SHRINKAGE_K`** on the same data that produced
+  band_stats — Task 0.4 measures, Task 0.5 recommends.
 
-After 0.3, tasks 0.4 (per-band calibration vs `stats.json`
-`band_stats`) and 0.5 (retrospective) close the phase.
+After 0.4, Task 0.5 (synthesis + verdict + retrospective) closes
+the phase.
 
 Parallel-able with Phase 0: `docs/phases/phase_1_signal_quality.md`
-(Option B autonomy fix). Phase 1 is the SHARED_PREAMBLE autonomy
-rewrite + rollout + conditional backtest. The backtest stays blocked
-until aggregate `|drift| > 0.10` for ≥ 2 agents — session-32
-reassessment found the current signal has converged toward mirror
-collapse (|drift| 0.01–0.06) and the pre-registered ΔBrier ≤ −0.005
-criterion is mathematically unreachable on the current persona
-output. Fix the signal, then test B-math.
+(Option B autonomy fix). Session-36 reliability diagram **refines**
+the session-32 framing of mirror collapse — it's cluster-level, not
+uniform. The Phase 1 SHARED_PREAMBLE rewrite has three measurable
+post-rewrite checks: (a) does the cluster-pair fraction at r ≥ 0.85
+drop below 0.50, (b) does Bear's Brier fall toward the 0.22 cluster
+without losing its independence, (c) does council Brier hold or
+improve from 0.2176. Re-run `scripts/reliability_diagram.py` after
+any prompt change to measure delta. The Option B step-5 backtest
+stays blocked until those signal-quality checks pass.
 
-## Surface findings from sessions 34–35 (feed task 0.5 retrospective)
+## Surface findings from sessions 34–36 (feed task 0.5 retrospective)
 
-- **`[0.50, 0.60)` band realized 33% (3/9) at mean price 56%**
-  (session 34) — either genuinely -EV or Beta-binomial is
-  over-shrinking to global. n=9 is thin; task 0.4 will sharpen.
-- **Bear agent lean rate 49.1% (n=342)** vs other agents 60–67%
-  (session 34) — consistent with session-32 mirror-collapse
-  finding. Feeds Phase 1 priority.
+- **Council Brier 0.2176 vs chance baseline 0.25** (session 36) —
+  the council aggregate has prediction edge over the always-0.5
+  baseline by ~3pp Brier. This is the cleanest existing-edge
+  measurement we have; it's the number Task 0.5 should anchor on.
+- **Bear Brier 0.2810** (session 36) — the lone agent above the
+  chance baseline. Concentrates 96% of its predictions in
+  `[0.09, 0.50)` and is +0.128 miscalibrated there. Phase 1
+  priority. Don't destroy Bear's distinctness without fixing
+  calibration — it's the only agent breaking from the 5-agent
+  cluster.
+- **Cluster-level mirror collapse, not uniform** (session 36).
+  Pairs at r ≥ 0.85: 9/21 (43%). Cluster: rules_lawyer /
+  statistician / sentiment / specialist / contrarian (10
+  cluster-internal pairs, 9 at r ≥ 0.85). Bull weakly attached
+  (~0.6); Bear uncorrelated. Refines the session-26/32 "mirror
+  collapse" framing — 2 of 7 agents retain independence.
+- **Bull overconfident on favorites** (session 36): `[0.80, 0.95)`
+  n=16 realized 62.5% on a mean prediction of 84.4% (gap −22pp).
+  Material; n is large enough to take seriously.
+- **Council underconfident on YES in `[0.60, 0.95)`** (session 36):
+  gap +0.063 in `[0.60, 0.70)` (n=88), +0.066 in `[0.70, 0.80)`
+  (n=15, thin). The aggregator may be over-shrinking on
+  high-conviction calls.
+- **`[0.50, 0.60)` band realized 33% (3/9) at mean price 56% on
+  BUYs** (session 34) — but at the council-prediction level, 93
+  rows in `[0.50, 0.60)` realized at 51.6% (session 36). The 33%
+  is the BUY-survivorship subset; Task 0.4 will quantify whether
+  the gate is selecting a worse subset.
 - **April 2026 total PnL per share: −0.575 across 65 BUYs** (session
-  34, ≈ −0.9¢/share avg). Small sample, but marginal-at-best edge.
+  34, ≈ −0.9¢/share avg). Marginal-at-best executed edge.
 - **Aggregate pre-event CLV: mean −0.0167 on n=44** (session 35).
-  Slightly unfavorable entry quality on average — we're buying
-  ~1.7pp above the pre-event mark. Valorant worst (−0.032 on n=17,
-  dominated by one −0.26 outlier); LoL basically neutral
-  (−0.001 on n=14, stddev only 0.018). Pair with the
-  CLV-vs-outcome join at n=22/bucket: no monotone gradient yet
-  (good-entry bucket 64% win, bad-entry bucket 73% win) — re-check
-  at 100+ BUYs before drawing conclusions.
+  Slightly unfavorable entry quality (~1.7pp above the pre-event
+  mark on average). Valorant worst (−0.032 on n=17); LoL neutral
+  (−0.001 on n=14, stddev only 0.018). CLV-vs-outcome join at
+  n=22/bucket: no monotone gradient yet — re-check at 100+ BUYs.
 
 ## Monitoring tasks (low priority; observe, don't code)
 These are from earlier sessions; pick up if the signal appears
@@ -804,20 +871,25 @@ Phase 2 deliverables. Theme C items are isolated QoL — pick any
 between phases if they bite you.
 
 ## Instructions
-- Default to Phase 0 task 0.3 (reliability diagram) unless the user
-  redirects. Phase docs are designed for async work — each has
+- Default to Phase 0 task 0.4 (per-band calibration check) unless the
+  user redirects. Phase docs are designed for async work — each has
   entry criteria + task acceptance + session state, so you can pick
   up where the last session left off.
 - Phase 1 can proceed in parallel IF the user wants to work on
   signal quality (prompt-level, no aggregator risk). Reference the
-  session-32 shadow reassessment in docs/session-log.md if the
-  conversation turns to running the Option B backtest prematurely.
+  session-32 shadow reassessment AND session-36 reliability cluster
+  diagnosis in docs/session-log.md if the conversation turns to
+  running the Option B backtest prematurely. The three measurable
+  post-rewrite checks (cluster-pair r ≥ 0.85 fraction, Bear Brier,
+  council Brier) are the unblock criteria.
 - When reaching for history analytics, use `pqi query "<SQL>"` on
   the `history` / `verdicts` / `clv_by_row` views before writing a
   fresh Python script. See docs/analytics_queries.md for patterns.
-  For CLV specifically: `python -m pqi.scripts.backfill_clv` will
-  refresh the sidecar; the DuckDB view auto-registers when it
-  exists.
+  For CLV: `python -m scripts.backfill_clv` refreshes the sidecar;
+  the DuckDB view auto-registers when it exists.
+  For per-agent calibration: `python -m scripts.reliability_diagram`
+  re-emits the report (UTC-dated filename — re-running on the same
+  day overwrites, different day creates a new file).
 - Update ## Current State and write a fresh ## Next Session Prompt
   at end of session. Log meaningful decisions in docs/session-log.md
   and the phase doc's "Session state" section.

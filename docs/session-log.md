@@ -4,6 +4,224 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 36 — Phase 0 Task 0.3: Reliability diagram + cluster-collapse diagnostic
+
+Third Phase 0 code workstream. Per-agent + council-aggregate
+calibration table over the full non-legacy resolved set, bucketed
+into the EV-gate-aligned price bands. Operates over **385 resolved
+rows / 2,668 verdicts** — agent-level calibration uses the entire
+resolved population, not just the 71 BUY-triggered rows. Output: an
+ASCII reliability table to stdout plus a versioned markdown report at
+`~/.pqi/reports/reliability_YYYYMMDD.md`. No pipeline / aggregator /
+gate changes.
+
+### What landed
+
+- **`scripts/reliability_diagram.py`** — stdlib-only script
+  (`json` + `math` + `statistics`); mirrors the style of
+  `scripts/backfill_clv.py`. Walks `~/.pqi/history.jsonl` once,
+  filtering to non-legacy rows where both `result.market.yes_price`
+  and `resolution.final_yes_price` are set. Outcome is the
+  **directional winner**: `final > entry ⇒ YES (1)`, else `0`. This
+  matches Q2's `_directional_winner` semantics and unlocks the full
+  resolved set for agent calibration (vs only the 71 BUYs we'd get
+  from `correct_buy / wrong_buy`). Eight calibration rows are
+  emitted: `rules_lawyer`, `bull`, `bear`, `statistician`,
+  `sentiment`, `specialist`, `contrarian`, `council`. Council uses
+  `result.final_score` directly (the YES-side confidence-weighted
+  aggregate). `--no-write` skips the file write for quick iteration;
+  `--history` lets the script point at a fixture.
+
+- **Bands.** Primary view uses the EV-gate price bands `[0.09, 0.50)
+  / [0.50, 0.60) / [0.60, 0.70) / [0.70, 0.80) / [0.80, 0.95)` so
+  Task 0.4 can join the per-prediction realisation rate against
+  `PerceivedStats.band_stats`. Two bookend bins `[0.00, 0.09)` and
+  `[0.95, 1.00]` are appended so no prediction is silently dropped —
+  predicted P(YES) can fall anywhere in [0, 1] even though *price*
+  bands are gated to [0.09, 0.95]. In practice the bookends are 0–4
+  rows for every agent on the current data; they exist as a
+  data-loss tripwire.
+
+- **Per-bin metrics.** For every (agent, band) cell: `n`, mean
+  prediction, realized YES rate, gap (`realized − pred_mean`,
+  negative ⇒ overconfident on YES), Wilson 95% CI on the realized
+  rate. Cells with `n < 10` are flagged `thin`. Stddev / Brier are
+  computed via `statistics.pstdev` and a manual `(p − y)²` sum (no
+  numpy/scipy dependency).
+
+- **Per-agent Brier score** computed across all that agent's
+  predictions (not per-band). Brier = mean((p − y)²); chance-baseline
+  reference is 0.25 (always-predict-0.5). All scores are written to a
+  small ASCII table inside the report.
+
+- **Cross-agent diversity diagnostic.** Per row, computes population
+  stddev across the agent predictions; per agent pair, computes the
+  Pearson correlation of their joint prediction vectors. Reports both
+  the global mean pairwise Pearson and the **fraction of pairs with
+  r ≥ 0.85**. The cluster-fraction is the diagnostic — global mean
+  alone is misleadingly low when a single anti-correlated outlier
+  (Bear, here) drags the mean down. Narrative bands:
+  - `≥ 50%` of pairs at r ≥ 0.85 ⇒ "cluster-level mirror collapse"
+  - `≥ 25%` ⇒ "partial-collapse signal"
+  - else ⇒ "no mirror-collapse signal"
+
+- **`docs/analytics_queries.md`** — added a `## Companion artifacts`
+  pointer at the bottom describing the reliability script and its
+  output location.
+
+### Headline numbers (385 resolved rows)
+
+**Brier scores:**
+
+```
+  agent           n     Brier
+  council         385   0.2176   ← best
+  rules_lawyer    382   0.2180
+  specialist      384   0.2195
+  sentiment       385   0.2196
+  statistician    385   0.2199
+  contrarian      383   0.2215
+  bull            383   0.2370
+  bear            366   0.2810   ← worse than 0.25 baseline
+```
+
+The council aggregate beats every individual agent — confidence
+weighting is doing real work. Bear is the lone agent above the
+always-0.5 baseline (0.281 vs 0.25), confirming session 34's lean-
+rate finding (49.1% on n=342) wasn't a measurement artifact.
+
+**Council reliability** (predicted P(YES) vs realized rate):
+
+```
+  band            n    pred_mean   realized   gap
+  [0.09, 0.50)   187     0.354      0.326    -0.028   well-calibrated
+  [0.50, 0.60)    93     0.553      0.516    -0.037   well-calibrated
+  [0.60, 0.70)    88     0.642      0.705    +0.063   underconfident on YES
+  [0.70, 0.80)    15     0.734      0.800    +0.066   underconfident; thin
+  [0.80, 0.95)     2     0.849      1.000    +0.151   thin
+```
+
+**Per-agent overconfidence on favorites.** Bull is overconfident
+across the whole upper tail: gap −0.10 to −0.22 in [0.50, 0.95).
+Specifically `[0.80, 0.95)` n=16 realized 62.5% on a mean prediction
+of 84.4% — a 22pp overconfidence on Bull's most-conviction calls,
+n large enough to take seriously. Statistician / sentiment /
+specialist / contrarian are all close-to-calibrated. Rules Lawyer
+shows mild over-shoot on YES in the `[0.70, 0.80)` band (gap +0.080,
+n=50) but is otherwise tight.
+
+**Bear pathology.** Bear concentrates 96% of its predictions in
+`[0.09, 0.50)` (n=351 of 366), which itself shows a +0.128 gap
+(predicts 36%, realizes 48%). The few times Bear ventures above 0.50
+the predictions are wrong in the opposite direction (n=5 in
+[0.60, 0.70), realized 20%; n=1 in [0.70, 0.80), realized 0%).
+Aggregate Brier sits at 0.281. Bear is functionally a "lean NO"
+sticker rather than a calibrated probability estimator, and its
+calibration on the dominant band is also 13pp off. Phase 1 priority.
+
+**Cross-agent diversity:**
+
+```
+  Mean pairwise Pearson:      0.557
+  Mean per-row stddev:        0.094
+  Pairs with r ≥ 0.85:        9 / 21  (43%)
+```
+
+The global mean (0.557) is misleadingly low — Bear's near-zero and
+negative correlations drag it down by about 0.30. The cluster
+fraction tells the real story: 9 of 10 cluster-internal pairs from
+{rules_lawyer, statistician, sentiment, specialist, contrarian} sit
+at r ≥ 0.85, and the remaining odd-one-out (specialist↔contrarian)
+is r=0.804. Bull is weakly tied to the cluster (~0.6); Bear is
+essentially uncorrelated with everything else (−0.17 to +0.04). This
+**partial-collapse** characterisation is more accurate than the
+"mirror collapse across all agents" framing from sessions 26 and 32:
+2 of 7 agents (Bull, Bear) retain measurable independence, 5 of 7 do
+not.
+
+```
+  pair                              r
+  statistician↔specialist        0.918
+  statistician↔sentiment         0.911
+  rules_lawyer↔statistician      0.911
+  rules_lawyer↔sentiment         0.904
+  sentiment↔specialist           0.901
+  rules_lawyer↔specialist        0.895
+  sentiment↔contrarian           0.871
+  rules_lawyer↔contrarian        0.866
+  statistician↔contrarian        0.862
+  specialist↔contrarian          0.804
+  rules_lawyer↔bull              0.628
+  bull↔sentiment                 0.621
+  bull↔contrarian                0.603
+  bull↔specialist                0.591
+  bull↔statistician              0.575
+  bear↔statistician              0.039
+  bear↔sentiment                 0.027
+  bear↔specialist                0.023
+  rules_lawyer↔bear             -0.020
+  bear↔contrarian               -0.062
+  bull↔bear                     -0.170
+```
+
+### Implications for Phase 1
+
+The Phase-1 SHARED_PREAMBLE rewrite should be evaluated against three
+post-rewrite reliability re-runs:
+
+1. Does the cluster-pair fraction at r ≥ 0.85 drop below 0.50?
+2. Does Bear's Brier fall toward the 0.22 cluster (without losing
+   its independence)?
+3. Does council Brier hold or improve from 0.2176?
+
+If (1) and (2) move in the right direction but (3) regresses, the
+prompt change destroyed signal *and* signal coherence — bad outcome.
+If (1) and (3) improve but (2) gets worse, Bear specifically may
+need its own treatment (per-agent prompt, not just SHARED_PREAMBLE).
+
+### Subtle bits
+
+- **Date stamps are UTC.** Filename uses `datetime.now(timezone.utc)`
+  → first run produced `reliability_20260418.md` even though the
+  user's local date is 2026-04-19 (UTC offset). Re-running on
+  another day creates a new file rather than overwriting; same-day
+  re-runs replace the file. Matches `clv.jsonl`'s convention.
+- **Pearson without scipy.** Implemented directly from the
+  `cov / (sx · sy)` formula; returns `None` when `denom == 0`. Good
+  enough for the diversity diagnostic; no numpy needed.
+- **Wilson CI.** `z = 1.96`; falls back to `(0.0, 0.0)` for `n = 0`.
+  Wider than the normal-approximation interval at small `n`, which
+  is what we want for the thin bins.
+- **Excluded rows.** Legacy rows (no `verdicts`) and rows with
+  `resolution = None` are skipped. Rows missing `final_yes_price`
+  are skipped (10 of 408 resolved rows). Verdicts whose `agent_name`
+  isn't in `AGENT_KEYS` are skipped silently — the seven canonical
+  names are enumerated in the script.
+
+### Files touched
+
+- `scripts/reliability_diagram.py` — new (stdlib only).
+- `docs/analytics_queries.md` — added `## Companion artifacts`
+  section pointing at the script + report path.
+- `docs/phases/phase_0_edge_validation.md` — Task 0.3 acceptance
+  criteria checked off; status line updated to "Tasks 0.1+0.2+0.3
+  done; 0.4 next"; session state extended with the headline-numbers
+  table and a Phase-1 evaluation criteria block.
+- Runtime: `~/.pqi/reports/reliability_20260418.md` created.
+
+### Non-goals
+
+- No PNG / matplotlib output; ASCII + markdown is sufficient and
+  keeps the script dependency-free. A PNG can be added later if the
+  retrospective wants it.
+- No write-back to `~/.pqi/stats.json`. Task 0.4 reads `band_stats`
+  alongside the realisation rates here; tuning `BAND_SHRINKAGE_K`
+  is a Task 0.5 recommendation, not an automated feedback loop.
+- No coupling into the runtime council. The reliability diagram is
+  a measurement artifact, not an input to scoring or sizing.
+
+---
+
 ## Session 35 — Phase 0 Task 0.2: Pre-event CLV backfill
 
 Second Phase 0 code workstream. Every resolved BUY in `history.jsonl`
