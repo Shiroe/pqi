@@ -471,7 +471,41 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 36 — Phase 0 Task 0.3 shipped:
+**Last updated:** session 37 — Phase 0 Task 0.4 shipped
+(no-code-change measurement task). Realized BUY hit rate per
+EV-gate band (winning_side semantics, matching
+`stats.py:_side_price_and_won`) joined against the
+`band_stats.smoothed_wr` thresholds in `~/.pqi/stats.json`. 95%
+Wilson CIs computed. **No band clears the "≥ 1 CI width" flag**
+in either direction — at n=8–23 per occupied band the CIs
+(widths 0.27–0.56) swallow any true miscalibration signal. The
+two dense bands ([0.60, 0.70) n=23 realized 65.2% vs threshold
+65.9%; [0.70, 0.80) n=15 realized 73.3% vs threshold 72.3%) are
+well-calibrated on point estimate — BUYs in these bands average
+break-even EV on entry, consistent with the session-34 aggregate
+PnL of −0.575/65 shares. [0.50, 0.60) point-estimate
+under-rejects (realized 0.375 on n=8 vs mean price 0.561, Δ
+−0.186), but the gate's threshold (0.497 < band floor 0.500)
+already rejects all future BUYs in this band — forward-looking
+protection is maximal; the calibration miss is retrospective
+only. [0.80, 0.95) is the best band on both metrics (realized
+0.938 on n=16, +0.099 vs mean price, +0.058 vs threshold —
+point-estimate mild over-rejection candidate, not significant).
+`BAND_SHRINKAGE_K` recommendation: **keep K=5** per phase-doc
+guardrail (no tuning on the same data that produced band_stats);
+revisit when [0.50, 0.60) reaches n≥20 or a hold-out period is
+defined. Coverage: 62/65 resolved BUYs (95.4%) in 5 bands; 1
+out-of-band (price 0.9995, gated by `MAX_TRADEABLE_PRICE`); 2
+intermediate settlements excluded from `band_stats` by
+construction. Full table + query + flagged-bands summary in
+`docs/retrospectives/phase_0_edge_2026_04.md`. Analytics Q4
+retargeted from directional-winner to winning_side semantics so
+`pqi query` output aligns row-by-row with `band_stats`. **Next:
+Phase 0 Task 0.5 (synthesis verdict — fold CLV + reliability
+sections into the retrospective, issue edge-validated / no-edge
+/ inconclusive verdict, recommend next phase).**
+
+Session 36 shipped Phase 0 Task 0.3 — reliability diagram.
 `scripts/reliability_diagram.py` (stdlib only) walks
 `~/.pqi/history.jsonl`, buckets per-agent and council-aggregate
 predictions into the EV-gate-aligned price bands (with
@@ -491,8 +525,7 @@ is well-calibrated through `[0.09, 0.70)` and slightly
 underconfident on YES in `[0.60, 0.95)`. Bull is overconfident
 across the whole upper tail (`[0.80, 0.95)` n=16 realized 62.5%
 on a mean prediction of 84.4% — 22pp gap). No pipeline /
-aggregator / gate changes. **Next: Phase 0 Task 0.4 (per-band
-calibration vs `stats.json` band_stats).**
+aggregator / gate changes.
 
 Session 35 shipped Phase 0 Task 0.2 — pre-event CLV backfill.
 `scripts/backfill_clv.py` writes uniform-schema `~/.pqi/clv.jsonl`;
@@ -532,7 +565,7 @@ roadmap naming are complete. The new phase framing in
 
 | New phase | Status | Doc |
 | --- | --- | --- |
-| Phase 0 — edge validation | **active (Tasks 0.1 + 0.2 + 0.3 ✓; 0.4 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
+| Phase 0 — edge validation | **active (Tasks 0.1 + 0.2 + 0.3 + 0.4 ✓; 0.5 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
 | Phase 1 — signal quality (Option B autonomy fix) | parallel-able with P0 | [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md) |
 | Phase 2 — execution edge (MFE, listener) | blocked on P0 | [`docs/phases/phase_2_execution_edge.md`](docs/phases/phase_2_execution_edge.md) |
 | Phase 3 — deployment portability (Docker/VPS) | blocked on P0 verdict | [`docs/phases/phase_3_deployment_portability.md`](docs/phases/phase_3_deployment_portability.md) |
@@ -577,6 +610,32 @@ behavior is unchanged. Session 34 added a read-only SQL layer
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 37** — Phase 0 Task 0.4 shipped: per-band
+  calibration check (no-code-change). Realized BUY hit rate per
+  EV-gate band (winning_side semantics, matching
+  `stats.py:_side_price_and_won`) joined against
+  `band_stats.smoothed_wr` thresholds in `~/.pqi/stats.json`;
+  Wilson 95% CIs, deltas vs threshold and vs mean price. **No
+  band clears the "≥ 1 CI width" flag** in either direction;
+  at n=8–23 per occupied band the CIs (widths 0.27–0.56)
+  swallow any miscalibration signal. Two dense bands ([0.60,
+  0.70) n=23, [0.70, 0.80) n=15) well-calibrated on point
+  estimate. [0.50, 0.60) point-estimate under-rejects (realized
+  0.375 on n=8 vs mean price 0.561, Δ −0.186); current gate
+  already maximally protective (threshold 0.497 < band floor
+  0.500), so calibration concern is retrospective. [0.80, 0.95)
+  is the best-EV band (realized 0.938, +0.099 vs mean price);
+  mild over-rejection candidate on point estimate, not
+  statistically significant. `BAND_SHRINKAGE_K` recommendation:
+  **keep K=5** per phase-doc guardrail; revisit when [0.50,
+  0.60) reaches n≥20 or a hold-out period is defined. Coverage
+  62/65 in 5 bands; 1 out-of-band (gated by
+  `MAX_TRADEABLE_PRICE`); 2 intermediate settlements excluded
+  by construction. Analytics Q4 retargeted from directional to
+  winning_side semantics so `pqi query` aligns with `band_stats`.
+  Retrospective started at
+  `docs/retrospectives/phase_0_edge_2026_04.md` (Task 0.5 will
+  fold in CLV + reliability sections + verdict).
 - **Session 36** — Phase 0 Task 0.3 shipped: reliability diagram.
   `scripts/reliability_diagram.py` (stdlib only) bins per-agent +
   council-aggregate predictions into the EV-gate-aligned bands plus
@@ -720,6 +779,11 @@ behavior is unchanged. Session 34 added a read-only SQL layer
   markdown report at `~/.pqi/reports/reliability_YYYYMMDD.md`. Run
   via `python -m scripts.reliability_diagram` (or `--no-write` for
   stdout only).
+- **Per-band calibration retrospective** (session 37, no code)
+  at `docs/retrospectives/phase_0_edge_2026_04.md`. Per-band
+  realized-vs-threshold table with Wilson 95% CIs for the live
+  `~/.pqi/stats.json` `band_stats`. Task 0.5 will fold in CLV
+  + reliability summaries and issue a phase verdict.
 - CLI: `analyze` (with `--category`, `--top`, `--live`,
   `--starts-within`, …), `categories`, `query "<SQL>"`, `history`
   (list/show/sync/stats).
@@ -744,69 +808,90 @@ Detailed reference material lives in docs/:
 - docs/scaling_assessment.md — v2.0 RFC triage, prediction vs execution
   edge framework, why DuckDB over Postgres, explicit rejections
 - docs/phases/README.md — phase index, dependency graph, template pointer
-- docs/phases/phase_0_edge_validation.md — **active (Tasks 0.1 + 0.2 + 0.3 ✓; 0.4 next)**
+- docs/phases/phase_0_edge_validation.md — **active (Tasks 0.1 + 0.2 + 0.3 + 0.4 ✓; 0.5 next)**
 - docs/phases/phase_1_signal_quality.md — parallel-able (Option B autonomy fix)
 - docs/phases/phase_2_execution_edge.md — blocked on P0
 - docs/phases/phase_3_deployment_portability.md — blocked on P0 verdict
 - docs/phases/phase_4_scaling_triggers.md — reactive only
-- docs/analytics_queries.md — starter queries for `pqi query` (sessions 34–35) + companion-artifact pointer to `scripts/reliability_diagram.py` (session 36)
+- docs/retrospectives/phase_0_edge_2026_04.md — **in progress**; Task 0.4 per-band calibration landed, Task 0.5 folds in CLV + reliability + verdict
+- docs/analytics_queries.md — starter queries for `pqi query` (Q4 retargeted to winning_side semantics in session 37)
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 36)
+- docs/session-log.md — per-session changelog (current through session 37)
 - docs/roadmap.md — themed catalog (A/B/C); phase section indexes phases
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
-## PRIORITY — Phase 0: edge validation (Task 0.4)
+## PRIORITY — Phase 0: edge validation (Task 0.5 — phase-closing verdict)
 
 Default entry point: `docs/phases/phase_0_edge_validation.md`.
 
-Tasks 0.1 (DuckDB wire-up, session 34), 0.2 (pre-event CLV backfill,
-session 35), and 0.3 (reliability diagram, session 36) are shipped.
-`pqi query` works over 3 views (`history`, `verdicts`, `clv_by_row`).
-The reliability report at `~/.pqi/reports/reliability_YYYYMMDD.md`
-covers 385 resolved rows / 2,668 verdicts; re-run any time via
-`python -m scripts.reliability_diagram`.
+Tasks 0.1 (DuckDB wire-up, session 34), 0.2 (pre-event CLV
+backfill, session 35), 0.3 (reliability diagram, session 36), and
+0.4 (per-band calibration check, session 37) are shipped. The
+retrospective file `docs/retrospectives/phase_0_edge_2026_04.md`
+already holds the per-band section (§1–§6) and placeholders for
+the CLV + reliability sections under "Open items for Task 0.5"
+(§4).
 
-**Task 0.4 — Per-band calibration check** is next. The reliability
-diagram already gives per-(agent, band) realized rates over the full
-prediction surface. Task 0.4 narrows to the BUY-triggered subset and
-joins against the live EV-gate threshold:
-- Use `pqi query` against `verdicts` / `history` (and read
-  `~/.pqi/stats.json` `band_stats` directly — it's a small JSON).
-- Per band `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]`,
-  for resolved BUYs only (recommendation LIKE 'BUY%', winning_side
-  IS NOT NULL), compute: `n`, realized hit rate, banded threshold in
-  use, 95% Wilson CI on realized rate, delta (realized − threshold).
-- Flag bands where realized < implied-prob floor (suggests the gate
-  is under-rejecting) or where realized > threshold by ≥ 1 CI width
-  (suggests the gate is over-rejecting).
-- Save table to `docs/retrospectives/phase_0_edge_2026_04.md` (start
-  the file; Task 0.5 will round it out into a verdict). **Do not
-  retune `BAND_SHRINKAGE_K`** on the same data that produced
-  band_stats — Task 0.4 measures, Task 0.5 recommends.
+**Task 0.5 — Edge retrospective & verdict.** Final synthesis —
+no code changes. Read the three existing measurement outputs
+and compose the phase-closing verdict:
 
-After 0.4, Task 0.5 (synthesis + verdict + retrospective) closes
-the phase.
+1. **CLV section** — fold in from `~/.pqi/clv.jsonl` (Task 0.2
+   output). Key numbers already in CLAUDE.md Current State:
+   mean CLV −0.0167, stddev 0.064, coverage 44/65 (67.7%),
+   per-category: valorant −0.032 (n=17), league-of-legends
+   −0.001 (n=14), counter-strike −0.013 (n=8). CLV-vs-outcome
+   join at n=22/bucket showed no monotone gradient. Use `pqi
+   query` for anything extra.
+2. **Reliability diagram section** — fold in from
+   `~/.pqi/reports/reliability_20260418.md` (Task 0.3 output).
+   Key numbers: council Brier 0.2176 (beats 0.25 chance
+   baseline by ~3pp); Bear Brier 0.2810 (only agent above
+   chance); 5-agent cluster {rules_lawyer, statistician,
+   sentiment, specialist, contrarian} at pairwise Pearson
+   0.80–0.92 (9/10 cluster-internal pairs at r ≥ 0.85); Bull
+   overconfident on favorites (22pp gap on n=16 at [0.80,
+   0.95)); council slightly underconfident on YES in [0.60,
+   0.95).
+3. **Verdict** — edge validated / no edge / inconclusive. The
+   retrospective preview (§4) already leans toward
+   **inconclusive at current n**, with council Brier 0.2176 as
+   the strongest single prediction-edge signal and aggregate
+   CLV −0.0167 as the mildest execution headwind. Finalise
+   with a one-sentence justification.
+4. **Recommended next actions** — which phase to move to (P1
+   signal quality vs P2 execution vs continue P0 monitoring);
+   which gate knobs (if any) to revisit; what additional data
+   to collect.
+5. Update `docs/phases/README.md` status table (P0 → done) and
+   CLAUDE.md §Current State + §Next Session Prompt to reflect
+   Phase 0 closure and Phase 1 handoff.
 
-Parallel-able with Phase 0: `docs/phases/phase_1_signal_quality.md`
-(Option B autonomy fix). Session-36 reliability diagram **refines**
-the session-32 framing of mirror collapse — it's cluster-level, not
-uniform. The Phase 1 SHARED_PREAMBLE rewrite has three measurable
-post-rewrite checks: (a) does the cluster-pair fraction at r ≥ 0.85
-drop below 0.50, (b) does Bear's Brier fall toward the 0.22 cluster
-without losing its independence, (c) does council Brier hold or
-improve from 0.2176. Re-run `scripts/reliability_diagram.py` after
-any prompt change to measure delta. The Option B step-5 backtest
+Guardrail: the phase-0 retrospective says **keep K=5** per
+Task 0.4's analysis. Don't reopen K tuning in Task 0.5 unless
+fresh data lands — and there isn't any in this window.
+
+Parallel-able with Phase 0 close: `docs/phases/phase_1_signal_quality.md`
+(Option B autonomy fix). Session-36 reliability diagram
+**refines** the session-32 framing of mirror collapse — it's
+cluster-level, not uniform. The Phase 1 SHARED_PREAMBLE rewrite
+has three measurable post-rewrite checks: (a) does the
+cluster-pair fraction at r ≥ 0.85 drop below 0.50, (b) does
+Bear's Brier fall toward the 0.22 cluster without losing its
+independence, (c) does council Brier hold or improve from
+0.2176. Re-run `scripts/reliability_diagram.py` after any
+prompt change to measure delta. The Option B step-5 backtest
 stays blocked until those signal-quality checks pass.
 
-## Surface findings from sessions 34–36 (feed task 0.5 retrospective)
+## Surface findings from sessions 34–37 (anchor Task 0.5 verdict)
 
-- **Council Brier 0.2176 vs chance baseline 0.25** (session 36) —
-  the council aggregate has prediction edge over the always-0.5
-  baseline by ~3pp Brier. This is the cleanest existing-edge
-  measurement we have; it's the number Task 0.5 should anchor on.
-- **Bear Brier 0.2810** (session 36) — the lone agent above the
-  chance baseline. Concentrates 96% of its predictions in
+- **Council Brier 0.2176 vs chance baseline 0.25** (session
+  36) — the council aggregate has prediction edge over the
+  always-0.5 baseline by ~3pp Brier. Strongest single-number
+  signal of real prediction edge.
+- **Bear Brier 0.2810** (session 36) — the lone agent above
+  the chance baseline. Concentrates 96% of its predictions in
   `[0.09, 0.50)` and is +0.128 miscalibrated there. Phase 1
   priority. Don't destroy Bear's distinctness without fixing
   calibration — it's the only agent breaking from the 5-agent
@@ -817,25 +902,31 @@ stays blocked until those signal-quality checks pass.
   cluster-internal pairs, 9 at r ≥ 0.85). Bull weakly attached
   (~0.6); Bear uncorrelated. Refines the session-26/32 "mirror
   collapse" framing — 2 of 7 agents retain independence.
-- **Bull overconfident on favorites** (session 36): `[0.80, 0.95)`
-  n=16 realized 62.5% on a mean prediction of 84.4% (gap −22pp).
-  Material; n is large enough to take seriously.
-- **Council underconfident on YES in `[0.60, 0.95)`** (session 36):
-  gap +0.063 in `[0.60, 0.70)` (n=88), +0.066 in `[0.70, 0.80)`
-  (n=15, thin). The aggregator may be over-shrinking on
+- **Bull overconfident on favorites** (session 36): `[0.80,
+  0.95)` n=16 realized 62.5% on a mean prediction of 84.4%
+  (gap −22pp). Material; n is large enough to take seriously.
+- **Council underconfident on YES in `[0.60, 0.95)`** (session
+  36): gap +0.063 in `[0.60, 0.70)` (n=88), +0.066 in `[0.70,
+  0.80)` (n=15, thin). The aggregator may be over-shrinking on
   high-conviction calls.
-- **`[0.50, 0.60)` band realized 33% (3/9) at mean price 56% on
-  BUYs** (session 34) — but at the council-prediction level, 93
-  rows in `[0.50, 0.60)` realized at 51.6% (session 36). The 33%
-  is the BUY-survivorship subset; Task 0.4 will quantify whether
-  the gate is selecting a worse subset.
-- **April 2026 total PnL per share: −0.575 across 65 BUYs** (session
-  34, ≈ −0.9¢/share avg). Marginal-at-best executed edge.
-- **Aggregate pre-event CLV: mean −0.0167 on n=44** (session 35).
-  Slightly unfavorable entry quality (~1.7pp above the pre-event
-  mark on average). Valorant worst (−0.032 on n=17); LoL neutral
-  (−0.001 on n=14, stddev only 0.018). CLV-vs-outcome join at
-  n=22/bucket: no monotone gradient yet — re-check at 100+ BUYs.
+- **Per-band realized rates match thresholds within Wilson
+  CIs** (session 37, Task 0.4). No band clears "≥ 1 CI width"
+  flag in either direction. Two dense bands (n=23, n=15)
+  well-calibrated on point estimate; break-even EV on entry.
+  [0.50, 0.60) point-estimate under-rejects (Δ vs mean price
+  −0.186 on n=8) but the current gate's threshold (0.497 <
+  band floor 0.500) already maximally rejects future BUYs
+  there. [0.80, 0.95) is the +EV band on point estimate
+  (realized 0.938 vs mean price 0.838 — +9.9pp).
+- **April 2026 total PnL per share: −0.575 across 65 BUYs**
+  (session 34, ≈ −0.9¢/share avg). Marginal-at-best executed
+  edge.
+- **Aggregate pre-event CLV: mean −0.0167 on n=44** (session
+  35). Slightly unfavorable entry quality (~1.7pp above the
+  pre-event mark on average). Valorant worst (−0.032 on
+  n=17); LoL neutral (−0.001 on n=14, stddev only 0.018).
+  CLV-vs-outcome join at n=22/bucket: no monotone gradient yet
+  — re-check at 100+ BUYs.
 
 ## Monitoring tasks (low priority; observe, don't code)
 These are from earlier sessions; pick up if the signal appears
@@ -871,10 +962,10 @@ Phase 2 deliverables. Theme C items are isolated QoL — pick any
 between phases if they bite you.
 
 ## Instructions
-- Default to Phase 0 task 0.4 (per-band calibration check) unless the
-  user redirects. Phase docs are designed for async work — each has
-  entry criteria + task acceptance + session state, so you can pick
-  up where the last session left off.
+- Default to Phase 0 Task 0.5 (phase-closing verdict) unless the
+  user redirects. No code changes expected — this is synthesis
+  across the three measurement outputs (CLV, reliability,
+  per-band) already in place.
 - Phase 1 can proceed in parallel IF the user wants to work on
   signal quality (prompt-level, no aggregator risk). Reference the
   session-32 shadow reassessment AND session-36 reliability cluster
@@ -896,7 +987,8 @@ between phases if they bite you.
 - Aggregator math (scoring formula, gate stack, Kelly formula) has
   been stable since session 31's banded EV gate + session 32's
   `MIN_CONTRARIAN_PROBABILITY` retune. Any further aggregator change
-  needs explicit sign-off.
+  needs explicit sign-off. Task 0.4 explicitly recommended keeping
+  `BAND_SHRINKAGE_K=5` — don't retune without fresh held-out data.
 - Option B rollout order is strict per
   docs/option_b_migration_plan.md. Never wire probability_no into
   scoring until step 5 passes pre-registered criteria on held-out

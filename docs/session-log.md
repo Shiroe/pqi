@@ -4,6 +4,152 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 37 — Phase 0 Task 0.4: Per-band calibration check
+
+Fourth Phase 0 workstream, no-code-change. Joins the EV-gate's
+live `band_stats` thresholds against the realized BUY hit rate
+per band, with 95% Wilson CIs and delta columns. Result: the
+retrospective file `docs/retrospectives/phase_0_edge_2026_04.md`
+gains §1–§6 (scope, per-band table, flagged-bands summary, K
+recommendation, Task 0.5 open items, data artefacts). No pipeline
+/ aggregator / gate changes; the phase doc's task 0.4 acceptance
+boxes are ticked.
+
+### What landed
+
+- **`docs/retrospectives/phase_0_edge_2026_04.md`** — new. Task
+  0.4 populates the per-band calibration section; Task 0.5 will
+  fold in the CLV (Task 0.2) and reliability (Task 0.3) sections
+  plus the verdict. File is already structured so the later
+  rounds of writing have placeholders to extend rather than
+  re-plan.
+
+- **`docs/analytics_queries.md` Q4** — retargeted from
+  directional-winner semantics to `winning_side` semantics. The
+  reason is apples-to-apples with the gate: `stats.py`'s
+  `_side_price_and_won` — which produces `band_stats.smoothed_wr`
+  — only counts entries with a clean `resolution.winning_side`.
+  Swapping Q4 to match means the table you get from `pqi query`
+  aligns row-by-row with `~/.pqi/stats.json` `band_stats`.
+  (Directional-winner semantics remain in Q2 and the Task-0.3
+  reliability work; the choice is documented inline in Q4.) Also
+  added two extra bucket cases so out-of-band prices are visible
+  in the result (`[0.00, 0.09)` and `(0.95, 1.00]`).
+
+- **`docs/phases/phase_0_edge_validation.md`** — status line
+  flipped to "Tasks 0.1 + 0.2 + 0.3 + 0.4 done; 0.5 next", task
+  0.4 acceptance boxes ticked with the actual findings, session
+  state "Next action" updated to Task 0.5. "Notes for next
+  session" traded the outdated session-35 early-finding bullet
+  for the Task 0.4 numbers and the winning_side vs directional
+  semantic clarification.
+
+### Numbers (winning_side semantics, matches live gate)
+
+| Band | n | wins | raw WR | smoothed WR (thr) | mean price | Wilson 95% CI | CI width | Δ(real − thr) | Δ(real − price) |
+| --- | --: | --: | --: | --: | --: | --- | --: | --: | --: |
+| [0.09, 0.50) | 0 | 0 | — | 0.6923 *(global)* | — | — | — | — | — |
+| [0.50, 0.60) | 8 | 3 | 0.3750 | 0.4970 | 0.5606 | [0.137, 0.694] | 0.557 | −0.122 | **−0.186** |
+| [0.60, 0.70) | 23 | 15 | 0.6522 | 0.6593 | 0.6526 | [0.449, 0.812] | 0.363 | −0.007 | −0.000 |
+| [0.70, 0.80) | 15 | 11 | 0.7333 | 0.7231 | 0.7537 | [0.481, 0.891] | 0.411 | +0.010 | −0.020 |
+| [0.80, 0.95) | 16 | 15 | 0.9375 | 0.8791 | 0.8384 | [0.717, 0.989] | 0.272 | +0.058 | **+0.099** |
+
+Coverage: 62/65 resolved BUYs (95.4%) land in the 5 bands. 1
+row out-of-band (price 0.9995, gated by `MAX_TRADEABLE_PRICE`),
+2 intermediate settlements excluded from `band_stats` by
+construction (included in `classify_outcome`'s PnL-based
+`correct_buy`/`wrong_buy`).
+
+### Reading
+
+- **No band clears the "≥ 1 CI width" flag** in either
+  direction. At n=8–23 per occupied band the Wilson CIs (widths
+  0.27–0.56) are wide enough that neither a true under-rejection
+  nor over-rejection is statistically evident.
+- **[0.50, 0.60) point-estimate under-rejects** (realized 0.375
+  vs mean price 0.561, Δ −0.186; vs threshold 0.497, Δ −0.122).
+  Direction is consistent with session-31's motivation for the
+  banded gate. The current threshold (0.497 < band floor 0.500)
+  already rejects all future BUYs in this band — so the
+  calibration concern is retrospective only. Forward-looking,
+  the gate here is maximally protective.
+- **[0.60, 0.70) is the canonical well-calibrated band.** n=23
+  (densest), realized 0.652 vs threshold 0.659 vs mean price
+  0.653 — Δs all within ±0.007. Break-even EV on entry, matches
+  session-34's finding of marginal executed-edge at the
+  aggregate level.
+- **[0.70, 0.80)** on threshold (Δ +0.010), slightly below mean
+  price (Δ −0.020). Break-even-ish, within CI.
+- **[0.80, 0.95) is the best band on both metrics.** Realized
+  0.938 vs threshold 0.879 (Δ +0.058), vs mean price 0.838 (Δ
+  +0.099). Point estimate says the gate might be slightly
+  over-rejecting; Δ 0.058 ≪ CI width 0.272 so it does not clear
+  the flag. Recorded as "directional over-rejection candidate;
+  do not retune." This is also the band where we find the
+  clearest point-estimate entry-edge (+9.9pp above mean price)
+  — consistent with high-conviction favourites being mispriced
+  in our favour.
+
+### `BAND_SHRINKAGE_K` recommendation
+
+**Keep K=5.** The phase-doc guardrail is explicit: do not tune
+K on the same data used to compute `band_stats`. The math:
+
+- K=5 blends 5 pseudo-observations of the global rate (0.6923)
+  into each band's raw rate. For [0.50, 0.60): smoothed =
+  (3 + 5·0.6923) / (8+5) = 0.497 (+12.2pp toward global).
+- Lowering to K=2 would drop [0.50, 0.60) smoothed to 0.439
+  (more protective there) but raise [0.80, 0.95) to 0.909 (less
+  protective). Raising to K=10 flips both. The directions are
+  opposite because raw WRs straddle the global rate.
+- Right answer is "the K that minimises miscalibration on
+  **future** BUYs" — and we have no holdout yet. Pick K=5 and
+  wait for more data before touching it.
+
+Revisit when either (a) [0.50, 0.60) reaches n≥20 (currently 8
+— slow rate since the current gate already rejects most prices
+in this band, so accumulation here is artificially constrained),
+or (b) a pre-registered hold-out period is defined with enough
+BUY landings to tell K=5 from K=3 from K=10.
+
+### Method notes
+
+- Outcome semantics matter more than sample size here. The
+  winning_side variant (Task 0.4, this session) matches the
+  gate's own book-keeping. The directional variant (Task 0.3)
+  treats intermediate settlements as PnL-based wins/losses —
+  useful for agent-level calibration because agents score
+  probabilities not winning_side, but wrong for gate
+  calibration because the gate doesn't see intermediate
+  settlements either. The two sets of realized rates differ by
+  up to 4pp in the middle bands. Task 0.5 should anchor on
+  winning_side and note the directional deltas as a caveat.
+- Wilson CI was computed directly (z = 1.959964 for two-sided
+  95%). Rule of thumb: for n=10 with p=0.5, Wilson halfwidth is
+  ~0.245 — i.e. CI width ~0.49. Our band widths (0.27–0.56)
+  are consistent with this; the data just isn't dense enough
+  yet to make "≥ 1 CI width" a crossable bar at any band.
+- 3 of 65 resolved BUYs sit outside the band denominator: one
+  at price 0.9995 (realized win, but outside the 0.95 top of
+  the bands — gated by `MAX_TRADEABLE_PRICE`), and two
+  intermediate settlements (no clean `winning_side`). All
+  accounted for; no silent drops.
+
+### What this does NOT answer
+
+- **Whether the live gate is improving PnL.** Task 0.4 is a
+  threshold-calibration check. The "is the gate actually saving
+  us money?" question requires a gate-vs-no-gate counterfactual
+  on the same market set, which is Task 0.5 territory.
+- **Whether the bands themselves are the right bands.** The
+  session-31 band boundaries are a code constant — this session
+  doesn't reopen that question.
+- **Whether the "5-agent mirror collapse" from Task 0.3
+  interacts with the gate's hit rate.** That's a signal-quality
+  question (Phase 1), not a calibration question.
+
+---
+
 ## Session 36 — Phase 0 Task 0.3: Reliability diagram + cluster-collapse diagnostic
 
 Third Phase 0 code workstream. Per-agent + council-aggregate

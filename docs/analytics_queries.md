@@ -120,7 +120,19 @@ ORDER BY month
 Realized BUY hit rate per EV-gate band. Compare against
 `PerceivedStats.band_stats` (in `~/.pqi/stats.json`) to see whether the
 gate's Beta-binomial smoothed thresholds match realization. Bands match
-the scoring-layer constants.
+the scoring-layer constants (`PRICE_BANDS` in `pqi/stats.py`).
+
+**Outcome semantics:** this query uses `winning_side` (clean-winner
+only) to match `stats.py:_side_price_and_won` — which is exactly the
+rule that produces `band_stats` in `stats.json`. Intermediate
+settlements (no declared winner, but a non-null settled price) are
+excluded from the denominator; that is how the gate threshold was
+computed, so it is the right apples-to-apples comparison. For a
+directional view that includes intermediate settlements (more data,
+different semantics — aligns with Q2 and the reliability diagram),
+swap `resolution.winning_side = 'YES'/'NO'` for
+`resolution.final_yes_price > result.market.yes_price` /
+`< result.market.yes_price`.
 
 ```sql
 WITH buys AS (
@@ -128,30 +140,37 @@ WITH buys AS (
         CASE WHEN result.recommendation = 'BUY YES' THEN result.market.yes_price
              ELSE 1.0 - result.market.yes_price END AS side_price,
         CASE
-            WHEN (result.recommendation = 'BUY YES' AND resolution.final_yes_price > result.market.yes_price)
-              OR (result.recommendation = 'BUY NO'  AND resolution.final_yes_price < result.market.yes_price)
+            WHEN (result.recommendation = 'BUY YES' AND resolution.winning_side = 'YES')
+              OR (result.recommendation = 'BUY NO'  AND resolution.winning_side = 'NO')
             THEN 1 ELSE 0 END AS win
     FROM history
     WHERE legacy = false
       AND result.recommendation LIKE 'BUY%'
-      AND resolution.final_yes_price IS NOT NULL
+      AND resolution.winning_side IS NOT NULL
 )
 SELECT
     CASE
+        WHEN side_price < 0.09 THEN '[0.00, 0.09)'
         WHEN side_price < 0.50 THEN '[0.09, 0.50)'
         WHEN side_price < 0.60 THEN '[0.50, 0.60)'
         WHEN side_price < 0.70 THEN '[0.60, 0.70)'
         WHEN side_price < 0.80 THEN '[0.70, 0.80)'
-        ELSE                          '[0.80, 0.95]'
+        WHEN side_price <= 0.95 THEN '[0.80, 0.95]'
+        ELSE                          '(0.95, 1.00]'
     END AS price_band,
     COUNT(*) AS n,
     SUM(win) AS wins,
-    ROUND(AVG(win * 1.0), 3) AS realized_rate,
-    ROUND(AVG(side_price), 3) AS mean_price
+    ROUND(AVG(win * 1.0), 4) AS realized_rate,
+    ROUND(AVG(side_price), 4) AS mean_price
 FROM buys
 GROUP BY price_band
 ORDER BY price_band
 ```
+
+Pair this with the thresholds in `~/.pqi/stats.json` (`jq
+'.band_stats'`) for the per-band calibration check. Wilson 95% CIs
+are best computed in Python; the recipe is in
+`docs/retrospectives/phase_0_edge_2026_04.md` §5.
 
 ### Q5 — Pre-event CLV distribution (`clv_by_row`)
 

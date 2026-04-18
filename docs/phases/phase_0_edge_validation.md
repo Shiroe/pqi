@@ -1,6 +1,6 @@
 # Phase 0: Edge Validation via Analytics Infrastructure
 
-**Status:** active (Tasks 0.1 + 0.2 + 0.3 done; 0.4 next)
+**Status:** active (Tasks 0.1 + 0.2 + 0.3 + 0.4 done; 0.5 next)
 **Estimated effort:** 1–2 weeks of focused work
 **Owner:** TBD
 **Last updated:** 2026-04-19
@@ -278,18 +278,24 @@ whether its thresholds actually match realization — if the
 
 **Acceptance criteria:**
 
-- [ ] Per-band realized-vs-threshold table published
-- [ ] Low-n bands flagged (n<10 in particular)
-- [ ] Recommendation on `BAND_SHRINKAGE_K` (keep, raise, lower)
-      captured in the retrospective — **do not tune K on the same
-      data used to compute band_stats**; flag if more data is
-      needed before reassessing
+- [x] Per-band realized-vs-threshold table published — see
+      `docs/retrospectives/phase_0_edge_2026_04.md` §2
+- [x] Low-n bands flagged (n<10 in particular) — [0.09, 0.50)
+      (n=0, "no evidence"), [0.50, 0.60) (n=8, directionally
+      under-rejecting on point estimate; CI width 0.557 swallows
+      the signal)
+- [x] Recommendation on `BAND_SHRINKAGE_K`: **keep K=5.** Revisit
+      when either (a) [0.50, 0.60) reaches n≥20, or (b) a
+      pre-registered hold-out period is defined. Retuning on the
+      same 62 rows that produced the current band_stats is
+      dressed-up overfitting.
 
 **Files touched:**
 
-- `docs/analytics_queries.md` (per-band query)
-- `docs/retrospectives/phase_0_edge_2026_04.md` (final
-  recommendation)
+- `docs/analytics_queries.md` (Q4 retargeted to winning_side
+  semantics with outcome-semantics note)
+- `docs/retrospectives/phase_0_edge_2026_04.md` (per-band
+  section + open items for Task 0.5)
 
 **Risks:**
 
@@ -424,12 +430,38 @@ If any answer is "no," that task is not done.
 
 ## Session state
 
-**Last work session:** session 36 (2026-04-19)
+**Last work session:** session 37 (2026-04-19)
 
 **Done:**
 
 - Scaling assessment + phase plan committed (session 33).
 - Phase 0 scope approved.
+- **Task 0.4 — Per-band calibration check (session 37).**
+  Realized BUY hit rate per EV-gate band (winning_side
+  semantics to match `stats.py:_side_price_and_won`) laid
+  against the `band_stats.smoothed_wr` thresholds in
+  `~/.pqi/stats.json`. 95% Wilson CIs computed. **No band
+  clears the "≥ 1 CI width" flag** in either direction —
+  at n=8–23 per occupied band the CIs are wide enough that
+  neither a true under-rejection nor over-rejection is
+  statistically evident. Directionally: [0.50, 0.60)
+  point-estimate under-rejects (realized 0.375 vs mean
+  price 0.561, Δ −0.186) but the current gate threshold
+  (0.497 < band floor 0.500) means future BUYs in this
+  band will be rejected by the gate regardless — the
+  calibration concern is retrospective only. [0.80, 0.95)
+  point-estimate over-rejects marginally (realized 0.938
+  vs threshold 0.879, Δ +0.058 < CI width 0.272). Two
+  dense bands ([0.60, 0.70), [0.70, 0.80)) are
+  well-calibrated on point estimate. `BAND_SHRINKAGE_K`
+  recommendation: **keep K=5.** Revisit only when a
+  pre-registered hold-out period is defined or [0.50,
+  0.60) reaches n≥20. Coverage: 62/65 resolved BUYs land
+  in the 5 bands (1 at price 0.9995 out-of-band — gated
+  by `MAX_TRADEABLE_PRICE`; 2 intermediate settlements
+  excluded from `band_stats` by construction). Full table,
+  query, and flagged-bands summary in
+  `docs/retrospectives/phase_0_edge_2026_04.md` §2–§3.
 - **Task 0.1 — DuckDB wire-up (session 34).** `analytics_sql.py`
   module landed with `history` + `verdicts` pre-registered views.
   `pqi query "<SQL>"` CLI subcommand works end-to-end via rich
@@ -484,17 +516,23 @@ If any answer is "no," that task is not done.
 
 **In-progress:** *nothing*
 
-**Next action:** Task 0.4 — Per-band calibration check. Use
-`pqi query` against `verdicts` / `history` and the EV-gate band
-boundaries to compute realized BUY hit rate per band (alongside
-the per-agent prediction realisation rates already in the
-reliability report) and compare against the Beta-binomial
-smoothed thresholds in `~/.pqi/stats.json` (`band_stats`).
-Report per band: n, realized rate, banded threshold, 95% Wilson
-CI, delta. Flag bands where realized < implied-prob floor
-(suggesting the gate is under-rejecting). Do **not** retune
-`BAND_SHRINKAGE_K` on the same data that produced `band_stats`
-— Task 0.4 measures, Task 0.5 recommends.
+**Next action:** Task 0.5 — Edge retrospective & verdict. All
+four measurement tasks (0.1 DuckDB, 0.2 pre-event CLV, 0.3
+reliability diagram, 0.4 per-band calibration) are landed. The
+retrospective file `docs/retrospectives/phase_0_edge_2026_04.md`
+already holds the per-band calibration section and open-items
+placeholders for the other three measurement streams. Task 0.5
+needs to:
+- Fold the CLV distribution (Task 0.2) and reliability diagram
+  (Task 0.3) summaries into the retrospective alongside the
+  per-band section already written.
+- Issue a verdict (edge validated / no edge / inconclusive) with
+  a one-sentence justification grounded in the three measurement
+  streams.
+- Recommend next actions (phase prioritisation, any knob
+  revisits, additional data to collect).
+- Update `docs/phases/README.md` status table and CLAUDE.md
+  §Current State on Phase 0 completion.
 
 **Notes for next session:**
 
@@ -512,15 +550,28 @@ CI, delta. Flag bands where realized < implied-prob floor
   drifts (e.g. −540min, −1019min) happen when CLOB's first lifecycle
   hour is after the target. Those rows are honest — the sidecar
   reports drift so the retrospective can caveat them.
-- Early finding: `[0.50, 0.60)` band realized rate 33% on n=9 —
-  flag for Task 0.4 (per-band calibration). Sample is thin; will be
-  sharper after more BUYs land there. Note: at the council-prediction
-  level, 93 rows in [0.50, 0.60) realized at 51.6% — the 33% number is
-  the BUY-survivorship subset, not the underlying calibration. Task
-  0.4 will quantify that gap.
+- Task 0.4 quantified the `[0.50, 0.60)` band: n=8 wins=3
+  realized 0.375, mean entry price 0.561, gate threshold 0.497,
+  Δ(real − price) −0.186, Wilson CI width 0.557. Below both
+  threshold and mean price on point estimate, not statistically
+  significant. The current gate's threshold (0.497 < band floor
+  0.500) already rejects all future BUYs in this band going
+  forward — the calibration concern is retrospective only. The
+  directional-winner realized rate (33%, n=9) includes one extra
+  intermediate settlement that flipped an additional row into a
+  loss; Task 0.5 should flag both semantics.
+- Directional-winner numbers (from Task 0.3) and winning_side
+  numbers (from Task 0.4) diverge in the middle bands by up to
+  4pp — mostly intermediate settlements that classify_outcome
+  scores as PnL-positive/negative while `stats.py` excludes
+  them. The gate uses winning_side semantics; Task 0.5 should
+  anchor its verdict on that but mention the directional shift
+  as a monitoring caveat.
 - Task 0.5 retrospective should explicitly quote the CLV + band
   numbers once 0.3–0.4 are in. Don't retune `BAND_SHRINKAGE_K` on
-  the same data that produced the current band stats.
+  the same data that produced the current band stats. Task 0.4
+  already records "keep K=5" as the defensible recommendation
+  given current sample density.
 - Reliability-diagram output is a versioned UTC-dated markdown file —
   re-running on a different day produces a new report rather than
   overwriting. Session-36 file: `~/.pqi/reports/reliability_20260418.md`.
