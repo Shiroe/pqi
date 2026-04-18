@@ -4,6 +4,159 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 35 — Phase 0 Task 0.2: Pre-event CLV backfill
+
+Second Phase 0 code workstream. Every resolved BUY in `history.jsonl`
+now carries a computable pre-event CLV (close-line value) — the
+difference between the CLOB market price at `event_start_time` and
+the price we entered at. Positive CLV ⇒ we bought below the pre-event
+market mark (entry-quality edge, independent of whether the bet
+eventually won). The feature ships as a one-shot backfill script, a
+sidecar JSONL, and a DuckDB view. No pipeline / aggregator / gate
+changes.
+
+### What landed
+
+- **`scripts/backfill_clv.py`** — one-shot backfill. For every
+  non-legacy resolved BUY:
+  1. pick the bought-side token from `market.clob_token_ids` (index 0
+     for BUY YES, index 1 for BUY NO — matches Gamma's `clobTokenIds`
+     order),
+  2. fetch CLOB `GET /prices-history?market={token}&interval=max&
+     fidelity=60` (inline `httpx`, no coupling to private
+     `_fetch_side`),
+  3. pick the latest point with `t <= event_start_time` (last-before-
+     target — see bucket-policy note below),
+  4. compute `clv = bucket_price - entry_price`, where
+     `entry_price = yes_price` for BUY YES else `1 - yes_price` for
+     BUY NO.
+  Uniform-schema output at `~/.pqi/clv.jsonl`, one row per candidate.
+  Every row carries `run_id`, `available` (bool),
+  `unavailable_reason` ∈ {`no_event_start`, `no_tokens`,
+  `fetch_failed`, `no_bucket_before`, null when available},
+  `bucket_drift_minutes` (≤ 0 by construction), `bucket_price`,
+  `entry_price`, `clv`. Idempotent: a second run preserves cached
+  rows that either succeeded or hit a permanent unavailable reason
+  (`no_event_start` / `no_tokens`); transient failures
+  (`fetch_failed`, `no_bucket_before`) are retried each run.
+  `--rebuild` discards the sidecar entirely.
+
+- **`pqi/analytics_sql.py`** — extended to register a third view
+  `clv_by_row` reading `~/.pqi/clv.jsonl`. Registered *only* when
+  the sidecar exists; if it's missing the view simply isn't created
+  and any query against it raises DuckDB's native
+  `CatalogException: Table with name clv_by_row does not exist!`.
+  `get_connection(clv_path=...)` accepts an override to make the
+  missing-sidecar path testable. No change to `history` / `verdicts`
+  views.
+
+- **`docs/analytics_queries.md`** — Q5 became the CLV query block
+  (distribution, per-category, coverage audit, CLV-vs-outcome join);
+  the old "missed opportunities" query is now Q6. Header table,
+  column descriptions, and tips section updated to cover
+  `clv_by_row` columns and the bucket-policy caveat.
+
+### Bucket policy: last-before-target (not closest)
+
+The CLOB retention probe against token
+`23237224170184798654257898614973049777702675268186078584584564326529707151667`
+(NO side of run `8735ea38`, event start `2026-04-10T18:00:00Z`)
+returned, around the target:
+
+```
+[92] 2026-04-10T16:00:59  p=0.8350  drift=-119.0min
+[93] 2026-04-10T17:00:06  p=0.8350  drift= -59.9min  ← last-before-target
+[94] 2026-04-10T19:00:56  p=0.9995  drift= +60.9min
+```
+
+The jump `0.835 → 0.9995` across a single post-event bucket is a
+Polymarket resolution spike. A "closest to target" selection policy
+would have picked [94] in other runs (whichever side of the target
+has a smaller drift), silently leaking post-event information into
+the CLV signal. Last-before-target enforces a hard pre-event
+anchor; the max drift we'll see is bounded by the point spacing
+(~60min at `fidelity=60`, wider when CLOB started recording after
+the target). The sidecar records `bucket_drift_minutes` so the
+retrospective can caveat runs with big drifts.
+
+`interval=max` is important: CLOB returns the *full market lifecycle*
+(e.g. the probed market: 95 points spanning 5.8 days), not a
+calendar-relative window. This means even rows with
+`event_start_time` > 1 week before backfill can be computed as long
+as the token IDs are stored — which was the original worry in the
+Task 0.2 risk list.
+
+### Coverage (65 resolved BUYs)
+
+- **Available: 44 (67.7%)** — CLV computed end-to-end.
+- **Unavailable: 21 (32.3%)** — all `no_tokens`. These rows predate
+  session-22's `clob_token_ids` persistence; there's no way to
+  recover them without re-fetching every market from Gamma by ID
+  and matching timestamps, which isn't justified for 21 historical
+  rows. Future BUYs will all have tokens stored.
+- 0 `fetch_failed`, 0 `no_bucket_before`, 0 `no_event_start` on
+  BUYs (100% of BUYs have `event_start_time` populated — the
+  Gamma `None` worry from the phase doc hasn't materialized on
+  esports).
+
+Distribution (n=44):
+- mean CLV = −0.0167
+- stddev = 0.0640
+- min = −0.26 (9f8c4a56, BUY NO), max = +0.12 (71e89320, BUY YES)
+
+Per-category breakdown:
+- valorant: n=17, mean −0.0318, stddev 0.0915
+- league-of-legends: n=14, mean −0.0007, stddev 0.0181
+- counter-strike: n=8, mean −0.0131, stddev 0.0398
+- rainbow-six-siege / mobile-legends-bang-bang / dota-2: n ≤ 2, not
+  meaningful
+
+**Interpretation (preliminary, to formalize in Task 0.5):** the
+aggregate −0.017 mean is slightly unfavorable on entry quality — on
+average we're buying ~1.7pp above the pre-event market mark.
+LoL stays neutral with low variance; valorant shows bigger
+dispersion (one −0.26 outlier dominates). This is a small-sample
+signal; the retrospective should re-quote after more BUYs land.
+
+Sanity join against win/loss (n=22 per bucket):
+- CLV ≥ 0 (good entry): 63.6% win rate (mean CLV +0.021)
+- CLV < 0 (bad entry): 72.7% win rate (mean CLV −0.054)
+
+No monotone correlation at this n. Flagging for Task 0.5; likely
+needs 3–5× more data before CLV-as-predictor-of-wins is meaningfully
+testable.
+
+### Files touched
+
+- `scripts/backfill_clv.py` — new.
+- `pqi/analytics_sql.py` — added `CLV_FILE` constant and the
+  conditional `clv_by_row` view; `get_connection` gained an optional
+  `clv_path=` parameter.
+- `docs/analytics_queries.md` — view table extended to 3 views; Q5
+  replaced with CLV queries; old Q5 → Q6; tips section gained CLV
+  backfill / interpretation notes.
+- `docs/phases/phase_0_edge_validation.md` — Task 0.2 acceptance
+  criteria checked off; status line updated; session state appended
+  with next-action pointer to Task 0.3.
+- `docs/phases/README.md` — status column updated.
+- Runtime: `~/.pqi/clv.jsonl` created (65 rows, uniform schema).
+
+### Non-goals
+
+- No Python imports from `scripts/backfill_clv.py` into pipeline
+  code; it's intentionally a one-shot operation.
+- No automatic re-runs from `history sync`. A run-time CLV capture
+  (store `clv` on `CouncilResult` at the moment of a BUY
+  recommendation) is an obvious next step but hasn't been scoped —
+  the backfill + view is enough to unblock Phase 0 tasks 0.3–0.5.
+- No coupling to `pqi.market.clob._fetch_side`. The backfill uses a
+  different interval (`max` vs config's `1w`), so reusing the
+  private helper would have meant either plumbing through a new
+  param or calling it with a different contract than
+  `_compute_side_metrics` expects downstream.
+
+---
+
 ## Session 34 — Phase 0 Task 0.1: DuckDB analytics layer (`pqi query`)
 
 First code workstream under the Phase 0 plan drafted in session 33.

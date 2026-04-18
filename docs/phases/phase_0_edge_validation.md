@@ -1,6 +1,6 @@
 # Phase 0: Edge Validation via Analytics Infrastructure
 
-**Status:** active (Task 0.1 done; 0.2 next)
+**Status:** active (Tasks 0.1 + 0.2 done; 0.3 next)
 **Estimated effort:** 1–2 weeks of focused work
 **Owner:** TBD
 **Last updated:** 2026-04-19
@@ -155,15 +155,19 @@ about entry quality).
 
 **Acceptance criteria:**
 
-- [ ] CLV computed for every resolved BUY with non-null
-      `event_start_time`
-- [ ] Rows with missing `event_start_time` flagged, not silently
-      dropped
-- [ ] CLV distribution queryable
-      (`SELECT avg(clv), stddev(clv), count(*) FROM clv_by_row`)
-- [ ] Per-category CLV breakdown available
-- [ ] Coverage rate reported (e.g. "CLV computed for 42 of 55
-      resolved BUYs — 76% coverage, 13 missing `event_start_time`")
+- [x] CLV computed for every resolved BUY with non-null
+      `event_start_time` — 44/65 done; the 21 remainder all hit
+      `no_tokens` (pre-session-22 rows predating `clob_token_ids`
+      persistence), 100% of rows with stored tokens succeeded
+- [x] Rows with missing `event_start_time` flagged, not silently
+      dropped — uniform-schema sidecar: every row carries `available`
+      + `unavailable_reason`
+- [x] CLV distribution queryable
+      (`SELECT avg(clv), stddev(clv), count(*) FROM clv_by_row`) —
+      mean −0.0167, stddev 0.064, min −0.26, max +0.12 on n=44
+- [x] Per-category CLV breakdown available — see `docs/analytics_queries.md` Q5
+- [x] Coverage rate reported — "CLV computed for 44 of 65 resolved
+      BUYs — 67.7% coverage, 21 unavailable (no_tokens)"
 
 **Files touched:**
 
@@ -416,7 +420,7 @@ If any answer is "no," that task is not done.
 
 ## Session state
 
-**Last work session:** session 34 (2026-04-19)
+**Last work session:** session 35 (2026-04-19)
 
 **Done:**
 
@@ -430,16 +434,32 @@ If any answer is "no," that task is not done.
   `requirements.txt`. Full-history aggregations clock at ~230ms
   (target was <1s). See session-log §Session 34 for the DuckDB
   timestamp-inference gotcha and surface-level findings.
+- **Task 0.2 — Pre-event CLV backfill (session 35).**
+  `scripts/backfill_clv.py` hits CLOB `interval=max` per bought-side
+  token and picks the last hourly bucket before `event_start_time`
+  (last-before-target policy; closest-overall would leak post-event
+  resolution price). Writes `~/.pqi/clv.jsonl`; idempotent with
+  `--rebuild` escape. `analytics_sql.py` registers `clv_by_row` view
+  only when the sidecar exists. Coverage: 44/65 resolved BUYs (67.7%);
+  21 rows hit permanent `no_tokens` (predate session-22
+  `clob_token_ids` persistence); 100% of token-carrying rows succeeded.
+  Preliminary distribution: mean CLV −0.0167, stddev 0.064, min −0.26
+  (d368cc6f, BUY YES), max +0.12 (71e89320, BUY YES). Per-category:
+  valorant −0.032 (n=17), league-of-legends −0.001 (n=14),
+  counter-strike −0.013 (n=8). CLV + outcome join shows no monotone
+  win-rate gradient at n=22/bucket; re-check at 100+ BUYs.
 
 **In-progress:** *nothing*
 
-**Next action:** Task 0.2 — Pre-event CLV backfill. First step:
-inventory `event_start_time` population rate on resolved BUYs via
-`pqi query "SELECT COUNT(*) FILTER (WHERE result.market.event_start_time
-IS NOT NULL), COUNT(*) FROM history WHERE legacy=false AND
-result.recommendation LIKE 'BUY%' AND resolution.final_yes_price IS NOT
-NULL"` — Gamma returns `None` on some markets, so document the
-coverage gap before writing `scripts/backfill_clv.py`.
+**Next action:** Task 0.3 — Reliability diagram. Write
+`scripts/reliability_diagram.py` that buckets per-agent + aggregate
+predicted probabilities against realized outcome. Use the EV-gate
+price bands `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]`
+for cross-comparison with Task 0.4. Output ASCII table +
+markdown report at `~/.pqi/reports/reliability_YYYYMMDD.md`;
+include per-agent Brier. Agent-level calibration uses the full
+~400-resolution set via directional winner semantics (see Q2 caveat),
+not just the 65 BUY-triggered rows.
 
 **Notes for next session:**
 
@@ -449,12 +469,20 @@ coverage gap before writing `scripts/backfill_clv.py`.
   reinvent.
 - Nested access in `history`: `result.market.*`, `resolution.*`,
   `analysis.*`. Flat per-verdict access via the `verdicts` view.
+- CLV bucket policy matters — one probed run (8735ea38) showed
+  0.835 → 0.9995 across a single post-event bucket. Using
+  closest-overall would silently leak resolution into CLV for
+  markets with tight event→resolution windows. Keep last-before-target.
+- `clv_by_row.bucket_drift_minutes` is ≤ 0 by construction; wider
+  drifts (e.g. −540min, −1019min) happen when CLOB's first lifecycle
+  hour is after the target. Those rows are honest — the sidecar
+  reports drift so the retrospective can caveat them.
 - Early finding: `[0.50, 0.60)` band realized rate 33% on n=9 —
   flag for Task 0.4 (per-band calibration). Sample is thin; will be
   sharper after more BUYs land there.
-- Task 0.5 retrospective should explicitly quote these numbers once
-  0.2–0.4 are in. Don't retune `BAND_SHRINKAGE_K` on the same data
-  that produced the current band stats.
+- Task 0.5 retrospective should explicitly quote the CLV + band
+  numbers once 0.3–0.4 are in. Don't retune `BAND_SHRINKAGE_K` on
+  the same data that produced the current band stats.
 - Phase 0 and Phase 1 can run in parallel — if you want to
   parallel-track, pick Task 1.1 (SHARED_PREAMBLE autonomy rewrite)
   from `docs/phases/phase_1_signal_quality.md` and alternate.

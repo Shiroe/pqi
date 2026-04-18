@@ -471,13 +471,28 @@ as a literal.
 
 ## Current State
 
-**Last updated:** session 34 — Phase 0 Task 0.1 shipped: DuckDB
-analytics layer (`pqi/analytics_sql.py`) with pre-registered `history`
-and `verdicts` views, `pqi query "<SQL>"` CLI subcommand, 5 starter
+**Last updated:** session 35 — Phase 0 Task 0.2 shipped:
+`scripts/backfill_clv.py` writes pre-event CLV to `~/.pqi/clv.jsonl`
+one row per resolved BUY (uniform schema). `analytics_sql.py`
+conditionally registers a third view `clv_by_row` when the sidecar
+exists; join to `history` / `verdicts` on `run_id`.
+`docs/analytics_queries.md` Q5 is now the CLV block (distribution,
+per-category, coverage audit, CLV-vs-outcome join). Coverage: 44/65
+resolved BUYs (67.7%); the 21 unavailable rows all hit permanent
+`no_tokens` (predate session-22 `clob_token_ids` persistence). Mean
+CLV −0.0167, stddev 0.064 on n=44; valorant −0.032 (n=17), LoL
+−0.001 (n=14), CS −0.013 (n=8). Bucket policy: last-before-target
+(avoids post-event resolution-spike leakage — see session-log §35
+for the concrete 0.835→0.9995 probe). No pipeline / aggregator /
+gate changes. **Next: Phase 0 Task 0.3 (reliability diagram).**
+
+Session 34 shipped Phase 0 Task 0.1 — DuckDB analytics layer
+(`pqi/analytics_sql.py`) with pre-registered `history` and
+`verdicts` views, `pqi query "<SQL>"` CLI subcommand, 5 starter
 queries in `docs/analytics_queries.md`, `duckdb>=1.0` pinned.
 Full-history aggregations at ~230ms (target <1s). No pipeline,
-scoring, aggregator, or contract changes — read-only analytics surface.
-Unblocks Task 0.2 (pre-event CLV backfill) and the rest of Phase 0.
+scoring, aggregator, or contract changes — read-only analytics
+surface. Unblocked Task 0.2 and the rest of Phase 0.
 
 Session 33 — planning + documentation only. Triaged a v2.0
 architecture RFC (`docs/esports_intel_engine_report.md`) and its
@@ -500,7 +515,7 @@ roadmap naming are complete. The new phase framing in
 
 | New phase | Status | Doc |
 | --- | --- | --- |
-| Phase 0 — edge validation | **active (Task 0.1 ✓; 0.2 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
+| Phase 0 — edge validation | **active (Tasks 0.1 + 0.2 ✓; 0.3 next)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
 | Phase 1 — signal quality (Option B autonomy fix) | parallel-able with P0 | [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md) |
 | Phase 2 — execution edge (MFE, listener) | blocked on P0 | [`docs/phases/phase_2_execution_edge.md`](docs/phases/phase_2_execution_edge.md) |
 | Phase 3 — deployment portability (Docker/VPS) | blocked on P0 verdict | [`docs/phases/phase_3_deployment_portability.md`](docs/phases/phase_3_deployment_portability.md) |
@@ -545,6 +560,21 @@ behavior is unchanged. Session 34 added a read-only SQL layer
 
 ### Recent sessions (detail in `docs/session-log.md`)
 
+- **Session 35** — Phase 0 Task 0.2 shipped: pre-event CLV
+  backfill. `scripts/backfill_clv.py` (stdlib + httpx,
+  `main() -> int`, atomic write) fetches CLOB `interval=max` per
+  bought-side token and picks the last hourly bucket before
+  `event_start_time`; writes uniform-schema `~/.pqi/clv.jsonl`;
+  idempotent with permanent-failure caching and `--rebuild` escape.
+  `analytics_sql.py` extended with conditional `clv_by_row` view and
+  `clv_path=` override for testability. `docs/analytics_queries.md`
+  reorganized (3 views documented, Q5 now CLV queries, old Q5 →
+  Q6). Bucket policy last-before-target — the alternative
+  (closest-overall) would leak the post-event resolution spike. 44/65
+  resolved BUYs computed; the 21 gap is all permanent `no_tokens` (no
+  way to recover; future BUYs all carry tokens since session 22).
+  Preliminary signal: mean CLV −0.0167 aggregate (slightly unfavorable
+  entry quality). Feeds Task 0.5 retrospective.
 - **Session 34** — Phase 0 Task 0.1 shipped. Added DuckDB analytics
   layer (`analytics_sql.py`) with `history` and `verdicts`
   pre-registered views; `pqi query "<SQL>"` CLI subcommand with rich
@@ -634,10 +664,17 @@ behavior is unchanged. Session 34 added a read-only SQL layer
 - History system: persistence, resolution sync, per-agent accuracy,
   postmortem.
 - SQLite cache with price-delta + structured-status invalidation.
-- **DuckDB analytics layer** (session 34, `pqi/analytics_sql.py`):
+- **DuckDB analytics layer** (sessions 34–35, `pqi/analytics_sql.py`):
   pre-registered `history` + `verdicts` views over
-  `~/.pqi/history.jsonl`; 5 starter queries in
+  `~/.pqi/history.jsonl`, plus conditional `clv_by_row` view over
+  `~/.pqi/clv.jsonl` when the sidecar exists. 6 starter queries
+  including CLV distribution / per-category / outcome-join in
   `docs/analytics_queries.md`. Read-only; no pipeline coupling.
+- **Pre-event CLV backfill** (session 35, `scripts/backfill_clv.py`):
+  one-shot stdlib+httpx script. CLOB `interval=max` per bought-side
+  token, last-before-target bucket policy, uniform-schema JSONL
+  output keyed by `run_id`. Idempotent with `--rebuild` escape.
+  Run via `python -m pqi.scripts.backfill_clv`.
 - CLI: `analyze` (with `--category`, `--top`, `--live`,
   `--starts-within`, …), `categories`, `query "<SQL>"`, `history`
   (list/show/sync/stats).
@@ -667,38 +704,43 @@ Detailed reference material lives in docs/:
 - docs/phases/phase_2_execution_edge.md — blocked on P0
 - docs/phases/phase_3_deployment_portability.md — blocked on P0 verdict
 - docs/phases/phase_4_scaling_triggers.md — reactive only
-- docs/analytics_queries.md — starter queries for `pqi query` (session 34)
+- docs/analytics_queries.md — starter queries for `pqi query` (sessions 34–35)
 - docs/api-reference.md — API endpoints, params, response formats (incl. PandaScore)
 - docs/known-issues.md — API quirks, edge cases, env setup, persisted state files
-- docs/session-log.md — per-session changelog (current through session 34)
+- docs/session-log.md — per-session changelog (current through session 35)
 - docs/roadmap.md — themed catalog (A/B/C); phase section indexes phases
 - docs/option_b_migration_plan.md — full Option B rollout plan (steps 1–4 shipped)
 
-## PRIORITY — Phase 0: edge validation (Task 0.2)
+## PRIORITY — Phase 0: edge validation (Task 0.3)
 
 Default entry point: `docs/phases/phase_0_edge_validation.md`.
 
-Task 0.1 (DuckDB wire-up) shipped in session 34 — the `pqi query`
-CLI and `analytics_sql.py` with `history` + `verdicts` views are
-live. 5 starter queries documented. Full-history aggregations
-~230ms. See `docs/analytics_queries.md` to get oriented.
+Tasks 0.1 (DuckDB wire-up, session 34) and 0.2 (pre-event CLV
+backfill, session 35) are shipped. `pqi query` works over 3 views
+(`history`, `verdicts`, `clv_by_row`). CLV sidecar at `~/.pqi/clv.jsonl`
+covers 44/65 resolved BUYs; the 21 gap is all permanent `no_tokens`
+(future BUYs all have tokens). Preliminary signal: mean CLV −0.0167
+aggregate, worse in valorant (−0.032 on n=17) than LoL (−0.001 on
+n=14). See `docs/analytics_queries.md` Q5 for the query block.
 
-**Task 0.2 — Pre-event CLV backfill** is next. First step: inventory
-`event_start_time` coverage with a quick `pqi query`, e.g.
+**Task 0.3 — Reliability diagram** is next. Write
+`scripts/reliability_diagram.py`:
+- For each of the 7 agents + the council aggregate `final_score`:
+  bucket predicted `P(YES)` into the EV-gate price bands
+  `[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]` (reuse
+  for cross-comparison with Task 0.4).
+- Realized rate per bin uses *directional winner* semantics
+  (`final_yes_price > entry_yes_price` ⇒ YES) so the full ~400-row
+  resolved set participates, not just the 65 BUY-triggered rows.
+- Compute Brier per agent and aggregate.
+- Output ASCII table + markdown report at
+  `~/.pqi/reports/reliability_YYYYMMDD.md`.
+- Expect mirror-collapse curves to be near-identical across agents
+  (Option B shadow showed `|drift|` 0.01–0.06); if confirmed, note
+  it as a Phase 1 priority amplifier in the report.
 
-  pqi query "SELECT COUNT(*) FILTER (WHERE result.market.event_start_time
-  IS NOT NULL) AS have_est, COUNT(*) AS total FROM history WHERE
-  legacy=false AND result.recommendation LIKE 'BUY%' AND
-  resolution.final_yes_price IS NOT NULL"
-
-Then write `scripts/backfill_clv.py` per the phase doc implementation
-sketch — reads each resolved BUY, hits CLOB hourly at
-`event_start_time`, computes `clv = price_at_start - entry_price`,
-persists to `~/.pqi/clv.jsonl`. Expose as a joinable DuckDB view.
-
-After 0.2, tasks 0.3 (reliability diagram), 0.4 (per-band
-calibration vs stats.json), 0.5 (retrospective) — all leverage the
-DuckDB layer.
+After 0.3, tasks 0.4 (per-band calibration vs `stats.json`
+`band_stats`) and 0.5 (retrospective) close the phase.
 
 Parallel-able with Phase 0: `docs/phases/phase_1_signal_quality.md`
 (Option B autonomy fix). Phase 1 is the SHARED_PREAMBLE autonomy
@@ -709,19 +751,24 @@ collapse (|drift| 0.01–0.06) and the pre-registered ΔBrier ≤ −0.005
 criterion is mathematically unreachable on the current persona
 output. Fix the signal, then test B-math.
 
-## Session-34 surface findings (feed task 0.5 retrospective)
+## Surface findings from sessions 34–35 (feed task 0.5 retrospective)
 
-Running the starter queries produced three observations worth
-structured follow-up:
-
-- **`[0.50, 0.60)` band realized 33% (3/9) at mean price 56%** —
-  either genuinely -EV or Beta-binomial is over-shrinking to global.
-  n=9 is thin; task 0.4 will sharpen.
-- **Bear agent lean rate 49.1% (n=342)** vs other agents 60–67% —
-  consistent with session-32 mirror-collapse finding. Feeds Phase 1
-  priority.
-- **April 2026 total PnL per share: -0.575 across 65 BUYs** (≈
-  -0.9¢/share avg). Small sample, but marginal-at-best edge.
+- **`[0.50, 0.60)` band realized 33% (3/9) at mean price 56%**
+  (session 34) — either genuinely -EV or Beta-binomial is
+  over-shrinking to global. n=9 is thin; task 0.4 will sharpen.
+- **Bear agent lean rate 49.1% (n=342)** vs other agents 60–67%
+  (session 34) — consistent with session-32 mirror-collapse
+  finding. Feeds Phase 1 priority.
+- **April 2026 total PnL per share: −0.575 across 65 BUYs** (session
+  34, ≈ −0.9¢/share avg). Small sample, but marginal-at-best edge.
+- **Aggregate pre-event CLV: mean −0.0167 on n=44** (session 35).
+  Slightly unfavorable entry quality on average — we're buying
+  ~1.7pp above the pre-event mark. Valorant worst (−0.032 on n=17,
+  dominated by one −0.26 outlier); LoL basically neutral
+  (−0.001 on n=14, stddev only 0.018). Pair with the
+  CLV-vs-outcome join at n=22/bucket: no monotone gradient yet
+  (good-entry bucket 64% win, bad-entry bucket 73% win) — re-check
+  at 100+ BUYs before drawing conclusions.
 
 ## Monitoring tasks (low priority; observe, don't code)
 These are from earlier sessions; pick up if the signal appears
@@ -757,7 +804,7 @@ Phase 2 deliverables. Theme C items are isolated QoL — pick any
 between phases if they bite you.
 
 ## Instructions
-- Default to Phase 0 task 0.2 (CLV backfill) unless the user
+- Default to Phase 0 task 0.3 (reliability diagram) unless the user
   redirects. Phase docs are designed for async work — each has
   entry criteria + task acceptance + session state, so you can pick
   up where the last session left off.
@@ -766,8 +813,11 @@ between phases if they bite you.
   session-32 shadow reassessment in docs/session-log.md if the
   conversation turns to running the Option B backtest prematurely.
 - When reaching for history analytics, use `pqi query "<SQL>"` on
-  the `history` / `verdicts` views before writing a fresh Python
-  script. See docs/analytics_queries.md for patterns.
+  the `history` / `verdicts` / `clv_by_row` views before writing a
+  fresh Python script. See docs/analytics_queries.md for patterns.
+  For CLV specifically: `python -m pqi.scripts.backfill_clv` will
+  refresh the sidecar; the DuckDB view auto-registers when it
+  exists.
 - Update ## Current State and write a fresh ## Next Session Prompt
   at end of session. Log meaningful decisions in docs/session-log.md
   and the phase doc's "Session state" section.

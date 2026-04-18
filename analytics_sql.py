@@ -2,15 +2,21 @@
 SQL analytics layer over ~/.pqi/history.jsonl via DuckDB.
 
 Exposes a small surface for ad-hoc queries from the `pqi query` CLI and
-from scripts. Two pre-registered views:
+from scripts. Pre-registered views:
 
-  history   — top-level rows with nested `result` / `resolution` /
-              `analysis` accessible via dot notation
-              (e.g. `result.market.category`,
-              `resolution.winning_side`).
-  verdicts  — flattened join of `(run_id, timestamp, category, yes_price,
-              recommendation, winner, final_yes_price)` × each agent
-              verdict, via `UNNEST(result.verdicts)`.
+  history    — top-level rows with nested `result` / `resolution` /
+               `analysis` accessible via dot notation
+               (e.g. `result.market.category`,
+               `resolution.winning_side`).
+  verdicts   — flattened join of `(run_id, timestamp, category, yes_price,
+               recommendation, winner, final_yes_price)` × each agent
+               verdict, via `UNNEST(result.verdicts)`.
+  clv_by_row — pre-event close-line-value per resolved BUY
+               (`~/.pqi/clv.jsonl`, populated by
+               `scripts/backfill_clv.py`). Keyed by `run_id`; joinable
+               against `history` / `verdicts`. Registered only when the
+               sidecar exists — downstream queries on `clv_by_row`
+               raise a clear error otherwise.
 
 Timestamp format is pinned because DuckDB's auto-inference sometimes
 samples a nested date field and ends up rejecting top-level timestamps.
@@ -26,6 +32,8 @@ import duckdb
 
 from pqi.history import HISTORY_FILE
 
+CLV_FILE = Path.home() / ".pqi" / "clv.jsonl"
+
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 
 
@@ -40,8 +48,11 @@ def _read_json_clause(history_path: Path) -> str:
     )
 
 
-def get_connection(history_path: Path | None = None) -> duckdb.DuckDBPyConnection:
-    """Open an in-memory DuckDB connection with `history` and `verdicts` views."""
+def get_connection(
+    history_path: Path | None = None,
+    clv_path: Path | None = None,
+) -> duckdb.DuckDBPyConnection:
+    """Open an in-memory DuckDB connection with the standard views."""
     path = history_path or HISTORY_FILE
     if not path.exists():
         raise FileNotFoundError(f"history file not found: {path}")
@@ -71,6 +82,13 @@ def get_connection(history_path: Path | None = None) -> duckdb.DuckDBPyConnectio
         WHERE legacy = false
         """
     )
+
+    clv = clv_path or CLV_FILE
+    if clv.exists():
+        con.execute(
+            f"CREATE VIEW clv_by_row AS SELECT * FROM {_read_json_clause(clv)}"
+        )
+
     return con
 
 
