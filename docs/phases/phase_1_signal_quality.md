@@ -1,10 +1,12 @@
 # Phase 1: Signal Quality Fix (Option B Autonomy)
 
-**Status:** not started (can parallelize with Phase 0)
+**Status:** Task 1.1 scaffold landed (flags + dual preamble + anchor /
+advocacy snippets, all default OFF — baseline bit-identical). Analytics
+tagging in place. Rollout (turning flags on) not yet started.
 **Estimated effort:** 2–4 weeks
 **Owner:** TBD
-**Last updated:** 2026-04-19 (post-Phase-0 retrospective; acceptance
-criteria unified)
+**Last updated:** 2026-04-19 (session 40 — scaffold + analytics tagging
+committed; no prompts in force yet)
 
 ---
 
@@ -501,9 +503,9 @@ Either:
 
 ## Session state
 
-**Last work session:** session 39 (2026-04-19) — doc-only patch
-unifying acceptance criteria per external review v2. Phase 1 execution
-(Task 1.1 prompt drafting) still pending owner review of this doc.
+**Last work session:** session 40 (2026-04-19) — Task 1.1 scaffold +
+Phase 1 analytics tagging landed. No prompts in force yet; baseline
+AGENT_PERSONAS bit-identical to pre-rewrite when all flags off.
 
 **Done:**
 
@@ -518,32 +520,68 @@ unifying acceptance criteria per external review v2. Phase 1 execution
   advocacy); Task 1.2 gains agent_weights.json reset; Task 1.3
   realigned to Pearson. Source: `phase_1_acceptance_criteria_patch.md`
   / external review v2 §3.1.1.
+- **Session 40 (scaffold):** 7 `PERSONA_V2_*` flags added to
+  `config.py` + `.env.example` (all default OFF). `agents/personas.py`
+  rewritten with dual `_SHARED_PREAMBLE_V1` / `_SHARED_PREAMBLE_V2`,
+  four persona-specific anchor snippets (Statistician / Sentiment /
+  Specialist / Contrarian), and Bull/Bear advocacy-then-probability
+  blocks. Dynamic `_assemble()` slots each mechanism in front of
+  `Analysis Lens:` at import time based on flag state. Baseline bit
+  identical to pre-rewrite when all flags off.
+- **Session 40 (analytics tagging):** `AgentVerdict.prompt_flags:
+  dict[str, bool]` (sparse — only ON flags stored) + module-level
+  helper `models.phase1_flag_label(flags)` mapping to stable keys
+  `"v1"` / `"v2:<sorted csv>"`. `personas.flags_for_agent(agent_key)`
+  returns per-agent snapshot frozen at module import. Council
+  populates `prompt_flags` at verdict construction.
+  `analytics_sql.py` verdicts view gains `prompt_flags` and derived
+  `flag_label` columns for `GROUP BY flag_label` analytics. Backfill
+  script `scripts/backfill_prompt_flags.py` tagged 437 rows /
+  2871 verdicts with `{}` (`.prePhase1.bak` saved; idempotent on
+  re-run).
 
 **In-progress:** *nothing*
 
-**Next action:** Begin Task 1.1 — draft the new SHARED_PREAMBLE section
-(Mechanism 1) + the persona anchor additions (Mechanism 2) + the Bear
-probability-after-advocacy sequence (Mechanism 3). **Do not commit the
-rewrite until the owner reviews.** Check current total preamble +
-persona prompt token count; target per-agent prompt below ~1500
-tokens for prompt-cache efficiency per session 27.
+**Next action:** Begin the rollout sequence. Rollout is NOT cumulative
+— each stage is an independent A/B experiment against the 2026-04-18
+reliability baseline (`~/.pqi/reports/reliability_20260418.md`). Every
+verdict is now tagged with the flag set in force, so `pqi query
+"SELECT flag_label, ... FROM verdicts WHERE ..."` will cleanly split
+v1 vs v2 populations for delta measurement.
 
-Before running task 1.2 (live rollout), reset
-`~/.pqi/agent_weights.json` so post-rewrite weights don't inherit
-pre-rewrite Bear miscalibration.
+Rollout order (independent flags, not cumulative):
+
+1. **Preamble alone:** `PERSONA_V2_PREAMBLE=true` — measure mirror
+   collapse delta (criterion 2).
+2. **Each anchor alone:** Statistician → Sentiment → Specialist →
+   Contrarian. Expect marginal cluster-diversity delta (criterion 1).
+3. **Bear alone** (Bull unchanged): `PERSONA_V2_BEAR_ADVOCACY=true`.
+   Highest-leverage single flag per retro §5.3. **Reset
+   `~/.pqi/agent_weights.json` before this stage** per Task 1.2
+   workflow — pre-rewrite weights absorb Bear miscalibration.
+4. **Bull alone** (Bear reverted): `PERSONA_V2_BULL_ADVOCACY=true`.
+   Symmetric test; prevents the Bull case from remaining unvalidated.
+5. **Both** if evidence supports. Only after 3 and 4 show no
+   regressions in their independent runs.
+
+Re-run `python -m scripts.reliability_diagram` after every stage.
+Compare per-agent Brier / cluster diagonal / council Brier against
+the baseline.
 
 **Notes for next session:**
 
 - Re-read `docs/option_b_migration_plan.md` §7 for the exact
-  pre-registered criteria — don't reinvent them.
-- Check current SHARED_PREAMBLE length before adding; keep total
-  preamble under ~1500 tokens if possible for prompt-cache
-  efficiency (session 27 caching pays for itself best when the
-  cached prefix is stable).
-- Option B already has a `probability_source` field on
-  `AgentVerdict` — new-preamble runs should tag verdicts (e.g.
-  `"option_b_v2"`) so Phase 0 analytics can cleanly separate
-  pre/post distributions.
-- If starting this phase in parallel with Phase 0, do Task 1.1
-  first (pure text change, no analytics dependency); defer Task 1.3
-  until DuckDB is available.
+  pre-registered criteria — don't reinvent them. Step 5 still blocks
+  on all four Phase 1 criteria passing simultaneously.
+- Preamble is now ~3.7kB in raw literal form (V2). Prompt caching
+  (session 27) absorbs the cost — first call warms the cache, rest
+  of the 5-min TTL window bills at ~10%. Per-run added cost with all
+  flags on: ~$0.002.
+- `AgentVerdict` now carries BOTH `probability_source` (Option B
+  mirror vs independent) AND `prompt_flags` (Phase 1 config
+  snapshot). Analytics that want to intersect both — e.g. "autonomous
+  per-side probabilities under v2:bear_advocacy" — filter on
+  `v.probability_source = 'independent' AND flag_label = 'v2:…'`.
+- Starting Phase 1 in parallel with Phase 2b remains viable; the
+  scaffold touches `agents/personas.py` + analytics tagging, while
+  Phase 2b reads `~/.pqi/history.jsonl` + CLOB sidecar.

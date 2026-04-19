@@ -373,47 +373,44 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 39 — Phase 0 closed; Phase 1 doc acceptance
-criteria unified; Phase 2 split into 2a/2b/2c; CTO_Agent.md gains capacity
-axis + recent-window skepticism; advisor positioning reconciled with Tier A
-intent (all doc-only).
+**Last updated:** session 40 — Phase 1 Task 1.1 scaffold + analytics
+tagging landed. Seven `PERSONA_V2_*` flags (all default OFF) plus dual
+`SHARED_PREAMBLE` variants, four persona anchors, and Bull/Bear
+advocacy-then-probability blocks ship dynamically via `agents/personas.py`
+`_assemble()`. Baseline AGENT_PERSONAS is bit-identical to the
+pre-rewrite text when all flags off. Every verdict now carries
+`AgentVerdict.prompt_flags: dict[str, bool]` (sparse — ON flags only)
+with a `phase1_flag_label()` helper (`"v1"` / `"v2:<sorted csv>"`)
+surfaced as a derived `flag_label` column on the DuckDB `verdicts` view.
+`scripts/backfill_prompt_flags.py` tagged 437 existing history rows /
+2871 verdicts with `{}`; `.prePhase1.bak` preserved. **No rollout yet**
+— all flags remain off; next session begins the independent A/B stages
+(preamble → anchors → bear-alone → bull-alone → both if evidence supports).
 
-Task 0.5 synthesis retrospective at
-[`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md)
-extended with executive summary, CLV, reliability-diagram, verdict, and
-recommended next actions. **Verdict: inconclusive at current n (65 resolved
-BUYs / 385 reliability rows).** The three measurement streams align on
-"mild positive prediction edge (council Brier 0.2176 beats the 0.25 chance
-baseline by ~3pp), mild negative entry timing (mean CLV −0.0167 on n=44),
-no actionable gate miscalibration (no band clears ≥1 Wilson-CI-width flag)."
-Realized April PnL marginal at −0.575/share on 65 BUYs.
+Phase 0 verdict still stands: inconclusive at current n (65 resolved
+BUYs / 385 reliability rows). Council Brier 0.2176 beats 0.25 chance
+baseline by ~3pp; mean pre-event CLV −0.0167 on n=44; no band clears ≥1
+Wilson-CI-width flag. Realized April PnL −0.575/share. Full retrospective:
+[`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md).
 
-**Highest-leverage next move: Phase 1 (SHARED_PREAMBLE autonomy rewrite).**
-Cluster-level mirror collapse is the key finding — 5 of 7 agents
-(rules_lawyer, statistician, sentiment, specialist, contrarian) are
-internally correlated at r 0.80–0.92; Bull weakly attached (~0.6); Bear
-structurally independent but the only agent with Brier above the 0.25
-chance baseline (0.2810). Gate knobs explicitly *not* retuned —
-`BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly
-multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
+**Highest-leverage next move: Phase 1 rollout stage 1** — turn on
+`PERSONA_V2_PREAMBLE` alone and re-run
+`python -m scripts.reliability_diagram` after ~10–20 fresh analyses.
+Gate knobs explicitly *not* retuned — `BAND_SHRINKAGE_K=5`,
+`MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly multiplier,
+`MIN_WIN_RATE_SAMPLES` all stand.
 
-Session 39 patched `docs/phases/phase_1_signal_quality.md` (external
-review v2 drop-in): Goals unified from per-agent drift only to a
-**four-criterion acceptance** (cluster-pair r ≥ 0.85 fraction below
-0.50; per-agent `|drift|` > 0.10 on ≥2 agents; Bear Brier toward 0.22
-with independence preserved; council Brier holds or improves from
-0.2176). All four must pass simultaneously to unblock Option B step 5.
-Task 1.1 Proposed approach extended from one mechanism to three
-(asymmetric evidence on SHARED_PREAMBLE, persona-specific anchoring
-per-persona body, Bear probability-after-advocacy sequence). No code,
-no aggregator, no knob changes; prompt drafting pending owner review.
+Four-criterion acceptance (all must pass simultaneously vs the
+2026-04-18 baseline): cluster-pair r ≥ 0.85 fraction below 0.50;
+per-agent `|drift|` > 0.10 on ≥2 agents; Bear Brier toward 0.22 with
+independence preserved; council Brier holds or improves from 0.2176.
 
-Phase 2 split into three sub-phases in session 39: Phase 2a (Tier A
+Phase 2 split into three sub-phases (session 39): Phase 2a (Tier A
 auto-BUY, gated on P1), Phase 2b (MFE analysis, parallel-able with P1),
-Phase 2c (MFE listener prototype, gated on P2b verdict = "chase").
-Phase 3 (deployment portability) deferred — verdict was inconclusive,
-not positive. Detailed priorities, acceptance criteria, and monitoring
-tasks live in [`NEXT_SESSION_PROMPT.md`](NEXT_SESSION_PROMPT.md).
+Phase 2c (MFE listener, gated on P2b verdict = "chase"). Phase 3
+(deployment portability) deferred — P0 verdict inconclusive, not
+positive. Detailed priorities, acceptance criteria, and monitoring tasks
+live in [`NEXT_SESSION_PROMPT.md`](NEXT_SESSION_PROMPT.md).
 
 ### Phase status
 
@@ -437,8 +434,11 @@ EV gate's threshold became band-specific and Kelly was realigned to the
 banded rate. Session 32 retuned one gate knob and reworded a user-facing
 string, but kept the aggregator math identical. Sessions 34–39 were
 read-only analytics / measurement / synthesis / documentation with no
-pipeline or aggregator touch (session 39 was a doc-only Phase 1 patch).
-See `docs/session-log.md` for per-session detail.
+pipeline or aggregator touch. Session 40 added Phase 1 rollout scaffold
+(prompt assembly, flags, analytics tagging on `AgentVerdict`) with zero
+aggregator changes — scoring still reads `probability` + the two
+`confidence_*` fields exactly as before. See `docs/session-log.md` for
+per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit

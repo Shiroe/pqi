@@ -4,9 +4,13 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 39 (2026-04-19) — Phase 1 doc acceptance
-criteria unified; Phase 2 split 2a/2b/2c; CTO_Agent.md +capacity/recent-window;
-CLAUDE.md Tier A/B reconciliation; haiku model name fix (all doc-only, no code).
+**Last rewritten:** session 40 (2026-04-19) — Phase 1 Task 1.1 scaffold
+(7 `PERSONA_V2_*` flags, dual SHARED_PREAMBLE, anchor + advocacy
+snippets, all default OFF) + analytics tagging (`AgentVerdict.prompt_flags`
+sparse storage, `flag_label` derived column in DuckDB verdicts view,
+one-shot history backfill — 437 rows / 2871 verdicts tagged `{}`).
+Baseline AGENT_PERSONAS bit-identical to pre-rewrite; zero aggregator
+changes.
 
 ---
 
@@ -36,7 +40,7 @@ edge, architectural judgment, plus the original code-review stance).
 - `docs/analytics_queries.md` — starter queries for `pqi query` (Q4 uses winning_side semantics)
 - `docs/api-reference.md` — API endpoints, params, response formats (incl. PandaScore)
 - `docs/known-issues.md` — API quirks, edge cases, env setup, persisted state files
-- `docs/session-log.md` — per-session changelog (current through session 39)
+- `docs/session-log.md` — per-session changelog (current through session 40)
 - `docs/roadmap.md` — themed catalog (A/B/C); phase section indexes phases
 - `docs/option_b_migration_plan.md` — full Option B rollout plan (steps 1–4 shipped; step 5 blocked on P1 signal quality)
 - `docs/models-reference.md` — detailed Pydantic class signatures (extracted from CLAUDE.md)
@@ -44,9 +48,9 @@ edge, architectural judgment, plus the original code-review stance).
 
 ---
 
-## PRIORITY — Phase 1: Signal Quality Fix (Option B autonomy)
+## PRIORITY — Phase 1 rollout (independent flag stages)
 
-Default entry point: `docs/phases/phase_1_signal_quality.md`.
+Default entry point: `docs/phases/phase_1_signal_quality.md` §Session state.
 
 Phase 0 closed session 38 with verdict **inconclusive at current n**, but the
 retrospective (§5.3) identified cluster-level mirror collapse as the single
@@ -59,27 +63,50 @@ absorbed by (a) the correlated cluster limiting effective diversity, (b)
 Bear's miscalibration dragging aggregate accuracy, (c) mean pre-event CLV
 −0.0167 on entry timing.
 
-### Task 1.1 — SHARED_PREAMBLE autonomy rewrite (three mechanisms)
+### Session 40 shipped the scaffold — rollout is the next action
 
-Details in the phase doc (`docs/phases/phase_1_signal_quality.md` §Task 1.1).
-Session 39 unified the approach to three complementary mechanisms:
+- **7 `PERSONA_V2_*` flags** in `config.py` / `.env.example`, all
+  default `false`: `PREAMBLE`, `ANCHOR_STATISTICIAN`,
+  `ANCHOR_SENTIMENT`, `ANCHOR_SPECIALIST`, `ANCHOR_CONTRARIAN`,
+  `BULL_ADVOCACY`, `BEAR_ADVOCACY`.
+- **Dual preamble** in `pqi/agents/personas.py` (`_SHARED_PREAMBLE_V1`
+  verbatim prior preamble; `_SHARED_PREAMBLE_V2` asymmetric-evidence
+  rewrite ~3.7kB). Four inline anchor snippets + two advocacy
+  snippets. `_assemble(agent_key)` slots them in front of `Analysis
+  Lens:` at import time based on flag state. Rules Lawyer is the only
+  persona that *never* gets an anchor or advocacy snippet — only the
+  preamble flag ever applies to it.
+- **Analytics tagging** on every verdict: `AgentVerdict.prompt_flags`
+  (sparse dict, empty ⇔ v1), `phase1_flag_label()` module helper, and
+  a derived `flag_label` column on the DuckDB `verdicts` view
+  (`"v1"` / `"v2:<sorted csv>"`). `scripts/backfill_prompt_flags.py`
+  tagged all 437 existing rows / 2871 verdicts with `{}` — so any
+  post-rollout `GROUP BY flag_label` split is clean on day one.
 
-- **Mechanism 1 — asymmetric evidence on SHARED_PREAMBLE** (targets
-  mirror collapse). Worked examples of asymmetric evidence depth +
-  forced evidence-quality pre-step + explicit anti-mirror warning.
-- **Mechanism 2 — persona-specific evidence anchoring per-persona
-  body** (targets cluster collapse). Each of Statistician, Specialist,
-  Sentiment, Contrarian must cite a persona-specific anchor
-  (base-rate / game-mechanics / crowd-signal / disruption-vector
-  respectively) before emitting probability. Rules Lawyer already
-  anchored via `resolution_criteria` injection. **Owner note: specific
-  anchors in the phase doc are first-draft suggestions, not settled —
-  concept is load-bearing, exact content iterates during prompt
-  drafting.**
-- **Mechanism 3 — Bear probability-after-advocacy** (targets Bear
-  calibration, +0.128 gap on [0.09, 0.50)). Force explicit sequence in
-  Bear prompt body: construct advocacy → step outside advocacy role →
-  emit honest probability. Optionally symmetric on Bull.
+Baseline equivalence: with every flag off, `AGENT_PERSONAS` is
+bit-identical to pre-rewrite. The aggregator is untouched.
+
+### Rollout order (each stage is an INDEPENDENT A/B, not cumulative)
+
+Between stages, flip the prior stage's flag OFF unless explicitly
+combining. Re-run `python -m scripts.reliability_diagram` after each
+stage and compare against the 2026-04-18 baseline
+(`~/.pqi/reports/reliability_20260418.md`). The analytics tagging
+means every verdict during a stage is stamped with the exact flag set
+used, so populations can be compared via `pqi query "SELECT flag_label,
+... FROM verdicts WHERE ... GROUP BY flag_label"`.
+
+1. **Preamble alone** — `PERSONA_V2_PREAMBLE=true`. Measures mirror
+   collapse delta (criterion 2).
+2. **Each anchor alone** — Statistician → Sentiment → Specialist →
+   Contrarian. Expect marginal cluster-diversity delta (criterion 1).
+3. **Bear alone** (Bull unchanged) — `PERSONA_V2_BEAR_ADVOCACY=true`.
+   Highest-leverage single flag per retro §5.3. **Reset
+   `~/.pqi/agent_weights.json` before this stage** per Task 1.2
+   workflow — pre-rewrite weights absorb Bear miscalibration.
+4. **Bull alone** (Bear reverted) — `PERSONA_V2_BULL_ADVOCACY=true`.
+   Symmetric test; prevents the Bull case from remaining unvalidated.
+5. **Both** if stages 3 and 4 each show no regression independently.
 
 Guard rails:
 
@@ -87,11 +114,13 @@ Guard rails:
   independence. The failure mode is "rewrite flattens all 7 agents
   toward one voice" — that would push council Brier upward
   (regression).
-- Keep the preamble under ~1500 tokens for prompt-cache efficiency
-  (session 27).
-- **Reset `~/.pqi/agent_weights.json` before Task 1.2 live rollout**
-  (per patched Task 1.2 workflow) — pre-rewrite weights partly absorb
-  Bear miscalibration.
+- Preamble is ~3.7kB in raw literal form (V2); prompt caching
+  (session 27) absorbs the cost — first call warms the cache, rest
+  of the 5-min TTL window bills at ~10%. Per-run added cost with all
+  flags on: ~$0.002.
+- **Do not edit the aggregator** (`scoring.py` / `stats.py`) during
+  rollout. Phase 0 §7.2 freeze stands. Aggregator changes require
+  explicit sign-off per `CTO_Agent.md` §4.
 
 ### Four unified acceptance criteria (Option B step 5 unblock)
 
@@ -193,13 +222,17 @@ they bite you.
 
 ## Instructions
 
-- Default to Phase 1 Task 1.1 (SHARED_PREAMBLE autonomy rewrite) unless the
-  user redirects. Start with a draft of the new preamble section — **do not
-  commit the rewrite until the user reviews it.** Prompt-level work is
-  cheap; prompt-level regressions are not.
+- Default to Phase 1 rollout stage 1 (`PERSONA_V2_PREAMBLE=true`)
+  unless the user redirects. Session 40 landed the scaffold — the
+  drafted V2 preamble is already in `pqi/agents/personas.py` as
+  `_SHARED_PREAMBLE_V2`. Before flipping the flag, **re-read the V2
+  preamble and confirm with the user** that the wording is right for
+  live measurement. Prompt-level regressions are cheap to revert
+  (flip the flag back) but pollute the tagged population.
 - Measure delta with `python -m scripts.reliability_diagram` after every
-  change. Compare against the 2026-04-18 baseline in
-  `~/.pqi/reports/reliability_20260418.md`.
+  stage. Compare against the 2026-04-18 baseline in
+  `~/.pqi/reports/reliability_20260418.md`. Analytics splits use
+  `pqi query "SELECT flag_label, ... FROM verdicts GROUP BY flag_label"`.
 - When reaching for history analytics, use `pqi query "<SQL>"` on the
   `history` / `verdicts` / `clv_by_row` views before writing a fresh Python
   script. See `docs/analytics_queries.md` for patterns. For CLV: `python -m

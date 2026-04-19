@@ -4,6 +4,138 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 40 — Phase 1 Task 1.1 scaffold + analytics tagging
+
+First code-touching session since session 32. Ships the Phase 1
+rollout **scaffold** and **analytics tagging** — enough plumbing to
+flip the four prompt mechanisms on independently and cleanly split
+v1 vs v2 populations in history analytics. **Zero prompts in force
+yet.** With every new flag default OFF, `AGENT_PERSONAS` is
+bit-identical to pre-rewrite; the aggregator (`scoring.py` /
+`stats.py`) is untouched.
+
+### Part A — Rollout scaffold (prompt assembly + config flags)
+
+- Seven flags added to `config.py` + `.env.example`, all default `false`:
+  - `PERSONA_V2_PREAMBLE` — asymmetric-evidence SHARED_PREAMBLE (Mech 1)
+  - `PERSONA_V2_ANCHOR_STATISTICIAN` / `_SENTIMENT` / `_SPECIALIST` /
+    `_CONTRARIAN` — persona-specific anchors (Mech 2)
+  - `PERSONA_V2_BULL_ADVOCACY` / `_BEAR_ADVOCACY` —
+    advocacy-then-probability sequence (Mech 3)
+- `pqi/agents/personas.py` rewritten:
+  - Dual `_SHARED_PREAMBLE_V1` (verbatim prior preamble) and
+    `_SHARED_PREAMBLE_V2` (asymmetric-evidence rewrite, ~3.7kB).
+  - Four inline anchor snippets (statistician / sentiment / specialist
+    / contrarian) in a `_ANCHORS` dict.
+  - Two advocacy-sequence snippets (`_BULL_ADVOCACY_BLOCK` /
+    `_BEAR_ADVOCACY_BLOCK`).
+  - `_assemble(agent_key) -> str` injects selected snippets in front
+    of the persona body's `Analysis Lens:` line based on flag state.
+    `AGENT_PERSONAS` is computed once at module import.
+- **Rules Lawyer exclusion preserved.** Rules Lawyer receives only
+  `PERSONA_V2_PREAMBLE` when on — no anchor, no advocacy — matching
+  its resolution-criteria-only discipline.
+- Rationale: flags frozen at import time means flag/prompt drift is
+  impossible even if `config` mutates mid-process. Baseline
+  equivalence proven by assertion in `models.py` smoke test.
+
+### Part B — Analytics tagging
+
+Every verdict gets tagged with the exact flag set that was in force
+when it was emitted, so `GROUP BY flag_label` cleanly splits v1 vs
+v2 populations without re-running experiments.
+
+- **`AgentVerdict.prompt_flags: dict[str, bool]`** added (sparse — only
+  ON flags stored; empty dict ⇔ baseline / v1). Storage choice keeps
+  JSONL file size unchanged for baseline rollouts.
+- **`models.phase1_flag_label(prompt_flags)`** — module-level helper
+  returning stable keys:
+  - `{}` → `"v1"`
+  - `{"preamble": True, "bear_advocacy": True}` →
+    `"v2:bear_advocacy,preamble"` (sorted csv, stable join
+    irrespective of dict iteration order).
+- **`personas.flags_for_agent(agent_key)`** — returns the per-agent
+  snapshot based on frozen `_PREAMBLE_FLAG` + `_AGENT_FLAG_SHORTCODES`
+  dict. Rules Lawyer returns `{"preamble": True}` at most; Bull/Bear
+  add their `*_advocacy` flag; the other four add their anchor.
+- **`agents/council.py`** populates `prompt_flags` at
+  `AgentVerdict(...)` construction.
+- **`history.py` `_backfill_per_side_probability`** extended to
+  default-fill `prompt_flags: {}` in-memory so fresh loads of
+  un-backfilled files don't explode in the persistence layer.
+- **`analytics_sql.py` verdicts view** restructured using a `WITH
+  unnested AS (...)` CTE:
+  ```sql
+  SELECT *,
+      v.prompt_flags AS prompt_flags,
+      CASE
+          WHEN v.prompt_flags IS NULL
+            OR len(map_keys(v.prompt_flags)) = 0
+          THEN 'v1'
+          ELSE 'v2:' || array_to_string(
+              list_sort(map_keys(v.prompt_flags)), ',')
+      END AS flag_label
+  FROM unnested
+  ```
+  DuckDB maps `dict[str, bool]` to `MAP<VARCHAR, JSON>`. Derived
+  `flag_label` mirrors the Python helper exactly.
+- **`scripts/backfill_prompt_flags.py`** (new, zero API calls,
+  atomic `tmp + os.replace`, `.prePhase1.bak` sibling on first
+  mutation, idempotent on re-run). Executed once in-session:
+  **437 rows / 2871 verdicts tagged with `{}`**. All existing
+  history now carries `flag_label = 'v1'`.
+
+### Files modified
+
+- `pqi/config.py` — 7 `PERSONA_V2_*` flag lines.
+- `.env.example` — 7 `PERSONA_V2_*` lines with plain-English
+  comments per configuration rule.
+- `pqi/agents/personas.py` — dual preamble, anchor dict, advocacy
+  blocks, `_assemble()`, `_PREAMBLE_FLAG`, `_AGENT_FLAG_SHORTCODES`,
+  `flags_for_agent()`.
+- `pqi/models.py` — `AgentVerdict.prompt_flags` field + module-level
+  `phase1_flag_label()` + smoke-test assertions.
+- `pqi/agents/council.py` — `flags_for_agent` import + `prompt_flags`
+  in `_parse_verdict` kwargs.
+- `pqi/history.py` — `_backfill_per_side_probability` extended to
+  also fill `prompt_flags: {}`.
+- `pqi/analytics_sql.py` — verdicts view rewritten with CTE +
+  `prompt_flags` + derived `flag_label`. Module docstring updated
+  to document both columns.
+- `scripts/backfill_prompt_flags.py` — new.
+- `docs/phases/phase_1_signal_quality.md` — Session state rewritten
+  with scaffold + analytics tagging bullets and 5-stage
+  independent rollout order.
+- `CLAUDE.md` — `## Current State` session pointer bumped; scaffold
+  + analytics tagging summarised; Aggregator stability section
+  notes "Session 40 added Phase 1 rollout scaffold ... with zero
+  aggregator changes".
+- `NEXT_SESSION_PROMPT.md` — `Last rewritten` updated; priority
+  section reworked around the 5-stage independent rollout.
+- `docs/session-log.md` — this entry.
+
+### Commits
+
+- `a39b45b` session 40: phase 1 analytics tagging — prompt_flags on
+  every verdict.
+- (scaffold commit earlier in session — `models.py` /
+  `agents/personas.py` / `agents/council.py` / `config.py` /
+  `.env.example`)
+
+### Not touched
+
+- `pqi/scoring.py`, `pqi/stats.py`, `pqi/agent_weights.py`,
+  `~/.pqi/agent_weights.json`. Aggregator math stable since
+  sessions 31–32; Phase 0 §7.2 freeze preserved.
+- Backtest pipeline, `scripts/reliability_diagram.py`,
+  `scripts/backfill_clv.py`. All existing analytics continue to
+  read the same fields plus now see `prompt_flags` / `flag_label`
+  as additions.
+- None of the V2 prompt mechanisms exercised on a live run. The
+  rollout measurement happens in the next session.
+
+---
+
 ## Session 39 — Phase 1 acceptance unified; Phase 2 split; CTO + CLAUDE alignments
 
 Documentation-only session. Two-part: (a) applied the
