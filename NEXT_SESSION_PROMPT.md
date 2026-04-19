@@ -4,7 +4,9 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 38 (2026-04-19) — Phase 0 closed, Phase 1 is next.
+**Last rewritten:** session 39 (2026-04-19) — Phase 1 doc acceptance
+criteria unified; Phase 2 split 2a/2b/2c; CTO_Agent.md +capacity/recent-window;
+CLAUDE.md Tier A/B reconciliation; haiku model name fix (all doc-only, no code).
 
 ---
 
@@ -25,14 +27,16 @@ edge, architectural judgment, plus the original code-review stance).
 - `docs/phases/README.md` — phase index, dependency graph, status table
 - `docs/phases/phase_0_edge_validation.md` — **done** (see retrospective)
 - `docs/phases/phase_1_signal_quality.md` — **active** (Option B autonomy fix — highest leverage per P0 verdict)
-- `docs/phases/phase_2_execution_edge.md` — MFE scoping unblocked (parallel with P1); listener deferred
+- `docs/phases/phase_2a_tier_a_auto_buy.md` — Tier A auto-BUY; blocked on Phase 1 unified acceptance
+- `docs/phases/phase_2b_mfe_analysis.md` — MFE analysis with chronological train/test (parallel-able with P1)
+- `docs/phases/phase_2c_mfe_listener.md` — MFE listener prototype; gated on P2b verdict = "chase"
 - `docs/phases/phase_3_deployment_portability.md` — deferred (P0 inconclusive, not positive)
 - `docs/phases/phase_4_scaling_triggers.md` — reactive only
 - `docs/retrospectives/phase_0_edge_2026_04.md` — **Phase 0 closed** — executive summary §0, per-band §1–§3, CLV §4, reliability §5, verdict §6, next actions §7
 - `docs/analytics_queries.md` — starter queries for `pqi query` (Q4 uses winning_side semantics)
 - `docs/api-reference.md` — API endpoints, params, response formats (incl. PandaScore)
 - `docs/known-issues.md` — API quirks, edge cases, env setup, persisted state files
-- `docs/session-log.md` — per-session changelog (current through session 38)
+- `docs/session-log.md` — per-session changelog (current through session 39)
 - `docs/roadmap.md` — themed catalog (A/B/C); phase section indexes phases
 - `docs/option_b_migration_plan.md` — full Option B rollout plan (steps 1–4 shipped; step 5 blocked on P1 signal quality)
 - `docs/models-reference.md` — detailed Pydantic class signatures (extracted from CLAUDE.md)
@@ -55,40 +59,68 @@ absorbed by (a) the correlated cluster limiting effective diversity, (b)
 Bear's miscalibration dragging aggregate accuracy, (c) mean pre-event CLV
 −0.0167 on entry timing.
 
-### Task 1.1 — SHARED_PREAMBLE autonomy rewrite
+### Task 1.1 — SHARED_PREAMBLE autonomy rewrite (three mechanisms)
 
 Details in the phase doc (`docs/phases/phase_1_signal_quality.md` §Task 1.1).
-Key scope:
+Session 39 unified the approach to three complementary mechanisms:
 
-- Current SHARED_PREAMBLE allows agents to shortcut to `P(NO) = 1 − P(YES)`
-  because the YES/NO-autonomy framing is not structurally reinforced with
-  evidence-quality asymmetry. The Phase 1 doc proposes worked examples + a
-  forced evidence-quality pre-step + an explicit anti-mirror warning.
-- Preserve Bull's partial independence and Bear's structural independence.
-  The failure mode is "rewrite flattens all 7 agents toward one voice" —
-  that would push council Brier upward (regression).
+- **Mechanism 1 — asymmetric evidence on SHARED_PREAMBLE** (targets
+  mirror collapse). Worked examples of asymmetric evidence depth +
+  forced evidence-quality pre-step + explicit anti-mirror warning.
+- **Mechanism 2 — persona-specific evidence anchoring per-persona
+  body** (targets cluster collapse). Each of Statistician, Specialist,
+  Sentiment, Contrarian must cite a persona-specific anchor
+  (base-rate / game-mechanics / crowd-signal / disruption-vector
+  respectively) before emitting probability. Rules Lawyer already
+  anchored via `resolution_criteria` injection. **Owner note: specific
+  anchors in the phase doc are first-draft suggestions, not settled —
+  concept is load-bearing, exact content iterates during prompt
+  drafting.**
+- **Mechanism 3 — Bear probability-after-advocacy** (targets Bear
+  calibration, +0.128 gap on [0.09, 0.50)). Force explicit sequence in
+  Bear prompt body: construct advocacy → step outside advocacy role →
+  emit honest probability. Optionally symmetric on Bull.
+
+Guard rails:
+
+- Preserve Bull's partial independence and Bear's structural
+  independence. The failure mode is "rewrite flattens all 7 agents
+  toward one voice" — that would push council Brier upward
+  (regression).
 - Keep the preamble under ~1500 tokens for prompt-cache efficiency
   (session 27).
+- **Reset `~/.pqi/agent_weights.json` before Task 1.2 live rollout**
+  (per patched Task 1.2 workflow) — pre-rewrite weights partly absorb
+  Bear miscalibration.
 
-### Three measurable post-rewrite checks (unblock criteria for Option B step 5 backtest)
+### Four unified acceptance criteria (Option B step 5 unblock)
 
-- (a) Cluster-pair fraction at r ≥ 0.85 drops below 0.50 (current 9/21 = 43%;
-  close, but Bull and Bear already sit outside the cluster — the lever is
-  destabilising the 5-agent cluster).
-- (b) Bear Brier falls toward the 0.22 cluster without losing Bear's
-  independence (Bear pairwise r with others stays well below 0.85).
-- (c) Council Brier holds or improves from 0.2176.
+All four must pass **simultaneously** on the post-rewrite reliability
+diagram vs the 2026-04-18 baseline (`~/.pqi/reports/reliability_20260418.md`):
+
+- **(1)** Cluster-pair fraction at r ≥ 0.85 drops below 0.50 (current
+  9/21 = 43%; close, but Bull and Bear already sit outside the
+  cluster — the lever is destabilising the 5-agent cluster).
+- **(2)** Per-agent `|drift|` > 0.10 on at least 2 agents (YES/NO
+  autonomy; original Phase 1 criterion preserved).
+- **(3)** Bear Brier falls toward the 0.22 cluster floor **without**
+  losing Bear's independence (Bear pairwise r with others stays
+  below ~0.50).
+- **(4)** Council Brier holds or improves from 0.2176 (aggregate
+  regression guard).
 
 Re-run `python -m scripts.reliability_diagram` after every prompt change.
 The report is UTC-dated — iteration history is preserved automatically.
 
 ### Parallelisable alongside P1
 
-Phase 2 MFE analysis (`docs/phases/phase_2_execution_edge.md`). This is the
+Phase 2b MFE analysis (`docs/phases/phase_2b_mfe_analysis.md`). This is the
 third CTO-§5 edge metric (max favourable excursion) — a DuckDB + CLOB-history
-query analogous to Task 0.2. Produces the full edge triangulation
-(prediction / entry / exit) without infrastructure investment. P2 listener /
-auto-trader stays deferred until P1 produces measurable Brier improvement.
+query analogous to Task 0.2, now with chronological train/test promoted to
+task requirement (external review v2 §5.3). Produces the full edge
+triangulation (prediction / entry / exit) without infrastructure investment.
+Phase 2a (Tier A auto-BUY) stays blocked on Phase 1 unified acceptance;
+Phase 2c (MFE listener) stays gated on Phase 2b verdict = "chase".
 
 ---
 
@@ -151,9 +183,11 @@ These stay open through Phase 1. Pick up if the signal appears organically.
 
 Theme A items (A.1 Option B, A.4 Bear monitoring, A.7 confidence floor, A.8
 Bull audit, A.10 dynamic-weight loop monitoring) all feed Phase 1 work.
-Theme B items (B.1 TUI, B.3–B.6 trading) become Phase 2 deliverables once P1
-shows Brier improvement. Theme C items are isolated QoL — pick any between
-phases if they bite you.
+Theme B items split across 2a/2b/2c: B.3–B.5 (auth, read/trade client,
+Kelly buy) ship with Phase 2a; B.1 TUI is adjacent to the 2c listener;
+B.6 match watcher + sell-side stack activates only after 2c verdicts
+"automate." Theme C items are isolated QoL — pick any between phases if
+they bite you.
 
 ---
 

@@ -58,7 +58,9 @@ priorities in `docs/scaling_assessment.md`.
 | --- | --- | --- | --- |
 | Phase 0 | **active** | Edge validation via DuckDB analytics, CLV backfill, reliability diagrams, per-band calibration | [`phases/phase_0_edge_validation.md`](phases/phase_0_edge_validation.md) |
 | Phase 1 | parallel-able with P0 | Signal quality: fix Option B mirror-collapse via SHARED_PREAMBLE autonomy rewrite, then conditional backtest | [`phases/phase_1_signal_quality.md`](phases/phase_1_signal_quality.md) |
-| Phase 2 | blocked on P0 | Execution edge: retroactive MFE analysis, read-only listener prototype | [`phases/phase_2_execution_edge.md`](phases/phase_2_execution_edge.md) |
+| Phase 2a | blocked on P1 unified acceptance | Tier A auto-BUY (auto-BUY-and-hold): `pqi buy <market_id>`, Kelly-sized stake, drift-abort, idempotency, fills.jsonl | [`phases/phase_2a_tier_a_auto_buy.md`](phases/phase_2a_tier_a_auto_buy.md) |
+| Phase 2b | MFE scoping unblocked (parallel-able with P1) | Retroactive MFE analysis with chronological train/test; verdict chase/park/iterate | [`phases/phase_2b_mfe_analysis.md`](phases/phase_2b_mfe_analysis.md) |
+| Phase 2c | deferred (gated on P2b verdict = "chase") | MFE listener prototype (read-only) + manual review loop; decides Tier B automation | [`phases/phase_2c_mfe_listener.md`](phases/phase_2c_mfe_listener.md) |
 | Phase 3 | blocked on P0 verdict | Deployment portability: single-container VPS deploy | [`phases/phase_3_deployment_portability.md`](phases/phase_3_deployment_portability.md) |
 | Phase 4 | reactive | Scaling triggers: Postgres / Redis / microservices / cloud, each activated only by a measured threshold crossing | [`phases/phase_4_scaling_triggers.md`](phases/phase_4_scaling_triggers.md) |
 
@@ -72,8 +74,9 @@ usable):
 | A.4 Bear monitoring, A.7 confidence floor, A.8 Bull audit | Phase 0 task 0.5 (retrospective feeds these) |
 | A.5 EV gate tuning (per-band) | Phase 0 task 0.4 (per-band calibration) |
 | A.10 dynamic-weight monitoring | Phase 0 ongoing, formalized in P0 task 0.1 dashboards |
-| B.1 streaming TUI | Phase 2 task 2.2 (read-only listener is the first slice) |
-| B.3-B.6 trading integration | Phase 2 tasks 2.3-2.4 (manual review loop before any write calls) |
+| B.1 streaming TUI | Phase 2c (listener is first always-on process; TUI is adjacent deliverable) |
+| B.3-B.5 trading integration (auth, CLOB trade client, Kelly buy) | Phase 2a (Tier A auto-BUY is the delivery vehicle) |
+| B.6 match watcher + sell-side stop-loss | Phase 2c → Tier B only after listener verdict = "automate" |
 | C.1-C.6 ops items | Phase 3 absorbs C.6 (concurrent-write lockfile); others stay as isolated QoL work |
 
 See [`phases/README.md`](phases/README.md) for the phase doc template

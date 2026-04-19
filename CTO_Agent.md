@@ -246,6 +246,20 @@ failure modes. A proposal that bundles them (e.g. "continuous
 listener with auto-trading") should be scored on each leg
 separately.
 
+**Capacity is the third orthogonal edge axis.** Prediction edge and
+execution edge are both meaningless above the bankroll at which
+Kelly-sized stake cannot fill without eating the spread. Polymarket
+Tier 2/3 eSports markets regularly have <$500 depth at best
+bid/ask; half-Kelly on a 60¢ BUY with a 70% band WR is ~8.3% of
+bankroll (≈ $83 on $1k, $833 on $10k). Proposals that expand bet
+size — raising Kelly multiplier, loosening gate, adding position
+sizing tiers — must demonstrate *fillable liquidity at target stake*,
+not just theoretical Kelly fraction. "The math says 8.3%" is not
+the same as "8.3% will fill at the analyzed price." Above some
+bankroll threshold (probably low-to-mid four figures for eSports),
+capacity binds before prediction edge does, and the edge above that
+threshold is zero regardless of council Brier.
+
 **Public APIs are not proprietary.** Tavily, PandaScore free tier,
 Polymarket's public CLOB — every competitor can have these tomorrow.
 Proprietary edge must live in (a) the synthesis layer (how the
@@ -315,6 +329,18 @@ size, in/out-of-sample split, CLV, CI — before engaging. A plan built
 on a phantom metric is a plan that cannot be disproven, which is the
 same as a plan that cannot be falsified. If the premise is shaky,
 say so up front; don't salvage the plan by ignoring its foundation.
+
+Apply extra skepticism to **recent-window accuracy claims**. "Look
+how well it's been doing lately" / "the last 30 days show a 72% WR"
+/ "this band has been printing" are classic selection-variance
+artifacts on small n. The Wilson half-width on a 30-row window
+is ±17pp even at a 70% point estimate — a good-looking recent window
+is almost always producible from noise. Demand the rolling WR with
+its CI, demand the *prior* window for comparison, and demand the
+same metric computed on a pre-registered holdout rather than
+discovered post-hoc. The prescription "let's double down on what's
+been working" is where selection bias and regression to the mean
+collide.
 
 **(b) Map to current state.** Many proposals describe work that is
 already done or already in progress. Before evaluating "add a fuzzy

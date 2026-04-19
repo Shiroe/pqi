@@ -4,6 +4,203 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 39 — Phase 1 acceptance unified; Phase 2 split; CTO + CLAUDE alignments
+
+Documentation-only session. Two-part: (a) applied the
+`phase_1_acceptance_criteria_patch.md` drop-in to reconcile the Phase 1
+doc's original Goals (per-agent drift only, pre-Phase-0) with Phase 0
+retrospective §5.3's cluster-collapse + Bear calibration findings;
+(b) following owner approval of the five external-review-v2 owner
+decisions, renumbered Phase 2 into 2a/2b/2c, added capacity + recent-
+window-skepticism to `CTO_Agent.md`, reconciled `CLAUDE.md` Project
+Mission with Tier A intent, and fixed the stale haiku model name in the
+tech stack table. No code, no aggregator touches, no knob retunes —
+Phase 0 §7.2 freeze preserved throughout.
+
+### Changes to `docs/phases/phase_1_signal_quality.md`
+
+- **Goals section replaced** with unified four-criterion acceptance
+  (patch §A):
+  1. Cluster-pair r ≥ 0.85 fraction below 0.50 (cross-agent diversity
+     — new, from retro §5.3).
+  2. Per-agent `|drift|` > 0.10 on ≥2 agents (YES/NO autonomy —
+     original Phase 1 criterion preserved).
+  3. Bear Brier toward 0.22 with Bear's pairwise r to others below
+     ~0.50 (calibration + independence — new).
+  4. Council Brier holds or improves from 0.2176 (aggregate regression
+     guard — new).
+  All four must pass simultaneously. Option B step 5 backtest unblock
+  condition updated to reference the four criteria.
+
+- **Task 1.1 Proposed approach extended** from one mechanism
+  (asymmetric evidence) to three (patch §B):
+  - Mechanism 1 — asymmetric evidence mechanics on SHARED_PREAMBLE
+    (targets mirror collapse).
+  - Mechanism 2 — persona-specific evidence anchoring per-persona
+    body (targets cluster collapse). Initial anchors for Statistician,
+    Specialist, Sentiment, Contrarian listed as *first-draft
+    suggestions, not settled* (owner note inline) — concept is load
+    bearing, exact anchor content to be iterated during prompt
+    drafting.
+  - Mechanism 3 — Bear probability-after-advocacy sequence, optionally
+    symmetric on Bull (targets Bear calibration).
+  - Acceptance criteria for Task 1.1 updated to match unified goals.
+
+- **Task 1.2 gains** explicit `~/.pqi/agent_weights.json` reset step
+  before rollout (patch §C) — pre-rewrite weights partly absorb Bear
+  miscalibration and would anchor the aggregator to a pathology the
+  rewrite is attempting to remove.
+
+- **Task 1.3 specification aligned** to retrospective's Pearson metric
+  (was Spearman) for apples-to-apples with the baseline (patch §C).
+  Acceptance criteria updated: cluster-pair fraction at r ≥ 0.85 below
+  0.50, Bear's pairwise r with all other agents below ~0.50.
+
+- **`Last updated:` bumped** to 2026-04-19, `Session state → Next action`
+  updated (patch §D) to reference the three mechanisms + the agent
+  weights reset + "do not commit until owner review."
+
+### Scope guardrails honoured (patch §F)
+
+- No code changes. Documentation only.
+- No aggregator / scoring changes. `scoring.py` / `stats.py` untouched.
+- No gate knob retunes. `BAND_SHRINKAGE_K=5`,
+  `MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly multiplier,
+  `MIN_WIN_RATE_SAMPLES` all stand per Phase 0 §7.2.
+- No persona additions or deletions. Seven-agent council preserved.
+- No changes to Option B step 5 pre-registered criteria
+  (`docs/option_b_migration_plan.md §7`); only the unblock condition
+  is reworded.
+- No changes to Phase 2, Phase 3, Phase 4, or CLAUDE.md
+  "What NOT To Do" / Project Mission. Those are owner-decision items
+  flagged separately (external review v2 §6.1 / §6.4 / §6.5).
+
+### Source of change
+
+- External review v2 (`pqi_external_review_2026_04_v2.md`) §3.1.1
+  unified acceptance criteria
+- Phase 0 retrospective (`docs/retrospectives/phase_0_edge_2026_04.md`)
+  §5.3 cluster collapse + Bear miscalibration
+- Patch file `phase_1_acceptance_criteria_patch.md`
+- Governance: `CTO_Agent.md` §2 (mirror collapse is signal-quality,
+  not sample-count), §6 (aggregator stability), §7 (RFC triage)
+
+### Part B — Phase 2 renumbering (external review v2 §7.4 / §7.5 / §7.6)
+
+Owner approved splitting the original `phase_2_execution_edge.md`
+(covering MFE measurement, listener prototype, and auto-trading) into
+three sub-phases with distinct gates:
+
+- **Phase 2a — Tier A auto-BUY (auto-BUY-and-hold).** New file
+  `docs/phases/phase_2a_tier_a_auto_buy.md`. Scope: `pqi buy
+  <market_id>` CLI, Kelly-sized stake, pre-trade price recheck
+  (default 3% drift abort), idempotency key on
+  `(market_id, analysis_run_id)`, structured logging to
+  `~/.pqi/fills.jsonl`, interactive 30s countdown on tty + explicit
+  `--unattended` + `PQI_TIER_A_ENABLED=true` gate for non-tty, ghost-
+  event ID-based probing per external review v2 §4.3(a), first-10-
+  fills operator review before `--unattended` becomes acceptable on
+  a tier. **Blocked on Phase 1** (cluster-collapsed signal turning
+  into automatic fills is the fastest path to auto-loss generator).
+
+- **Phase 2b — MFE analysis with chronological train/test.** Rewrite
+  of the prior Task 2.1 into its own phase at
+  `docs/phases/phase_2b_mfe_analysis.md` (renamed from
+  `phase_2_execution_edge.md`). Key change per external review v2
+  §5.3 / §6.4: **chronological train/test discipline promoted from
+  risk note to task requirement**. 70/30 split by `event_start_time`;
+  threshold swept on train window, locked, evaluated on test window.
+  Verdict bands: chase (test net P&L ≥ +5% over hold-to-resolution
+  after fees → unblock 2c), iterate ([−2%, +5%] → re-run with more
+  data), park (< −2% → skip 2c). **Scoping unblocked in parallel
+  with P1**; independent of P1's verdict because measures exit-side
+  edge, not prediction edge.
+
+- **Phase 2c — MFE listener prototype (Tier B precursor).** New file
+  `docs/phases/phase_2c_mfe_listener.md`, absorbs prior Tasks 2.2–
+  2.4 scope (read-only listener, manual review loop, automate/
+  manual/park verdict). **Gated on Phase 2b verdict = "chase"**.
+  Reuses ghost-event probe helper built in 2a. Sources threshold
+  from 2b's retrospective (no re-tuning at listener runtime).
+
+Dependency graph in `docs/phases/README.md` updated to reflect split
+with explicit parallelism notes (P0+P1, P1+P2b, P2a blocks on P1 not
+P2b, P2c blocks on P2b, P3 can follow P0 even if P2b parks). Anti-
+goals list updated: "Auto-trading before MFE validation" split into
+"Tier A before Phase 1 unified acceptance" and "Tier B before Phase
+2b verdict = chase". Roadmap theme-to-phase map redistributed: B.3–
+B.5 land in 2a, B.1 TUI adjacent to 2c, B.6 match watcher activates
+only on 2c "automate" verdict. `docs/scaling_assessment.md` §10
+auto-trading anti-goal and §11 open-questions reference updated to
+name 2b and train/test.
+
+### Part C — Adjacent alignments
+
+- **`CTO_Agent.md` §5 — capacity axis added** (external review v2
+  §6.5). New paragraph after "Prediction edge and execution edge are
+  orthogonal" declares capacity (fillable liquidity at Kelly-sized
+  stake) as the third orthogonal edge axis. Motivated by
+  Polymarket Tier 2/3 eSports markets' ≤$500 depth at best bid/ask
+  (external review v2 §4.4) — above low-to-mid four figures of
+  bankroll, Kelly-optimal stake won't fill without eating spread
+  that destroys edge.
+- **`CTO_Agent.md` §7(a) — recent-window skepticism added** (external
+  review v2 §6.5). New paragraph under "Validate the premise":
+  "Look how well it's been doing lately" style claims on small n
+  (Wilson half-width ±17pp on a 30-row window at 70% point estimate)
+  get extra skepticism. Demand rolling WR with CI, the prior window
+  for comparison, and the same metric on pre-registered holdout.
+- **`CLAUDE.md` Project Mission reconciled** (external review v2
+  §6.1). Advisor-as-default preserved; Tier A and Tier B explicitly
+  named as approved future modes, both defaulting to off, each gated
+  on its respective phase's acceptance criteria.
+- **`CLAUDE.md` tech stack haiku name fix** (external review v2
+  §6.2). Line 43 `claude-haiku-3-5` → `claude-haiku-4-5-20251001`
+  (matches current production model id).
+
+### Files modified
+
+- `docs/phases/phase_1_signal_quality.md` — Goals section replaced;
+  Task 1.1 Proposed approach + Acceptance criteria replaced; Task 1.2
+  adds agent_weights.json reset bullet; Task 1.3 Implementation +
+  Acceptance criteria updated (Spearman → Pearson); header +
+  Session state `Next action` updated.
+- `docs/phases/phase_2_execution_edge.md` → renamed to
+  `docs/phases/phase_2b_mfe_analysis.md`; content fully rewritten
+  to narrow scope to Task 2.1-equivalent with train/test as task
+  requirement.
+- `docs/phases/phase_2a_tier_a_auto_buy.md` — new.
+- `docs/phases/phase_2c_mfe_listener.md` — new (absorbs prior 2.2–
+  2.4 content).
+- `docs/phases/README.md` — status table replaces single Phase 2
+  row with 2a/2b/2c; dependency graph redrawn with parallelism
+  notes; anti-goals list auto-trading split; theme-to-phase map
+  redistributed.
+- `docs/roadmap.md` — phase table Phase 2 row split 2a/2b/2c;
+  theme-to-phase map updated (B.1/B.3–B.5/B.6 redistributed).
+- `docs/scaling_assessment.md` — §10 auto-trading anti-goal and
+  §11 question 2 updated to name 2b + chronological train/test.
+- `CLAUDE.md` — `## Current State` session pointer bumped; Phase
+  2 row split; Project Mission reconciled with Tier A / Tier B;
+  tech stack haiku model id fixed; Last updated line extended.
+- `CTO_Agent.md` — §5 capacity axis paragraph added; §7(a) recent-
+  window skepticism paragraph added.
+- `NEXT_SESSION_PROMPT.md` — `Last rewritten` extended; Phase 2
+  reference map split; parallelisable section updated to name 2b
+  and name 2a/2c gates; Theme B routing updated.
+- `docs/session-log.md` — this entry (extended).
+
+### Not touched
+
+- `pqi/agents/personas.py`, `pqi/scoring.py`, `pqi/stats.py`,
+  `pqi/agent_weights.py`, `~/.pqi/agent_weights.json`, `.env`,
+  `config.py`, `pqi/market/`, `pqi/ingestion/`, all runtime files.
+  Task 1.1 prompt drafting, Phase 2a `pqi buy` implementation, and
+  Phase 2b MFE script all start in later sessions after owner
+  reviews the expanded phase doc set.
+
+---
+
 ## Session 38 — Phase 0 Task 0.5: Edge retrospective & verdict (Phase 0 closed)
 
 Fifth and final Phase 0 workstream. Synthesis-only — no code

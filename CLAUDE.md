@@ -19,8 +19,20 @@ per-task retrospectives, and moment-in-time tuning rationale belong in
 ## Project Mission
 
 Identify mispriced odds in Polymarket event-driven prediction markets using a
-7-agent LLM council ("The Council of Seven"). The system is an **Advisor, not
-an Auto-trader**. Output = top 3 ranked opportunities with confidence scores.
+7-agent LLM council ("The Council of Seven"). Default operational mode is
+**Advisor**: output = top 3 ranked opportunities with confidence scores; a
+human reviews and decides whether to trade.
+
+**Approved future modes** (both default to off; each gated on explicit
+acceptance criteria):
+
+- **Tier A auto-execution** — auto-BUY on actionable signal, hold to
+  resolution. Gated on Phase 1's four-criterion unified acceptance (see
+  [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md)).
+  Does not make exit decisions.
+- **Tier B auto-execution** — continuous listener with take-profit sells.
+  Gated on Phase 2b MFE analysis showing capturable opportunity above fee
+  drag (see Phase 2 docs).
 
 ---
 
@@ -40,7 +52,7 @@ Polymarket Gamma API → Synthesizer Agent (Briefing Doc) → Council of Seven
 | CLI           | `typer` + `rich`       | Beautiful terminal output               |
 | LLM client    | Abstracted (see below) | Swap Ollama ↔ Anthropic via env var    |
 | Dev LLM       | Ollama `llama3.1:8b`   | Free, local, RTX 2070 Super             |
-| Prod LLM      | `claude-haiku-3-5`     | ~$0.015/council run, stays under $20/mo |
+| Prod LLM      | `claude-haiku-4-5-20251001` | ~$0.015/council run, stays under $20/mo |
 | Market data   | Polymarket Gamma API   | Free, public, no auth needed            |
 | Price history | Polymarket CLOB API    | Free, public, no auth for read-only     |
 | News/search   | Tavily API             | Free tier 1k searches/mo                |
@@ -361,7 +373,10 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 38 — **Phase 0 closed.**
+**Last updated:** session 39 — Phase 0 closed; Phase 1 doc acceptance
+criteria unified; Phase 2 split into 2a/2b/2c; CTO_Agent.md gains capacity
+axis + recent-window skepticism; advisor positioning reconciled with Tier A
+intent (all doc-only).
 
 Task 0.5 synthesis retrospective at
 [`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md)
@@ -382,11 +397,23 @@ chance baseline (0.2810). Gate knobs explicitly *not* retuned —
 `BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly
 multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
 
-Phase 2 (execution edge) MFE scoping unblocked in parallel with P1;
-listener/auto-trader still deferred. Phase 3 (deployment portability)
-deferred — verdict was inconclusive, not positive. Detailed priorities,
-acceptance criteria, and monitoring tasks live in
-[`NEXT_SESSION_PROMPT.md`](NEXT_SESSION_PROMPT.md).
+Session 39 patched `docs/phases/phase_1_signal_quality.md` (external
+review v2 drop-in): Goals unified from per-agent drift only to a
+**four-criterion acceptance** (cluster-pair r ≥ 0.85 fraction below
+0.50; per-agent `|drift|` > 0.10 on ≥2 agents; Bear Brier toward 0.22
+with independence preserved; council Brier holds or improves from
+0.2176). All four must pass simultaneously to unblock Option B step 5.
+Task 1.1 Proposed approach extended from one mechanism to three
+(asymmetric evidence on SHARED_PREAMBLE, persona-specific anchoring
+per-persona body, Bear probability-after-advocacy sequence). No code,
+no aggregator, no knob changes; prompt drafting pending owner review.
+
+Phase 2 split into three sub-phases in session 39: Phase 2a (Tier A
+auto-BUY, gated on P1), Phase 2b (MFE analysis, parallel-able with P1),
+Phase 2c (MFE listener prototype, gated on P2b verdict = "chase").
+Phase 3 (deployment portability) deferred — verdict was inconclusive,
+not positive. Detailed priorities, acceptance criteria, and monitoring
+tasks live in [`NEXT_SESSION_PROMPT.md`](NEXT_SESSION_PROMPT.md).
 
 ### Phase status
 
@@ -394,7 +421,9 @@ acceptance criteria, and monitoring tasks live in
 | --- | --- | --- |
 | Phase 0 — edge validation | **done (verdict: inconclusive; retrospective written)** | [`docs/phases/phase_0_edge_validation.md`](docs/phases/phase_0_edge_validation.md) |
 | Phase 1 — signal quality (Option B autonomy fix) | **next — highest-leverage per P0 verdict** | [`docs/phases/phase_1_signal_quality.md`](docs/phases/phase_1_signal_quality.md) |
-| Phase 2 — execution edge (MFE, listener) | MFE scoping unblocked (parallel with P1); listener/auto-trader deferred | [`docs/phases/phase_2_execution_edge.md`](docs/phases/phase_2_execution_edge.md) |
+| Phase 2a — Tier A auto-BUY (auto-BUY-and-hold) | blocked on Phase 1 unified acceptance | [`docs/phases/phase_2a_tier_a_auto_buy.md`](docs/phases/phase_2a_tier_a_auto_buy.md) |
+| Phase 2b — MFE analysis (retroactive + chronological train/test) | scoping unblocked (parallel with P1) | [`docs/phases/phase_2b_mfe_analysis.md`](docs/phases/phase_2b_mfe_analysis.md) |
+| Phase 2c — MFE listener prototype (Tier B precursor) | deferred — gated on P2b verdict = "chase" | [`docs/phases/phase_2c_mfe_listener.md`](docs/phases/phase_2c_mfe_listener.md) |
 | Phase 3 — deployment portability (Docker/VPS) | deferred — P0 inconclusive, not positive | [`docs/phases/phase_3_deployment_portability.md`](docs/phases/phase_3_deployment_portability.md) |
 | Phase 4 — scaling triggers | reactive only | [`docs/phases/phase_4_scaling_triggers.md`](docs/phases/phase_4_scaling_triggers.md) |
 
@@ -406,9 +435,10 @@ disambiguation), 29 (category cache), 30 (Anthropic retry) preserved it.
 Session 31 was the first aggregator-touching change since session 23: the
 EV gate's threshold became band-specific and Kelly was realigned to the
 banded rate. Session 32 retuned one gate knob and reworded a user-facing
-string, but kept the aggregator math identical. Sessions 34–38 were
-read-only analytics / measurement / synthesis with no pipeline or aggregator
-touch. See `docs/session-log.md` for per-session detail.
+string, but kept the aggregator math identical. Sessions 34–39 were
+read-only analytics / measurement / synthesis / documentation with no
+pipeline or aggregator touch (session 39 was a doc-only Phase 1 patch).
+See `docs/session-log.md` for per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit

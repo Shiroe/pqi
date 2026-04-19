@@ -281,10 +281,12 @@ trigger firing is a Technical Debt Alert per `CTO_Agent.md` §7.
   `scoring.py`, `stats.py`, `history.py`); splitting into services
   is a deployment cost without a capability gain. Container the
   monolith first.
-- **Full auto-trading on day one.** Phase 2 is explicitly
-  manual-review-loop first. Automation requires Theme B.3–B.6 full
-  stack (auth, safeguards, risk controls) and only after MFE is
-  validated.
+- **Full auto-trading on day one.** Split into Tier A (auto-BUY and
+  hold, Phase 2a) and Tier B (continuous listener + take-profit,
+  Phase 2c). Tier A gates on Phase 1 unified acceptance criteria;
+  Tier B gates on Phase 2b MFE verdict = "chase." Neither ships
+  before its respective gate; shipping Tier A before Phase 1
+  passes is the fastest path from advisor to auto-loss generator.
 
 ---
 
@@ -297,8 +299,10 @@ answer. Do **not** treat them as already answered.
    what is its distribution across predicted-probability buckets?**
    Phase 0 Task 0.3.
 2. **What is the MFE distribution on historical BUYs? Is MFE
-   capture positive-EV after Polymarket fees + slippage?** Phase 2
-   Task 2.1.
+   capture positive-EV after Polymarket fees + slippage on
+   held-out data?** Phase 2b Task 2b.1 (with chronological
+   train/test promoted from risk note to task requirement per
+   external review v2 §5.3).
 3. **How much does the current Option B mirror-collapse cost us
    specifically — small drift or large?** Phase 1 measures this;
    if the fix doesn't move the needle meaningfully, Option B parks

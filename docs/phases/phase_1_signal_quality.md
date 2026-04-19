@@ -3,7 +3,8 @@
 **Status:** not started (can parallelize with Phase 0)
 **Estimated effort:** 2–4 weeks
 **Owner:** TBD
-**Last updated:** 2026-04-18
+**Last updated:** 2026-04-19 (post-Phase-0 retrospective; acceptance
+criteria unified)
 
 ---
 
@@ -48,15 +49,90 @@ impact but is not a hard blocker.
 
 ## Goals (measurable)
 
-1. **Aggregate `|drift|` > 0.10 on at least 2 agents** —
-   threshold for "Option B backtest is worth running."
-2. **Pairwise Spearman of agent `P(YES)` drops by ≥0.05** after
-   rollout — evidence that agents are actually diverging, not just
-   adding noise.
-3. **Option B backtest runs and produces a clean verdict** — either
-   passes pre-registered criteria on held-out data (→ step 6
-   integration planning) or fails cleanly and we park Option B as
-   descriptive-only.
+Phase 0 retrospective §5.3 identified two pathologies the original
+Phase 1 scope did not address: cross-agent cluster collapse (5-agent
+correlated cluster at r 0.80–0.92) and Bear calibration drift (Bear
+Brier 0.2810, above 0.25 chance baseline). The SHARED_PREAMBLE rewrite
+must address all of mirror collapse, cluster collapse, and Bear
+calibration simultaneously — a rewrite that fixes one while regressing
+another is not acceptance.
+
+All four criteria below must pass **simultaneously** on the
+post-rewrite reliability diagram (`python -m scripts.reliability_diagram`,
+UTC-dated output at `~/.pqi/reports/reliability_YYYYMMDD.md`) compared
+against the 2026-04-18 baseline.
+
+### 1. Cluster-pair r ≥ 0.85 fraction below 0.50 (cross-agent diversity)
+
+Current: 9 of 21 pairs (43%) at r ≥ 0.85 per retro §5.3, forming a
+5-agent cluster (rules_lawyer / statistician / sentiment / specialist
+/ contrarian). Bull weakly attached (~0.6); Bear structurally
+independent.
+
+Target: fraction drops below 0.50 while Bear's independence is
+preserved (Bear pairwise r with all others stays below ~0.50). This is
+"three distinct voices become four or more distinct voices," not "all
+seven collapse together."
+
+Measured by: `scripts/agent_pairwise_diversity.py` (Task 1.3) over all
+resolved rows' agent probabilities, reported as 21-pair Pearson matrix.
+
+### 2. Per-agent `|drift|` > 0.10 on at least 2 agents (YES/NO autonomy)
+
+Original Phase 1 criterion preserved. The Option B mirror-collapse
+test: agents should be reasoning about YES and NO as parallel problems
+with coupled-but-not-identical evidence, not algebraic mirrors.
+
+Current: aggregate `|drift|` 0.01–0.06 (signed ±0.02) across all seven
+agents, per session-32 shadow analytics.
+
+Target: at least two agents show aggregate `|drift|` > 0.10 on the
+post-rewrite sample.
+
+Measured by: existing shadow analytics in `pqi history stats` (Option
+B steps 1–4 shipped session 26); per-agent drift and Brier computed
+from `probability_yes` vs `probability_no` fields on `AgentVerdict`.
+
+### 3. Bear Brier toward 0.22 with independence preserved (calibration + independence)
+
+Bear is the most load-bearing single agent on this phase's success.
+Bear's Brier 0.2810 is above the 0.25 chance baseline; Bear's pairwise
+r with all other agents is in [−0.17, +0.04], i.e. structurally
+uncorrelated. The failure mode on Bear is collapse into the cluster.
+
+Target: Bear Brier falls toward the cluster floor (0.22 range) AND
+Bear's pairwise r with any other agent stays below ~0.50. Either
+condition alone is insufficient.
+
+Diagnostic from retro §5.2: Bear predicts mean 0.356, realizes 0.484 on
+its concentration band [0.09, 0.50) — +0.128 gap on n=351. Bear is
+systematically under-predicting YES. The rewrite approach (§B below)
+forces probability output *after* the advocacy reasoning, not *as an
+expression of it*.
+
+Measured by: Bear's row in the per-agent Brier table
+(`scripts/reliability_diagram.py`) AND Bear's column in the pairwise
+matrix (`scripts/agent_pairwise_diversity.py`).
+
+### 4. Council Brier holds or improves from 0.2176 (aggregate regression guard)
+
+The aggregate regression guard. If the rewrite destabilises the cluster
+without preserving signal, or if it breaks the aggregator's current
+weighting, council Brier will rise. This criterion exists to prevent
+"looks better on diversity, worse on prediction" outcomes.
+
+Target: post-rewrite council Brier ≤ 0.2176. Strict inequality is
+aspirational; equality acceptance is acceptable because the other
+three criteria are the primary gains.
+
+Measured by: council row in per-agent Brier table
+(`scripts/reliability_diagram.py`).
+
+### Option B step 5 unblock criterion
+
+All four criteria pass → Option B backtest (Task 1.4) is worth running.
+Until all four pass, running the backtest on a still-collapsed signal
+is pre-registered to fail per `docs/option_b_migration_plan.md §7`.
 
 ---
 
@@ -72,32 +148,114 @@ impact but is not a hard blocker.
 not structurally reinforced with evidence-quality asymmetry. The
 model naturally collapses two independent problems into one.
 
-**Proposed approach:**
+**Proposed approach — three complementary mechanisms:**
 
-- Add **worked examples** showing asymmetric evidence depth:
+The rewrite must address mirror collapse, cluster collapse, and Bear
+calibration simultaneously. Three mechanisms, each targeting a
+different failure mode:
+
+### Mechanism 1 — Asymmetric evidence mechanics (targets mirror collapse, criterion 2)
+
+Applied to **SHARED_PREAMBLE**, all agents.
+
+- **Worked examples** showing asymmetric evidence depth:
   > "Example: when TeamA has extensive recent match data but TeamB
   > is a new lineup, you might report `p_yes=0.70, p_no=0.25` —
   > reflecting high confidence in TeamA's capability estimate and
   > low confidence (with 0.05 mass reserved for unknowns) on TeamB."
-- Add a **forced evidence-quality pre-step**: before emitting
-  probabilities, require the agent to summarize "TeamA evidence
-  depth" and "TeamB evidence depth" as separate paragraphs. These
-  paragraphs don't need to appear in the final JSON — but the
-  reasoning chain has to pass through them.
-- Add an **explicit anti-mirror warning**:
+- **Forced evidence-quality pre-step:** before emitting probabilities,
+  require the agent to summarize "TeamA evidence depth" and "TeamB
+  evidence depth" as separate paragraphs. Reasoning chain must pass
+  through them; paragraphs don't need to appear in final JSON.
+- **Explicit anti-mirror warning:**
   > "If your `p_yes` and `p_no` sum to exactly 1.0, recheck — you
   > have likely skipped the independent reasoning step. They should
   > sum to less than 1.0 when either side's evidence is thin
   > (reserve mass for ignorance)."
 
-**Acceptance criteria:**
+### Mechanism 2 — Persona-specific evidence anchoring (targets cluster collapse, criteria 1, 4)
 
-- [ ] New SHARED_PREAMBLE committed
-- [ ] Manual review of 5 test briefings shows agents emit
-      asymmetric probabilities at least sometimes (not every run —
-      on truly-symmetric evidence, mirrors are correct)
-- [ ] No regression in single-run council output parseability
-      (JSON still validates)
+Applied to **per-persona body** in `AGENT_PERSONAS`, not SHARED_PREAMBLE.
+
+The cluster collapse finding (retro §5.3) — 5 agents correlated at
+r 0.80–0.92 — is a signal that agents are reasoning over the same
+narrative substrate and arriving at similar conclusions. Asymmetric
+evidence mechanics alone don't fix this because the evidence shape
+stays shared across agents; only the internal weighting differs.
+
+Fix: force each persona's reasoning chain through persona-specific
+ground. Each persona must cite a persona-specific anchor in reasoning
+before emitting probability. The anchors are deliberately chosen so
+different personas weight different parts of the briefing:
+
+- **Statistician:** must cite a base-rate or historical frequency
+  number from the briefing (e.g. "TeamA won 62% of their last 13
+  Bo3s against top-10 opposition").
+- **Specialist:** must cite a game-mechanics / meta / matchup detail
+  (e.g. "TeamA's Ban-phase prioritisation leaves them vulnerable on
+  Mirage, which TeamB has permaban preference for").
+- **Sentiment:** must cite a specific crowd-psychology or social
+  signal (e.g. "Twitter lean toward TeamA is at 73% with 4× normal
+  volume — crowd-heavy on favourite, potential reversal signal").
+- **Contrarian:** must cite a specific disruption vector (e.g.
+  "Roster instability — IGL still new after 6-week stand-in period").
+- **Rules Lawyer:** already anchored via
+  `resolution_criteria` injection (`council.py`); preserve exactly.
+- **Bull / Bear:** see Mechanism 3.
+
+> **Owner note (2026-04-19):** the specific per-persona anchors above
+> are *first-draft suggestions, not settled.* The **concept** —
+> forcing each persona's reasoning through persona-specific ground so
+> outputs decorrelate at the source — is the load-bearing mechanism.
+> The **exact anchor content** (what counts as "a base-rate," whether
+> Specialist's anchor should be matchup-specific vs meta-level, etc.)
+> will be iterated during Task 1.1 prompt drafting in a later session.
+> Treat this list as the direction, not the text.
+
+The anchor citation appears in the agent's reasoning field and is
+**not** optional. When the briefing lacks evidence for a persona's
+anchor type, the persona must explicitly state that and reflect it in
+a low-confidence output — not substitute a different anchor type.
+
+### Mechanism 3 — Bear probability-after-advocacy (targets Bear calibration, criterion 3)
+
+Applied specifically to **Bear persona body**, optionally applied to
+Bull symmetrically.
+
+Bear's Brier 0.2810 comes from systematic under-prediction of YES: Bear
+predicts mean 0.356, realizes 0.484 on its concentration band
+(retro §5.2). This is a prompt-structure bug — Bear is producing
+probabilities *as an expression of* its advocacy role, not *after*
+reasoning about truth.
+
+Fix: force explicit sequence in the Bear prompt body:
+
+1. "First, construct the strongest case for the underdog side. Do
+   this fully before touching probability."
+2. "Then, step outside the advocacy role and ask: given the case
+   you just built, plus the rest of the briefing, what is the
+   actual probability of each outcome?"
+3. "Your probability output must reflect your honest estimate after
+   considering the full evidence, not a continuation of the
+   advocacy."
+
+Apply the symmetric change to Bull for consistency (Bull's Brier 0.2370
+is less severe than Bear's but shows similar overconfidence-on-favourites
+pattern per retro §5.2 — −0.219 gap on [0.80, 0.95) band).
+
+---
+
+**Acceptance criteria — updated to match unified goals:**
+
+- [ ] New SHARED_PREAMBLE committed with Mechanism 1 changes
+- [ ] Per-persona bodies updated with Mechanism 2 anchors (Statistician,
+      Specialist, Sentiment, Contrarian — Rules Lawyer preserved)
+- [ ] Bear and Bull persona bodies updated with Mechanism 3 sequence
+- [ ] Manual review of 5 test briefings shows agents cite
+      persona-specific anchors
+- [ ] No regression in single-run council output parseability (JSON
+      still validates)
+- [ ] Post-rewrite reliability diagram runs clean (task 1.2)
 
 **Files touched:**
 
@@ -147,6 +305,13 @@ Order rationale:
 - If drift moves meaningfully, move to next persona.
 - If drift doesn't move, iterate on the preamble for that persona
   or mark it as resistant and continue.
+- After all personas have landed the preamble + anchor changes,
+  **reset `~/.pqi/agent_weights.json`** (delete the file; next
+  `history sync` or `history stats` regenerates from post-rewrite
+  data). Weights from pre-rewrite period partly absorb Bear
+  miscalibration; preserving them anchors the aggregator to a
+  pathology the rewrite is attempting to remove. See external review
+  v2 §3.4 / §5.8.
 
 **Acceptance criteria:**
 
@@ -175,11 +340,11 @@ Order rationale:
 
 ### Task 1.3 — Pairwise diversity measurement
 
-**What:** For the post-rollout verdict set, compute pairwise Spearman
+**What:** For the post-rollout verdict set, compute pairwise Pearson
 correlation of `P(YES)` across agents. Compare to pre-rollout
 baseline.
 
-**Why:** `|drift|` is the individual-agent metric; pairwise Spearman
+**Why:** `|drift|` is the individual-agent metric; pairwise Pearson
 is the cross-agent diversity metric. **Both need to move.** An
 agent can have high per-row drift and still be perfectly correlated
 with every other agent — that's not diversity, that's coordinated
@@ -188,16 +353,21 @@ noise.
 **Implementation:**
 
 - Requires Phase 0 Task 0.1 (DuckDB) complete.
-- For each pair of agents, compute Spearman rho over all shared
-  resolved rows' probabilities.
+- For each pair of agents, compute **Pearson** correlation rho over
+  all shared resolved rows' probabilities. Pearson (not Spearman) is
+  retro §5.3's reported metric — keep apples-to-apples with the
+  baseline.
 - Report the 21-pair matrix (7-choose-2) before and after rollout.
+- Also report: fraction of pairs at r ≥ 0.85, Bear's row of
+  pairwise correlations, and the identified cluster (pairs
+  within the cluster with their r values).
 
 **Acceptance criteria:**
 
-- [ ] Before/after Spearman matrix published
-- [ ] Mean pairwise Spearman dropped by ≥0.05
-- [ ] At least 3 pairs show Spearman < 0.6 (indicating meaningfully
-      independent signal)
+- [ ] Before/after 21-pair Pearson matrix published
+- [ ] Cluster-pair fraction at r ≥ 0.85 drops below 0.50 (criterion 1)
+- [ ] Bear's pairwise r with all other agents stays below ~0.50
+      (criterion 3 independence guard)
 
 **Files touched:**
 
@@ -254,9 +424,11 @@ backtest just confirms mirror collapse.
 
 Either:
 
-- **Success path:** Aggregate `|drift|` > 0.10 on ≥2 agents,
-  pairwise Spearman dropped ≥0.05, Option B backtest verdict issued
-  (pass or fail). Retrospective written.
+- **Success path:** All four unified acceptance criteria pass
+  simultaneously (cluster-pair r ≥ 0.85 fraction below 0.50;
+  per-agent `|drift|` > 0.10 on ≥2 agents; Bear Brier toward 0.22
+  with independence preserved; council Brier ≤ 0.2176), Option B
+  backtest verdict issued (pass or fail). Retrospective written.
 - **Partial path:** Drift/diversity gates not met despite iteration
   — the retrospective documents "prompt work alone cannot break
   mirror-collapse," and Phase 1 is done. The next logical
@@ -269,7 +441,8 @@ Either:
 
 1. Can I look at aggregate drift per agent after the rollout?
    (Yes → 1.2 passed)
-2. Did pairwise Spearman drop? (Measured → 1.3 passed)
+2. Did cluster-pair fraction at r ≥ 0.85 drop below 0.50 and Bear's
+   pairwise r with others stay below ~0.50? (Measured → 1.3 passed)
 3. Is there a written verdict on Option B step 5? (Yes → 1.4
    passed or explicitly skipped)
 4. Is `docs/option_b_migration_plan.md` updated to reflect the
@@ -328,7 +501,9 @@ Either:
 
 ## Session state
 
-**Last work session:** *not yet started*
+**Last work session:** session 39 (2026-04-19) — doc-only patch
+unifying acceptance criteria per external review v2. Phase 1 execution
+(Task 1.1 prompt drafting) still pending owner review of this doc.
 
 **Done:**
 
@@ -337,12 +512,25 @@ Either:
   `history stats`).
 - Session-32 reassessment diagnosed mirror collapse and flagged
   autonomy framing as the root cause.
+- Session 39 (doc-only): Goals unified to four-criterion acceptance;
+  Task 1.1 Proposed approach extended to three mechanisms (asymmetric
+  evidence, persona-specific anchoring, Bear probability-after-
+  advocacy); Task 1.2 gains agent_weights.json reset; Task 1.3
+  realigned to Pearson. Source: `phase_1_acceptance_criteria_patch.md`
+  / external review v2 §3.1.1.
 
 **In-progress:** *nothing*
 
-**Next action:** Begin Task 1.1 — draft the new SHARED_PREAMBLE
-autonomy section. Include worked examples and the forced
-evidence-quality pre-step.
+**Next action:** Begin Task 1.1 — draft the new SHARED_PREAMBLE section
+(Mechanism 1) + the persona anchor additions (Mechanism 2) + the Bear
+probability-after-advocacy sequence (Mechanism 3). **Do not commit the
+rewrite until the owner reviews.** Check current total preamble +
+persona prompt token count; target per-agent prompt below ~1500
+tokens for prompt-cache efficiency per session 27.
+
+Before running task 1.2 (live rollout), reset
+`~/.pqi/agent_weights.json` so post-rewrite weights don't inherit
+pre-rewrite Bear miscalibration.
 
 **Notes for next session:**
 
