@@ -656,3 +656,46 @@ AGENT_PERSONAS: dict[str, str] = {
 
 # Convenience ordered list for council iteration
 AGENT_NAMES = list(AGENT_PERSONAS.keys())
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 flag snapshot — what actually shaped each persona at import time.
+# Frozen at module load so verdicts can tag themselves with the same
+# configuration the council actually ran under, even if someone mutates
+# `config.PERSONA_V2_*` mid-process (which would have no effect on the
+# already-assembled AGENT_PERSONAS anyway).
+# ---------------------------------------------------------------------------
+
+_PREAMBLE_FLAG = "preamble" if config.PERSONA_V2_PREAMBLE else None
+_AGENT_FLAG_SHORTCODES: dict[str, list[str]] = {
+    "rules_lawyer": [],
+    "bull": ["bull_advocacy"] if config.PERSONA_V2_BULL_ADVOCACY else [],
+    "bear": ["bear_advocacy"] if config.PERSONA_V2_BEAR_ADVOCACY else [],
+    "statistician": ["anchor_statistician"] if config.PERSONA_V2_ANCHOR_STATISTICIAN else [],
+    "sentiment": ["anchor_sentiment"] if config.PERSONA_V2_ANCHOR_SENTIMENT else [],
+    "specialist": ["anchor_specialist"] if config.PERSONA_V2_ANCHOR_SPECIALIST else [],
+    "contrarian": ["anchor_contrarian"] if config.PERSONA_V2_ANCHOR_CONTRARIAN else [],
+}
+
+
+def flags_for_agent(agent_key: str) -> dict[str, bool]:
+    """Sparse flag snapshot for the given agent.
+
+    Returns only the v2 flags that were ON when this module was imported and
+    that materially shaped this specific agent's prompt:
+
+      - `preamble` — universal, included for every agent when
+        `PERSONA_V2_PREAMBLE` is on.
+      - `<agent>_advocacy` — Bull and Bear only.
+      - `anchor_<agent>` — Statistician, Sentiment, Specialist, Contrarian.
+
+    Rules Lawyer never gets a v2 shortcode (no anchor, no advocacy) but will
+    still carry `preamble` when that flag is on. Empty dict ⇔ baseline / v1.
+    Return value is a fresh dict each call so callers can safely mutate.
+    """
+    flags: dict[str, bool] = {}
+    if _PREAMBLE_FLAG is not None:
+        flags[_PREAMBLE_FLAG] = True
+    for code in _AGENT_FLAG_SHORTCODES.get(agent_key, []):
+        flags[code] = True
+    return flags

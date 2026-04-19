@@ -15,7 +15,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from pqi.agents.personas import AGENT_NAMES, AGENT_PERSONAS
+from pqi.agents.personas import AGENT_NAMES, AGENT_PERSONAS, flags_for_agent
 from pqi import config
 from pqi.llm.client import chat
 from pqi.models import AgentVerdict, BriefingDocument, MarketData
@@ -520,6 +520,7 @@ def _parse_verdict(raw: str, agent_key: str) -> AgentVerdict | None:
         "confidence_no": confidence_no,
         "rationale": rationale,
         "key_factor": key_factor,
+        "prompt_flags": flags_for_agent(agent_key),
     }
     if probability_no is not None:
         # Independent emission — pin both fields and the source flag so the

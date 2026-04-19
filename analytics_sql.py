@@ -10,7 +10,14 @@ from scripts. Pre-registered views:
                `resolution.winning_side`).
   verdicts   — flattened join of `(run_id, timestamp, category, yes_price,
                recommendation, winner, final_yes_price)` × each agent
-               verdict, via `UNNEST(result.verdicts)`.
+               verdict, via `UNNEST(result.verdicts)`. Adds a derived
+               `flag_label` column (session 40) mirroring
+               `models.phase1_flag_label`:
+                 - `v1`          → baseline / legacy
+                 - `v2:<keys>`   → sorted comma-joined list of active
+                                   Phase 1 flags.
+               Also surfaces `prompt_flags` (MAP<VARCHAR,JSON>) for
+               ad-hoc filters on individual mechanisms.
   clv_by_row — pre-event close-line-value per resolved BUY
                (`~/.pqi/clv.jsonl`, populated by
                `scripts/backfill_clv.py`). Keyed by `run_id`; joinable
@@ -64,22 +71,34 @@ def get_connection(
     con.execute(
         """
         CREATE VIEW verdicts AS
+        WITH unnested AS (
+            SELECT
+                run_id,
+                timestamp,
+                result.market.category        AS category,
+                result.market.question        AS question,
+                result.market.yes_price       AS entry_yes_price,
+                result.recommendation         AS recommendation,
+                result.pass_reason            AS pass_reason,
+                result.signal_type            AS signal_type,
+                result.final_score            AS final_score,
+                result.no_score               AS no_score,
+                resolution.winning_side       AS winning_side,
+                resolution.final_yes_price    AS final_yes_price,
+                UNNEST(result.verdicts)       AS v
+            FROM history
+            WHERE legacy = false
+        )
         SELECT
-            run_id,
-            timestamp,
-            result.market.category        AS category,
-            result.market.question        AS question,
-            result.market.yes_price       AS entry_yes_price,
-            result.recommendation         AS recommendation,
-            result.pass_reason            AS pass_reason,
-            result.signal_type            AS signal_type,
-            result.final_score            AS final_score,
-            result.no_score               AS no_score,
-            resolution.winning_side       AS winning_side,
-            resolution.final_yes_price    AS final_yes_price,
-            UNNEST(result.verdicts)       AS v
-        FROM history
-        WHERE legacy = false
+            *,
+            v.prompt_flags                AS prompt_flags,
+            CASE
+                WHEN v.prompt_flags IS NULL
+                  OR len(map_keys(v.prompt_flags)) = 0
+                THEN 'v1'
+                ELSE 'v2:' || array_to_string(list_sort(map_keys(v.prompt_flags)), ',')
+            END                           AS flag_label
+        FROM unnested
         """
     )
 

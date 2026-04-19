@@ -37,15 +37,16 @@ def _is_legacy(entry: dict) -> bool:
 
 
 def _backfill_per_side_probability(entry: dict) -> dict:
-    """In-memory Option B synthetic mirror.
+    """In-memory Option B synthetic mirror + Phase 1 prompt_flags default.
 
     Ensures every verdict dict carries `probability_yes`, `probability_no`,
-    and `probability_source`. Missing fields are populated as
-    `(p, 1-p, "synthetic_mirror")` so downstream consumers (analytics,
-    history show, backtest scripts) see a uniform shape regardless of when
-    the entry was written. Idempotent — entries with the new fields already
-    set are returned untouched. No I/O; the persistent rewrite is the job
-    of `scripts/b_backfill.py`.
+    `probability_source`, and `prompt_flags`. Missing fields are populated as
+    `(p, 1-p, "synthetic_mirror")` and `{}` respectively so downstream
+    consumers (analytics, history show, backtest scripts) see a uniform
+    shape regardless of when the entry was written. Idempotent — entries
+    with the new fields already set are returned untouched. No I/O; the
+    persistent rewrites are the job of `scripts/b_backfill.py` and
+    `scripts/backfill_prompt_flags.py`.
     """
     result = entry.get("result") or {}
     verdicts = result.get("verdicts") or []
@@ -61,6 +62,8 @@ def _backfill_per_side_probability(entry: dict) -> dict:
             v["probability_no"] = 1.0 - p
         if "probability_source" not in v or v["probability_source"] is None:
             v["probability_source"] = "synthetic_mirror"
+        if "prompt_flags" not in v or v["prompt_flags"] is None:
+            v["prompt_flags"] = {}
     return entry
 
 

@@ -307,6 +307,13 @@ class AgentVerdict(BaseModel):
     """2–4 sentence explanation of the verdict."""
     key_factor: str
     """Single most important factor driving this verdict."""
+    prompt_flags: dict[str, bool] = Field(default_factory=dict)
+    """Phase 1 rollout flags in force when this verdict was emitted. Sparse —
+    only flags that were ON are stored (empty dict ⇔ baseline / v1). Shortcodes
+    mirror `PERSONA_V2_*` env-var names with the prefix stripped and lowercased
+    (e.g. `preamble`, `anchor_statistician`, `bear_advocacy`). Analytics group
+    on `phase1_flag_label(prompt_flags)` — never read the dict directly from
+    CLI output; the label helper is the stable interface."""
 
     @model_validator(mode="after")
     def _backfill_per_side_probability(self) -> AgentVerdict:
@@ -736,6 +743,32 @@ class PerceivedStats(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 rollout analytics helper
+# ---------------------------------------------------------------------------
+
+
+def phase1_flag_label(prompt_flags: dict[str, bool] | None) -> str:
+    """Compact rollout label for Phase 1 analytics.
+
+    Maps an `AgentVerdict.prompt_flags` dict to a stable grouping key:
+
+      - `{}` or None             → `"v1"`              (baseline / legacy)
+      - `{"preamble": True}`      → `"v2:preamble"`
+      - multiple flags            → `"v2:<sorted csv>"` (deterministic order)
+
+    Any flag present with a falsy value is treated as if absent — the
+    sparse-by-default storage convention. Use this label as the GROUP BY key
+    in DuckDB analytics so v1/v2 splits stay readable as new flags land.
+    """
+    if not prompt_flags:
+        return "v1"
+    active = sorted(k for k, v in prompt_flags.items() if v)
+    if not active:
+        return "v1"
+    return "v2:" + ",".join(active)
+
+
+# ---------------------------------------------------------------------------
 # Smoke test
 # ---------------------------------------------------------------------------
 
@@ -877,6 +910,19 @@ if __name__ == "__main__":
         raise AssertionError("Should have raised ValidationError for probability > 1.0")
     except Exception as e:
         print(f"  ✓ probability > 1.0 rejected: {type(e).__name__}")
+
+    # prompt_flags default + phase1_flag_label helper
+    baseline = verdicts[0]
+    assert baseline.prompt_flags == {}, "prompt_flags default must be empty dict"
+    assert phase1_flag_label(baseline.prompt_flags) == "v1"
+    assert phase1_flag_label(None) == "v1"
+    assert phase1_flag_label({"preamble": True}) == "v2:preamble"
+    assert (
+        phase1_flag_label({"bear_advocacy": True, "preamble": True})
+        == "v2:bear_advocacy,preamble"
+    )
+    assert phase1_flag_label({"preamble": False}) == "v1"
+    print("  ✓ prompt_flags default + phase1_flag_label helper")
 
     # ---- CouncilResult via from_council_verdicts ---------------------------
     print("\n--- CouncilResult.from_council_verdicts() ---")
