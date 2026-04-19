@@ -4,6 +4,178 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 38 — Phase 0 Task 0.5: Edge retrospective & verdict (Phase 0 closed)
+
+Fifth and final Phase 0 workstream. Synthesis-only — no code
+changes. Folded the three measurement outputs (Tasks 0.2 CLV,
+0.3 reliability, 0.4 per-band calibration) into the retrospective
+file `docs/retrospectives/phase_0_edge_2026_04.md`, issued the
+phase-closing verdict, and updated `docs/phases/README.md` +
+`CLAUDE.md` to reflect Phase 1 handoff.
+
+### Verdict — inconclusive at current n
+
+Three measurement streams align on the same reading:
+
+- **Prediction edge (reliability diagram, Task 0.3):** council
+  Brier **0.2176** beats the 0.25 chance baseline by ~3pp
+  (n=385, 2,668 per-agent verdicts). Real but small; at a
+  bootstrap 95% CI around the Brier on the order of ±0.02,
+  the delta is likely real but not sharp. The council is a
+  lightly-advantaged predictor — *not* a coin flip.
+- **Execution entry quality (pre-event CLV, Task 0.2):** mean
+  **−0.0167** on n=44 (67.7% coverage; 21 unavailable rows
+  all predate session-22 `clob_token_ids` persistence —
+  permanent). Directionally unfavourable (we pay ~1.7pp vig
+  on entry) but CI straddles zero. Valorant worst category
+  (−0.0318 n=17), LoL neutral (−0.0007 n=14, stddev 0.018).
+- **Gate calibration (Task 0.4):** no band clears ≥1 Wilson-CI
+  width in either direction on 62 in-band resolved BUYs.
+  [0.60, 0.70) n=23 and [0.70, 0.80) n=15 well-calibrated on
+  point estimate — also break-even EV on entry.
+
+Netted against realized April PnL of −0.575/share on 65 BUYs
+(session-34 finding), the picture is: small prediction edge
+being absorbed by entry timing + correlated agents, producing
+near-zero realized PnL before fees.
+
+### Most actionable finding: cluster-level mirror collapse
+
+Session 36's reliability diagram already quantified the
+correlation structure, but Task 0.5 surfaces it as the primary
+Phase 1 driver:
+
+- 9 of 21 agent pairs sit at Pearson r ≥ 0.85.
+- The 9 high-correlation pairs form an **identifiable
+  5-agent cluster**: rules_lawyer / statistician / sentiment /
+  specialist / contrarian. Ten cluster-internal pairs, nine at
+  r ≥ 0.85.
+- **Bull** sits partially outside (cluster pairs r ~0.58–0.63),
+  weakly independent. Bull is also overconfident on
+  favourites: [0.80, 0.95) n=16 predicted 0.844 mean, realized
+  0.625 — gap −22pp.
+- **Bear** is structurally independent (pairwise r ∈ [−0.17,
+  +0.04]) but is the only agent with Brier (0.2810) **above**
+  the 0.25 chance baseline. Concentrates 96% of its
+  predictions in [0.09, 0.50) where it is +0.128
+  miscalibrated.
+
+Effective council diversity is therefore ~3 signals, not 7,
+and one of those three (Bear) is degrading accuracy. This
+refines the session-26/32 "mirror collapse" framing from
+"uniform" to "cluster-level." The dynamic-weight layer
+(session 25) is doing exactly what it should — council Brier
+(0.2176) is marginally below the cluster floor (0.2180
+rules_lawyer) because Bear's weight is appropriately reduced.
+
+### Recommended next phase: Phase 1
+
+Retrospective §7 lays out:
+
+- **Primary: Phase 1** (SHARED_PREAMBLE autonomy rewrite) —
+  the only measurement-supported high-leverage lever on this
+  data. Three measurable post-rewrite checks: (a) cluster-pair
+  fraction at r ≥ 0.85 drops below 0.50, (b) Bear Brier falls
+  toward the 0.22 cluster without Bear losing independence,
+  (c) council Brier holds or improves from 0.2176. Re-run
+  `scripts/reliability_diagram.py` after every prompt change.
+- **Parallel: Phase 2 MFE analysis** — scoping work unblocked;
+  produces the third CTO-§5 edge metric via DuckDB + CLOB
+  history, analogous to Task 0.2. Listener / auto-trader still
+  deferred.
+- **Deferred: Phase 3 deployment portability** — verdict was
+  inconclusive, not positive. Revisit after P1 produces a
+  measurable Brier improvement.
+- **Option B step 5 backtest stays blocked** until P1's three
+  checks pass. Running it on a mirror-collapsed signal
+  guarantees failure on the pre-registered ΔBrier ≤ −0.005
+  criterion.
+
+### Explicitly no knob changes
+
+Retrospective §7.2: `BAND_SHRINKAGE_K=5`,
+`MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly
+multiplier, `MIN_WIN_RATE_SAMPLES` all stand. Re-tuning on the
+same 62 rows that produced `band_stats` is dressed-up
+overfitting per `CTO_Agent.md` §2. Revisit K when (a) [0.50,
+0.60) reaches n ≥ 20 (currently 8), or (b) a pre-registered
+hold-out period is formally defined.
+
+### Files modified
+
+- `docs/retrospectives/phase_0_edge_2026_04.md` — prepended §0
+  Executive summary; replaced the Task-0.4 "Open items" block
+  with full CLV (§4), reliability (§5), verdict (§6), and
+  recommended-next-actions (§7) sections; renumbered Data
+  artefacts → §8 and Changelog → §9. Status header flipped
+  from "in-progress" to "closed."
+- `docs/phases/README.md` — status table: P0 → done (with
+  verdict note), P1 → next, P2 MFE scoping unblocked, P3
+  deferred. Added a retrospective-link paragraph beneath the
+  table.
+- `CLAUDE.md` — `## Current State` rewritten to lead with the
+  Phase 0 closure + verdict; phase status table updated;
+  session 38 added atop the Recent sessions list; `## Next
+  Session Prompt` rewritten to make Phase 1 Task 1.1 the
+  default entry point (was Phase 0 Task 0.5).
+- `docs/phases/phase_0_edge_validation.md` — session state
+  updated (below).
+
+### Files unchanged (no code touch)
+
+- `pqi/**` — no source-code changes this session.
+- `~/.pqi/stats.json`, `~/.pqi/clv.jsonl`,
+  `~/.pqi/reports/reliability_20260418.md` — all read; none
+  modified.
+
+### Verification
+
+`pqi query` cross-checks done during retrospective drafting:
+
+- `SELECT COUNT(*), AVG(clv), stddev(clv), MIN(clv), MAX(clv)
+  FROM clv_by_row WHERE available = true` → n=44, mean
+  −0.0167, stddev 0.0640, min −0.26, max +0.12. Matches CLAUDE
+  §Current State.
+- `SELECT unavailable_reason, COUNT(*) FROM clv_by_row WHERE
+  available = false GROUP BY unavailable_reason` → `no_tokens`
+  21 (100% of the 21-row gap is the permanent pre-session-22
+  structural hole; no recoverable unavailability).
+- Per-category breakdown join (via CAST(run_id AS VARCHAR) on
+  both sides of the join): valorant −0.0318 n=17, LoL
+  −0.0007 n=14, counter-strike −0.0131 n=8, plus three
+  very-thin-n categories. Matches retrospective §4.2.
+- `SELECT COUNT(*) FROM history WHERE legacy=false AND
+  result.recommendation LIKE 'BUY%' AND resolution.winning_side
+  IS NOT NULL` → 63 (the 62 in-band + 1 out-of-band + 2
+  intermediate-excluded accounting from Task 0.4 §1 reconciles
+  against `stats.json` sample_size=65 — the 2-row delta is the
+  intermediate settlements excluded from `band_stats` by
+  construction).
+
+### Notes for next session (Phase 1 Task 1.1)
+
+- Task 1.1 is a SHARED_PREAMBLE rewrite — **no commit until
+  user review.** Prompt-level changes are cheap to make and
+  expensive to regress (council Brier is already only 3pp
+  above chance).
+- Keep preamble under ~1500 tokens for prompt-cache
+  efficiency (session 27).
+- The rollout order recommended in `phase_1_signal_quality.md`
+  Task 1.2 (rules_lawyer → statistician → sentiment →
+  specialist → contrarian → bull → bear) is now even more
+  defensible: the first five are the collapsed cluster (so the
+  lever applies most directly), Bull/Bear are the two
+  structurally-independent agents and need the preamble
+  validated on lower-stakes voices first.
+- Measure with
+  `python -m scripts.reliability_diagram` after every change.
+  Baseline to beat: council Brier 0.2176, cluster-pair
+  fraction 9/21 = 43%.
+- Step 5 backtest (`docs/option_b_migration_plan.md` §7)
+  stays blocked — no exceptions.
+
+---
+
 ## Session 37 — Phase 0 Task 0.4: Per-band calibration check
 
 Fourth Phase 0 workstream, no-code-change. Joins the EV-gate's

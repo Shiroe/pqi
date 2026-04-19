@@ -16,14 +16,24 @@ items (Themes A/B/C) that the phases draw from.
 
 | Phase | Title | Status | Estimated effort |
 | --- | --- | --- | --- |
-| 0 | Edge Validation via Analytics Infrastructure | **active (Tasks 0.1 + 0.2 + 0.3 done; 0.4 next)** | 1–2 weeks |
-| 1 | Signal Quality Fix (Option B Autonomy) | not started (can parallelize) | 2–4 weeks |
-| 2 | Execution Edge Prototype | blocked on Phase 0 | 3–6 weeks |
-| 3 | Deployment Portability | blocked on Phase 0 positive verdict | 3–5 days |
+| 0 | Edge Validation via Analytics Infrastructure | **done (verdict: inconclusive at current n; see retrospective)** | 1–2 weeks (actual: sessions 34–38) |
+| 1 | Signal Quality Fix (Option B Autonomy) | **next — highest-leverage lever per Phase 0 verdict** | 2–4 weeks |
+| 2 | Execution Edge Prototype | scoping unblocked (MFE analysis in parallel with P1 ok); listener/auto-trader still deferred pending P1 Brier improvement | 3–6 weeks |
+| 3 | Deployment Portability | deferred — P0 verdict was inconclusive, not positive; revisit after P1 | 3–5 days |
 | 4 | Conditional Scaling | trigger-driven, indefinite | — |
 
 Update this table whenever a phase's status changes, and also
 update `CLAUDE.md` §Current State so session handoff stays coherent.
+
+**Phase 0 retrospective:**
+[`docs/retrospectives/phase_0_edge_2026_04.md`](../retrospectives/phase_0_edge_2026_04.md).
+Verdict summary: mild positive prediction edge (council Brier
+0.2176 beats 0.25 chance baseline), mild negative entry timing
+(CLV −0.0167 on n=44), no actionable gate miscalibration. 5 of
+7 agents are correlated at r ≥ 0.85 internally (cluster-level
+mirror collapse, not uniform), Bear has Brier above chance,
+Bull is overconfident on favourites. Phase 1 is the primary
+next action; gate knobs are explicitly *not* retuned.
 
 ---
 

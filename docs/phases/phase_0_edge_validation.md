@@ -1,9 +1,9 @@
 # Phase 0: Edge Validation via Analytics Infrastructure
 
-**Status:** active (Tasks 0.1 + 0.2 + 0.3 + 0.4 done; 0.5 next)
-**Estimated effort:** 1–2 weeks of focused work
-**Owner:** TBD
-**Last updated:** 2026-04-19
+**Status:** done (all 5 tasks complete; verdict: inconclusive at current n — see retrospective)
+**Estimated effort:** 1–2 weeks of focused work (actual: sessions 34–38)
+**Owner:** completed
+**Last updated:** 2026-04-19 (session 38)
 
 ---
 
@@ -331,10 +331,10 @@ Issue a verdict: edge validated / no edge / inconclusive.
 
 **Acceptance criteria:**
 
-- [ ] Retrospective published
-- [ ] Phase 1 and Phase 2 entry criteria reviewed/updated based on
-      findings
-- [ ] `docs/phases/README.md` and `CLAUDE.md` updated to reflect
+- [x] Retrospective published — `docs/retrospectives/phase_0_edge_2026_04.md` extended with §0 summary, §4 CLV, §5 reliability, §6 verdict, §7 next actions
+- [x] Phase 1 and Phase 2 entry criteria reviewed/updated based on
+      findings — `docs/phases/README.md` status table reflects P1 as next, P2 MFE scoping unblocked, P3 deferred
+- [x] `docs/phases/README.md` and `CLAUDE.md` updated to reflect
       Phase 0 completion
 
 ---
@@ -343,12 +343,12 @@ Issue a verdict: edge validated / no edge / inconclusive.
 
 All of:
 
-- [ ] DuckDB queryable from CLI (`pqi query "..."` works)
-- [ ] CLV backfilled (or explicitly documented as unavailable) for
-      all resolved BUYs
-- [ ] Reliability diagram produced for 7 agents + aggregate
-- [ ] Per-band calibration check complete
-- [ ] Retrospective written with verdict
+- [x] DuckDB queryable from CLI (`pqi query "..."` works) — session 34
+- [x] CLV backfilled (or explicitly documented as unavailable) for
+      all resolved BUYs — 44/65 computed, 21 `no_tokens` documented as permanent (session 35)
+- [x] Reliability diagram produced for 7 agents + aggregate — session 36, `~/.pqi/reports/reliability_20260418.md`
+- [x] Per-band calibration check complete — session 37, retrospective §1–§3
+- [x] Retrospective written with verdict — session 38, verdict: inconclusive at current n
 
 ---
 
@@ -430,12 +430,34 @@ If any answer is "no," that task is not done.
 
 ## Session state
 
-**Last work session:** session 37 (2026-04-19)
+**Last work session:** session 38 (2026-04-19) — Phase 0 closed.
 
 **Done:**
 
 - Scaling assessment + phase plan committed (session 33).
 - Phase 0 scope approved.
+- **Task 0.5 — Edge retrospective & verdict (session 38).**
+  Synthesis-only, no code changes. Retrospective at
+  `docs/retrospectives/phase_0_edge_2026_04.md` extended with
+  §0 executive summary, §4 pre-event CLV distribution, §5
+  reliability-diagram summary, §6 verdict, §7 recommended next
+  actions. **Verdict: inconclusive at current n (65 resolved
+  BUYs / 385 reliability rows).** The three streams align on
+  "mild positive prediction edge (council Brier 0.2176 beats
+  0.25 chance baseline by ~3pp), mild negative entry timing
+  (mean CLV −0.0167 on n=44), no actionable gate
+  miscalibration." Realized April PnL marginal (−0.575/share
+  on 65 BUYs). Phase 1 (SHARED_PREAMBLE autonomy rewrite) is
+  the primary next action — cluster-level mirror collapse
+  diagnosis (5-agent cluster at r 0.80–0.92, Bull weakly
+  attached, Bear structurally independent but Brier above
+  chance) is the single highest-leverage lever. No gate knobs
+  retuned: `BAND_SHRINKAGE_K=5`,
+  `MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly
+  multiplier, `MIN_WIN_RATE_SAMPLES` all stand. Phase 2 MFE
+  scoping unblocked in parallel with P1; listener/auto-trader
+  deferred. Phase 3 deferred — verdict was inconclusive, not
+  positive. `docs/phases/README.md` and CLAUDE.md updated.
 - **Task 0.4 — Per-band calibration check (session 37).**
   Realized BUY hit rate per EV-gate band (winning_side
   semantics to match `stats.py:_side_price_and_won`) laid
@@ -514,25 +536,10 @@ If any answer is "no," that task is not done.
   destroying Bear's distinctness without fixing its calibration would
   push council Brier upward.
 
-**In-progress:** *nothing*
+**In-progress:** *nothing — Phase 0 closed.*
 
-**Next action:** Task 0.5 — Edge retrospective & verdict. All
-four measurement tasks (0.1 DuckDB, 0.2 pre-event CLV, 0.3
-reliability diagram, 0.4 per-band calibration) are landed. The
-retrospective file `docs/retrospectives/phase_0_edge_2026_04.md`
-already holds the per-band calibration section and open-items
-placeholders for the other three measurement streams. Task 0.5
-needs to:
-- Fold the CLV distribution (Task 0.2) and reliability diagram
-  (Task 0.3) summaries into the retrospective alongside the
-  per-band section already written.
-- Issue a verdict (edge validated / no edge / inconclusive) with
-  a one-sentence justification grounded in the three measurement
-  streams.
-- Recommend next actions (phase prioritisation, any knob
-  revisits, additional data to collect).
-- Update `docs/phases/README.md` status table and CLAUDE.md
-  §Current State on Phase 0 completion.
+**Next action:** Phase 1 Task 1.1 — SHARED_PREAMBLE autonomy
+rewrite. See `docs/phases/phase_1_signal_quality.md`.
 
 **Notes for next session:**
 
