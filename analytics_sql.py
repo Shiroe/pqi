@@ -5,9 +5,13 @@ Exposes a small surface for ad-hoc queries from the `pqi query` CLI and
 from scripts. Pre-registered views:
 
   history    — top-level rows with nested `result` / `resolution` /
-               `analysis` accessible via dot notation
+               `analysis` / `run_context` accessible via dot notation
                (e.g. `result.market.category`,
-               `resolution.winning_side`).
+               `resolution.winning_side`). Also hoists
+               `run_context.{analysis_ran_at, event_start_time,
+               time_to_event_seconds, pre_or_live,
+               structured_match_status_at_run}` as top-level columns
+               for ergonomic filtering / grouping (session 41).
   verdicts   — flattened join of `(run_id, timestamp, category, yes_price,
                recommendation, winner, final_yes_price)` × each agent
                verdict, via `UNNEST(result.verdicts)`. Adds a derived
@@ -67,7 +71,19 @@ def get_connection(
     con = duckdb.connect(":memory:")
     read_clause = _read_json_clause(path)
 
-    con.execute(f"CREATE VIEW history AS SELECT * FROM {read_clause}")
+    con.execute(
+        f"""
+        CREATE VIEW history AS
+        SELECT
+            *,
+            run_context.analysis_ran_at                  AS analysis_ran_at,
+            run_context.event_start_time                 AS event_start_time,
+            run_context.time_to_event_seconds            AS time_to_event_seconds,
+            run_context.pre_or_live                      AS pre_or_live,
+            run_context.structured_match_status_at_run   AS structured_match_status_at_run
+        FROM {read_clause}
+        """
+    )
     con.execute(
         """
         CREATE VIEW verdicts AS

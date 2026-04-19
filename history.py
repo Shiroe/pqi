@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from pqi.models import CouncilResult
+from pqi.models import CouncilResult, RunContext
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,85 @@ HISTORY_FILE = HISTORY_DIR / "history.jsonl"
 def _is_legacy(entry: dict) -> bool:
     """Legacy entries are flat scalars only — no `verdicts` array, no `result`."""
     return "verdicts" not in entry and "result" not in entry
+
+
+def _parse_iso_ts(raw: str | None) -> datetime | None:
+    """Parse a history-entry timestamp string into a tz-aware datetime.
+
+    Tolerates the two forms we've written over the life of the file:
+    `...Z` (UTC marker) and `...+00:00` (offset). Returns None on any parse
+    failure so the caller can treat the field as unknown rather than
+    crashing the load path.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_run_context(
+    result: CouncilResult, analysis_ran_at: datetime
+) -> dict:
+    """Build a run_context dict from a CouncilResult at write time.
+
+    Pulls `event_start_time` from `result.market` and
+    `structured_match.status` from `result.briefing` when available. Both
+    are optional — a None briefing or a missing structured_match yields a
+    RunContext with `structured_match_status_at_run=None`, which is the
+    correct contract for non-esports markets and resolver misses.
+    """
+    structured_match_status: str | None = None
+    if result.briefing is not None and result.briefing.structured_match is not None:
+        structured_match_status = result.briefing.structured_match.status
+
+    ctx = RunContext.from_history_inputs(
+        analysis_ran_at=analysis_ran_at,
+        event_start_time=result.market.event_start_time,
+        structured_match_status=structured_match_status,
+    )
+    return ctx.model_dump(mode="json")
+
+
+def _ensure_run_context(entry: dict) -> dict:
+    """In-memory default — give old loads a run_context if one is missing.
+
+    No I/O. Idempotent. Pulls `analysis_ran_at` from `entry.timestamp`,
+    `event_start_time` from `entry.result.market.event_start_time`, and
+    `structured_match_status_at_run` from
+    `entry.result.briefing.structured_match.status` (all fields tolerated
+    as absent). The persistent rewrite is the job of
+    `scripts/backfill_run_context.py`.
+    """
+    if entry.get("run_context") is not None:
+        return entry
+
+    analysis_ran_at = _parse_iso_ts(entry.get("timestamp"))
+    if analysis_ran_at is None:
+        # Can't anchor the block without a run timestamp — leave absent.
+        return entry
+
+    result = entry.get("result") or {}
+    market = result.get("market") or {}
+    event_start_time = _parse_iso_ts(market.get("event_start_time"))
+
+    structured_match_status: str | None = None
+    briefing = result.get("briefing") or {}
+    if isinstance(briefing, dict):
+        structured_match = briefing.get("structured_match")
+        if isinstance(structured_match, dict):
+            status = structured_match.get("status")
+            if isinstance(status, str):
+                structured_match_status = status
+
+    ctx = RunContext.from_history_inputs(
+        analysis_ran_at=analysis_ran_at,
+        event_start_time=event_start_time,
+        structured_match_status=structured_match_status,
+    )
+    entry["run_context"] = ctx.model_dump(mode="json")
+    return entry
 
 
 def _backfill_per_side_probability(entry: dict) -> dict:
@@ -99,17 +178,20 @@ def _migrate_legacy_entry(entry: dict) -> dict:
         },
         "resolution": None,
         "analysis": None,
+        "run_context": None,
     }
 
 
 def _new_entry(result: CouncilResult) -> dict:
+    now = datetime.now(timezone.utc)
     return {
         "run_id": str(uuid.uuid4()),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now.isoformat(),
         "legacy": False,
         "result": result.model_dump(mode="json"),
         "resolution": None,
         "analysis": None,
+        "run_context": _build_run_context(result, now),
     }
 
 
@@ -149,13 +231,15 @@ def append_result(result: CouncilResult) -> None:
         # postmortem analysis are all derived from now-stale inputs. Drop them.
         # Resolution will be re-fetched by the next `history sync`.
         # run_id is preserved so stable references (e.g. shared links) survive.
+        now = datetime.now(timezone.utc)
         entries[existing_idx] = {
             "run_id": old.get("run_id") or str(uuid.uuid4()),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now.isoformat(),
             "legacy": False,
             "result": result.model_dump(mode="json"),
             "resolution": None,
             "analysis": None,
+            "run_context": _build_run_context(result, now),
         }
         _rewrite_all(entries)
         logger.debug("History entry updated (market_id=%s, run_id=%s)", market_id, entries[existing_idx]["run_id"])
@@ -186,7 +270,11 @@ def load_history() -> list[dict]:
             except json.JSONDecodeError:
                 logger.warning("Skipping malformed history line %d", line_num)
                 continue
-            entries.append(_backfill_per_side_probability(_migrate_legacy_entry(raw)))
+            entries.append(
+                _ensure_run_context(
+                    _backfill_per_side_probability(_migrate_legacy_entry(raw))
+                )
+            )
     return entries
 
 

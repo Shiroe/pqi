@@ -743,6 +743,88 @@ class PerceivedStats(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Run context — metadata about the analyze run itself (not council output)
+# ---------------------------------------------------------------------------
+
+
+class RunContext(BaseModel):
+    """Metadata about an analyze run: WHEN we ran, relative to the event.
+
+    Lives at the top of a history entry (alongside `resolution` / `analysis`)
+    so filtering / grouping by run timing is a flat SQL column access, not a
+    nested JSON traversal. All five fields are frozen at write time and never
+    updated post-hoc — the web-UI / analytics contract is "this is the
+    context that applied at the moment the council ran."
+
+    `pre_or_live` prefers `structured_match_status_at_run` (authoritative
+    when PandaScore resolved the match) and falls back to a direct
+    `analysis_ran_at` vs `event_start_time` comparison. "unknown" when no
+    event start time is available at all.
+    """
+
+    analysis_ran_at: datetime
+    """UTC timestamp when the analyze run hit `history.append_result`.
+    Mirrors the top-level `timestamp` field of the history entry; hoisted
+    here for ergonomic SQL access."""
+    event_start_time: datetime | None = None
+    """Real-world event start (kickoff, hearing date, etc), snapshotted from
+    `result.market.event_start_time` at run time. None when Gamma didn't
+    supply one for this market."""
+    time_to_event_seconds: int | None = None
+    """Signed seconds from `analysis_ran_at` to `event_start_time`. Positive
+    ⇒ analysis ran BEFORE the event started. Negative ⇒ ran after. None
+    when `event_start_time` is None."""
+    pre_or_live: Literal["pre", "live", "post", "unknown"] = "unknown"
+    """Timing label at run time:
+    - `pre`  — event had not started (most pre-market analyses).
+    - `live` — event in progress.
+    - `post` — event had already finished (rare; e.g. late market).
+    - `unknown` — no `event_start_time` available to anchor the label."""
+    structured_match_status_at_run: str | None = None
+    """Snapshot of `briefing.structured_match.status` at run time
+    (`scheduled` / `running` / `finished` / `canceled`). None for
+    non-esports markets or when the PandaScore resolver did not clear."""
+
+    @classmethod
+    def from_history_inputs(
+        cls,
+        analysis_ran_at: datetime,
+        event_start_time: datetime | None,
+        structured_match_status: str | None,
+    ) -> RunContext:
+        """Build a RunContext from the three raw inputs available at both
+        write time (history._new_entry) and backfill time
+        (scripts/backfill_run_context.py). Pure — no I/O."""
+        if event_start_time is not None:
+            delta = event_start_time - analysis_ran_at
+            time_to_event = int(delta.total_seconds())
+        else:
+            time_to_event = None
+
+        status_label: Literal["pre", "live", "post", "unknown"]
+        if structured_match_status == "scheduled":
+            status_label = "pre"
+        elif structured_match_status == "running":
+            status_label = "live"
+        elif structured_match_status == "finished":
+            status_label = "post"
+        elif event_start_time is None:
+            status_label = "unknown"
+        elif analysis_ran_at < event_start_time:
+            status_label = "pre"
+        else:
+            status_label = "live"
+
+        return cls(
+            analysis_ran_at=analysis_ran_at,
+            event_start_time=event_start_time,
+            time_to_event_seconds=time_to_event,
+            pre_or_live=status_label,
+            structured_match_status_at_run=structured_match_status,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 rollout analytics helper
 # ---------------------------------------------------------------------------
 
@@ -923,6 +1005,37 @@ if __name__ == "__main__":
     )
     assert phase1_flag_label({"preamble": False}) == "v1"
     print("  ✓ prompt_flags default + phase1_flag_label helper")
+
+    # ---- RunContext.from_history_inputs ------------------------------------
+    print("\n--- RunContext ---")
+    t_run = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    t_event_future = datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc)
+    t_event_past = datetime(2026, 4, 17, 12, 0, tzinfo=timezone.utc)
+
+    # Unknown when no event_start_time and no structured status
+    rc_unknown = RunContext.from_history_inputs(t_run, None, None)
+    assert rc_unknown.pre_or_live == "unknown"
+    assert rc_unknown.time_to_event_seconds is None
+
+    # Timestamp fallback: analysis before event → pre
+    rc_pre = RunContext.from_history_inputs(t_run, t_event_future, None)
+    assert rc_pre.pre_or_live == "pre"
+    assert rc_pre.time_to_event_seconds == 86_400
+
+    # Timestamp fallback: analysis at/after event → live
+    rc_live = RunContext.from_history_inputs(t_run, t_event_past, None)
+    assert rc_live.pre_or_live == "live"
+    assert rc_live.time_to_event_seconds == -86_400
+
+    # Structured status is authoritative over timestamp comparison
+    rc_finished = RunContext.from_history_inputs(t_run, t_event_future, "finished")
+    assert rc_finished.pre_or_live == "post"
+    assert rc_finished.structured_match_status_at_run == "finished"
+
+    rc_running = RunContext.from_history_inputs(t_run, t_event_future, "running")
+    assert rc_running.pre_or_live == "live"
+
+    print("  ✓ RunContext.from_history_inputs covers pre/live/post/unknown + status override")
 
     # ---- CouncilResult via from_council_verdicts ---------------------------
     print("\n--- CouncilResult.from_council_verdicts() ---")
