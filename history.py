@@ -199,7 +199,7 @@ def _new_entry(result: CouncilResult) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
-def append_result(result: CouncilResult) -> None:
+def append_result(result: CouncilResult) -> str:
     """Upsert a CouncilResult into the history file, keyed by market.id.
 
     If an entry for this market already exists, its `result` and `timestamp`
@@ -209,6 +209,9 @@ def append_result(result: CouncilResult) -> None:
 
     Keyed on market.id — not event.id — so sibling markets under the same
     parent event remain distinct entries.
+
+    Returns the `run_id` of the written-or-updated entry so callers (e.g.
+    the sidecar trendline writer) can key their own records off it.
     """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     market_id = result.market.id
@@ -232,8 +235,9 @@ def append_result(result: CouncilResult) -> None:
         # Resolution will be re-fetched by the next `history sync`.
         # run_id is preserved so stable references (e.g. shared links) survive.
         now = datetime.now(timezone.utc)
+        run_id = old.get("run_id") or str(uuid.uuid4())
         entries[existing_idx] = {
-            "run_id": old.get("run_id") or str(uuid.uuid4()),
+            "run_id": run_id,
             "timestamp": now.isoformat(),
             "legacy": False,
             "result": result.model_dump(mode="json"),
@@ -242,13 +246,14 @@ def append_result(result: CouncilResult) -> None:
             "run_context": _build_run_context(result, now),
         }
         _rewrite_all(entries)
-        logger.debug("History entry updated (market_id=%s, run_id=%s)", market_id, entries[existing_idx]["run_id"])
-        return
+        logger.debug("History entry updated (market_id=%s, run_id=%s)", market_id, run_id)
+        return run_id
 
     entry = _new_entry(result)
     with open(HISTORY_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
     logger.debug("History entry appended (run_id=%s)", entry["run_id"])
+    return entry["run_id"]
 
 
 def load_history() -> list[dict]:

@@ -40,15 +40,23 @@ _DIRECTION_THRESHOLD_PP: float = 2.0  # slope × window_hours must exceed ±2pp
 # ---------------------------------------------------------------------------
 
 
-async def fetch_price_history(market: MarketData) -> PriceHistory | None:
+async def fetch_price_history(
+    market: MarketData,
+) -> tuple[PriceHistory, list[PricePoint], list[PricePoint]] | None:
     """
     Fetch YES and NO token price history from the CLOB API in parallel
     and compute per-side trend metrics.
 
+    Returns a tuple `(PriceHistory, yes_raw_points, no_raw_points)` where
+    the two raw lists mirror the points that `_compute_side_metrics` was
+    run against. The briefing pipeline only uses the aggregated
+    `PriceHistory`; analytics sidecars (see `pqi/sidecar_price_points.py`)
+    consume the raw lists for full-fidelity trendline storage.
+
     Returns None (and logs a warning) if:
       - market has fewer than 2 clob_token_ids
-      - both HTTP requests fail
-      - both sides have insufficient data (< 2 points)
+      - either HTTP request fails (partial fetch is not useful)
+      - either side has insufficient data (< 2 points)
     """
     if len(market.clob_token_ids) < 2:
         logger.warning(
@@ -88,7 +96,11 @@ async def fetch_price_history(market: MarketData) -> PriceHistory | None:
         yes_side = _compute_side_metrics(yes_points, yes_token)
         no_side = _compute_side_metrics(no_points, no_token)
 
-        return PriceHistory(yes=yes_side, no=no_side, fetched_at=now)
+        return (
+            PriceHistory(yes=yes_side, no=no_side, fetched_at=now),
+            yes_points,
+            no_points,
+        )
 
     except Exception as exc:
         logger.warning(

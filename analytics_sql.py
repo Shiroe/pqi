@@ -28,6 +28,16 @@ from scripts. Pre-registered views:
                against `history` / `verdicts`. Registered only when the
                sidecar exists — downstream queries on `clv_by_row`
                raise a clear error otherwise.
+  price_points — full-fidelity raw YES/NO CLOB trendlines per analyze
+               run (`~/.pqi/price_points.jsonl`, populated by forward-
+               capture in `pqi.main` and by
+               `scripts/backfill_price_points.py`). Keyed by `run_id`;
+               joinable against `history` / `verdicts`. Each row carries
+               `yes_points` / `no_points` as arrays of `{t, p}` structs
+               — `UNNEST()` them for per-bucket analytics
+               (e.g. `SELECT unnest(yes_points).t, unnest(yes_points).p
+               FROM price_points WHERE run_id = '...'`). Registered
+               only when the sidecar exists.
 
 Timestamp format is pinned because DuckDB's auto-inference sometimes
 samples a nested date field and ends up rejecting top-level timestamps.
@@ -44,6 +54,7 @@ import duckdb
 from pqi.history import HISTORY_FILE
 
 CLV_FILE = Path.home() / ".pqi" / "clv.jsonl"
+PRICE_POINTS_FILE = Path.home() / ".pqi" / "price_points.jsonl"
 
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 
@@ -62,6 +73,7 @@ def _read_json_clause(history_path: Path) -> str:
 def get_connection(
     history_path: Path | None = None,
     clv_path: Path | None = None,
+    price_points_path: Path | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """Open an in-memory DuckDB connection with the standard views."""
     path = history_path or HISTORY_FILE
@@ -122,6 +134,12 @@ def get_connection(
     if clv.exists():
         con.execute(
             f"CREATE VIEW clv_by_row AS SELECT * FROM {_read_json_clause(clv)}"
+        )
+
+    pp = price_points_path or PRICE_POINTS_FILE
+    if pp.exists():
+        con.execute(
+            f"CREATE VIEW price_points AS SELECT * FROM {_read_json_clause(pp)}"
         )
 
     return con

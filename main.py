@@ -20,7 +20,7 @@ from rich.table import Table
 from rich import box
 
 from pqi import config
-from pqi.models import BriefingDocument, CouncilResult, EventGroup, MarketData
+from pqi.models import BriefingDocument, CouncilResult, EventGroup, MarketData, PricePoint
 
 app = typer.Typer(help="PQI — Polymarket Qualitative Intelligence advisor.")
 console = Console()
@@ -545,12 +545,17 @@ async def _run_analysis(
     market: MarketData,
     no_cache: bool = False,
     shared_briefing: "BriefingDocument | None" = None,
-) -> CouncilResult:
+) -> "tuple[CouncilResult, list[PricePoint] | None, list[PricePoint] | None]":
     """Execute the full analysis pipeline for one market, with optional cache.
 
     If shared_briefing is provided (e.g. for sibling markets from the same event),
     the synthesizer step is skipped. The briefing's market is rebound to the
     current market so the council sees the right resolution criteria.
+
+    Returns `(result, yes_raw_points, no_raw_points)`. The two point lists
+    are the raw CLOB fetch output threaded out to the caller for the
+    `sidecar_price_points` writer. Both are None on a cache hit (CLOB
+    fetch was skipped) or on any CLOB-side failure.
     """
     from pqi.ingestion.synthesizer import build_briefing
     from pqi.ingestion.match_resolver import resolve_match
@@ -582,7 +587,7 @@ async def _run_analysis(
         cached = await get_cached(market.id, market.yes_price, structured_status)
         if cached is not None:
             console.print("[green]Cache hit — using previous council result.[/green]")
-            return cached
+            return cached, None, None
 
     if shared_briefing is not None:
         console.print(
@@ -594,12 +599,17 @@ async def _run_analysis(
         briefing = await build_briefing(market, structured_match=structured_match)
     console.print(f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]")
 
-    # Enrich briefing with CLOB price history (non-fatal)
+    # Enrich briefing with CLOB price history (non-fatal). The raw point
+    # lists are threaded out to the caller for the full-fidelity sidecar
+    # — aggregated metrics still live on the briefing as before.
     from pqi.market.clob import fetch_price_history
 
+    yes_raw_points: list[PricePoint] | None = None
+    no_raw_points: list[PricePoint] | None = None
     try:
-        price_history = await fetch_price_history(market)
-        if price_history:
+        fetch_result = await fetch_price_history(market)
+        if fetch_result:
+            price_history, yes_raw_points, no_raw_points = fetch_result
             briefing = briefing.model_copy(update={"price_history": price_history})
             console.print(
                 f"[cyan]Price history: YES {price_history.yes.data_points}pts "
@@ -629,7 +639,7 @@ async def _run_analysis(
     result = build_council_result(market, verdicts)
     result.briefing = briefing
     await store_result(result)
-    return result
+    return result, yes_raw_points, no_raw_points
 
 
 # ---------------------------------------------------------------------------
@@ -759,13 +769,30 @@ def analyze(
 
     console.print(f"\n[bold]Analysing:[/bold] {market.question}\n")
 
-    result = asyncio.run(_run_analysis(market, no_cache=no_cache))
+    result, yes_raw_points, no_raw_points = asyncio.run(
+        _run_analysis(market, no_cache=no_cache)
+    )
     display_council_result(result)
 
     from pqi.history import append_result
+    from pqi.sidecar_price_points import append_row as append_price_points
 
-    append_result(result)
+    run_id = append_result(result)
     console.print("[dim]Result saved to history.[/dim]")
+    # Sidecar write fires only when a fresh CLOB fetch returned usable
+    # points. Cache-hit runs reuse an already-persisted history row whose
+    # sidecar entry (if any) lives from the original fresh run. Missing
+    # sidecar rows are the backfill script's job.
+    if yes_raw_points is not None and no_raw_points is not None:
+        append_price_points(
+            run_id=run_id,
+            market=market,
+            analysis_ran_at=datetime.now(timezone.utc),
+            interval=config.PRICE_HISTORY_INTERVAL,
+            fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
+            yes_points=yes_raw_points,
+            no_points=no_raw_points,
+        )
 
     # Offer to analyze sibling markets (already known from EventGroup — no extra API call)
     if other_siblings:
@@ -780,7 +807,7 @@ def analyze(
             for sibling in other_siblings:
                 console.print(f"\n{'─' * 60}")
                 console.print(f"[bold]Analysing:[/bold] {sibling.question}\n")
-                sib_result = asyncio.run(
+                sib_result, sib_yes_points, sib_no_points = asyncio.run(
                     _run_analysis(
                         sibling,
                         no_cache=no_cache,
@@ -788,8 +815,18 @@ def analyze(
                     )
                 )
                 display_council_result(sib_result)
-                append_result(sib_result)
+                sib_run_id = append_result(sib_result)
                 console.print("[dim]Result saved to history.[/dim]")
+                if sib_yes_points is not None and sib_no_points is not None:
+                    append_price_points(
+                        run_id=sib_run_id,
+                        market=sibling,
+                        analysis_ran_at=datetime.now(timezone.utc),
+                        interval=config.PRICE_HISTORY_INTERVAL,
+                        fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
+                        yes_points=sib_yes_points,
+                        no_points=sib_no_points,
+                    )
 
 
 @app.command()
