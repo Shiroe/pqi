@@ -503,9 +503,10 @@ Either:
 
 ## Session state
 
-**Last work session:** session 40 (2026-04-19) — Task 1.1 scaffold +
-Phase 1 analytics tagging landed. No prompts in force yet; baseline
-AGENT_PERSONAS bit-identical to pre-rewrite when all flags off.
+**Last work session:** session 41 (2026-04-19) — Phase 1 rollout
+**stage 1 LIVE**. `PERSONA_V2_PREAMBLE=true` in `.env` after refining
+the V2 preamble content; `reliability_diagram --flag` shipped so v1
+and v2 populations can be rendered as independent reports.
 
 **Done:**
 
@@ -539,20 +540,53 @@ AGENT_PERSONAS bit-identical to pre-rewrite when all flags off.
   script `scripts/backfill_prompt_flags.py` tagged 437 rows /
   2871 verdicts with `{}` (`.prePhase1.bak` saved; idempotent on
   re-run).
+- **Session 41 (V2 preamble content refinement):** replaced the
+  single session-40 worked example with a three-case spectrum (mild
+  / severe / symmetric evidence asymmetry) so ignorance mass tracks
+  briefing depth rather than anchoring on one magic gap size;
+  softened the anti-mirror check from a hard "sum==100 stop" trigger
+  to a signal pattern (sum-near-100 PAIRED WITH matched confidences
+  is the mirror-derivation diagnostic). V2 preamble length grew from
+  4,367 → 5,783 chars. V1 untouched. Commit `d0d87c0`.
+- **Session 41 (stage 1 flip):** `PERSONA_V2_PREAMBLE=true` appended
+  to `.env`. 16 V2 runs queued by end of session (112 `v2:preamble`
+  verdicts in DuckDB); 0 resolved yet. Refreshed v1 baseline report
+  at `~/.pqi/reports/reliability_20260419.md` (409 rows, 100% v1 by
+  flag label) — council Brier 0.2156, Bear Brier 0.2820, cluster
+  r≥0.85 fraction 9/21 = 43%, Bear independence intact.
+- **Session 41 (reliability_diagram --flag filter):** script accepts
+  `--flag v1`, `--flag v2:preamble`, `--flag 'v2:*'`. Row label is
+  UNION of per-verdict `prompt_flags`. Every run prints
+  `resolved rows by flag label: …` summary to stderr; filtered runs
+  write `reliability_YYYYMMDD_<slug>.md` so unfiltered daily files
+  aren't overwritten. Unfiltered path verified bit-identical against
+  the 2026-04-19 baseline. Commit `b8cc48a`.
 
-**In-progress:** *nothing*
+**In-progress:** stage 1 measurement (observation phase — no further
+prompt edits until stage-1 verdict).
 
-**Next action:** Begin the rollout sequence. Rollout is NOT cumulative
-— each stage is an independent A/B experiment against the 2026-04-18
-reliability baseline (`~/.pqi/reports/reliability_20260418.md`). Every
-verdict is now tagged with the flag set in force, so `pqi query
-"SELECT flag_label, ... FROM verdicts WHERE ..."` will cleanly split
-v1 vs v2 populations for delta measurement.
+**Next action:** **observe, don't escalate.** Check resolution count
+first via `pqi query "SELECT v.flag_label, COUNT(DISTINCT v.run_id)
+AS runs, SUM(CASE WHEN h.resolution IS NOT NULL THEN 1 ELSE 0 END)
+AS resolved FROM verdicts v JOIN history h USING (run_id) WHERE
+v.flag_label LIKE 'v2:%' GROUP BY v.flag_label"`.
+
+- If resolved V2 runs < ~20: keep queuing fresh V2 analyses on
+  short-horizon markets. Do NOT flip the flag off. Do NOT edit the
+  V2 preamble text — content changes invalidate the tagged
+  `v2:preamble` population.
+- If resolved V2 runs ≥ ~20: run the two-filter pair
+  (`python -m pqi.scripts.reliability_diagram --flag v1` and
+  `--flag v2:preamble`) and evaluate against the four-criterion
+  unified acceptance. Only after stage 1 has a verdict should
+  `PERSONA_V2_PREAMBLE=false` be flipped and stage 2 (anchors)
+  begin.
 
 Rollout order (independent flags, not cumulative):
 
-1. **Preamble alone:** `PERSONA_V2_PREAMBLE=true` — measure mirror
-   collapse delta (criterion 2).
+1. **Preamble alone:** `PERSONA_V2_PREAMBLE=true` — **CURRENT
+   STAGE, live since session 41.** Measures mirror collapse delta
+   (criterion 2) + cluster-diversity stability (criterion 1).
 2. **Each anchor alone:** Statistician → Sentiment → Specialist →
    Contrarian. Expect marginal cluster-diversity delta (criterion 1).
 3. **Bear alone** (Bull unchanged): `PERSONA_V2_BEAR_ADVOCACY=true`.
@@ -564,19 +598,24 @@ Rollout order (independent flags, not cumulative):
 5. **Both** if evidence supports. Only after 3 and 4 show no
    regressions in their independent runs.
 
-Re-run `python -m scripts.reliability_diagram` after every stage.
-Compare per-agent Brier / cluster diagonal / council Brier against
-the baseline.
+Between stages, flip the prior stage's flag OFF unless explicitly
+combining. `prompt_flags` tags every verdict so the `flag_label`
+split stays clean across the full rollout.
 
 **Notes for next session:**
 
 - Re-read `docs/option_b_migration_plan.md` §7 for the exact
   pre-registered criteria — don't reinvent them. Step 5 still blocks
   on all four Phase 1 criteria passing simultaneously.
-- Preamble is now ~3.7kB in raw literal form (V2). Prompt caching
+- V2 preamble is now ~5.8kB in raw literal form. Prompt caching
   (session 27) absorbs the cost — first call warms the cache, rest
   of the 5-min TTL window bills at ~10%. Per-run added cost with all
   flags on: ~$0.002.
+- Do not re-edit `_SHARED_PREAMBLE_V2` during stage 1 measurement.
+  If wording needs another pass, the disciplined path is: flip
+  `PERSONA_V2_PREAMBLE=false`, edit, decide whether to discard the
+  tagged population (usually yes — compressed populations under
+  different prompt texts are not comparable), flip back on.
 - `AgentVerdict` now carries BOTH `probability_source` (Option B
   mirror vs independent) AND `prompt_flags` (Phase 1 config
   snapshot). Analytics that want to intersect both — e.g. "autonomous
@@ -584,4 +623,5 @@ the baseline.
   `v.probability_source = 'independent' AND flag_label = 'v2:…'`.
 - Starting Phase 1 in parallel with Phase 2b remains viable; the
   scaffold touches `agents/personas.py` + analytics tagging, while
-  Phase 2b reads `~/.pqi/history.jsonl` + CLOB sidecar.
+  Phase 2b reads `~/.pqi/history.jsonl` + CLOB sidecar (the latter
+  now includes raw price-point sidecar from session 41).

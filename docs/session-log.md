@@ -4,6 +4,183 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 41 — Stage 1 live + observation infrastructure
+
+Phase 1 rollout stage 1 went live this session
+(`PERSONA_V2_PREAMBLE=true`) after refining the V2 preamble content
+and extending `reliability_diagram` to split populations by flag
+label. Session 41 also shipped two pieces of observation
+infrastructure (run_context persistence + raw CLOB trendlines
+sidecar) before the flag flip. Aggregator untouched; baseline AGENT
+PERSONAS still bit-identical to pre-rewrite when the flag is flipped
+back off.
+
+### Part A — `run_context` persistence (commit `4f3d65f`)
+
+New top-level block on every history entry alongside `resolution` /
+`analysis`:
+
+- `analysis_ran_at`, `event_start_time`, `time_to_event_seconds`,
+  `pre_or_live`, `structured_match_status_at_run`. Frozen at write
+  time — the contract is "context that applied at the moment the
+  council ran."
+- `pre_or_live` prefers `structured_match.status` when present
+  (scheduled / running / finished ⇒ pre / live / post) and falls back
+  to `analysis_ran_at` vs `event_start_time`. `"unknown"` when no
+  event start time is available.
+- `history._new_entry` + upsert path populate the block.
+  `load_history` in-memory default-fills for any pre-backfill read.
+  `analytics_sql.py` hoists the five fields as top-level SQL columns
+  on the `history` view — a future reliability-diagram filter
+  `WHERE pre_or_live = 'pre'` needs no JSON extraction.
+- `scripts/backfill_run_context.py` (new, zero API calls, atomic
+  write, `.preRunContext.bak` sibling) tagged 437 existing rows —
+  **287 pre, 125 live, 2 unknown**.
+
+### Part B — Raw CLOB trendlines sidecar (commit `15c8e62`)
+
+Full-fidelity YES/NO price points per analyze run captured to
+`~/.pqi/price_points.jsonl` (new sidecar, decoupled from
+`history.jsonl` so the hot-path JSONL / `pqi history list` don't
+bloat).
+
+- `market/clob.py` — `fetch_price_history` return type changed from
+  `PriceHistory | None` to `tuple[PriceHistory, list[PricePoint],
+  list[PricePoint]] | None`. Single caller gets raw points alongside
+  aggregated metrics in one fetch.
+- `main.py` — `_run_analysis` threads raw points out; `analyze`
+  calls `sidecar_price_points.append_row` after `append_result`.
+  Cache-hit runs skip the sidecar write.
+- `history.py` — `append_result` now returns the upserted `run_id`.
+- `sidecar_price_points.py` (new) — writer with uniform row schema,
+  non-fatal write semantics.
+- `scripts/backfill_price_points.py` (new) — atomic-write backfill
+  mirroring the `backfill_clv.py` pattern. **303 / 437 rows (69.3%)
+  tagged `available=true`.** 121 legacy rows (pre-session-22, no
+  `clob_token_ids`) marked `no_tokens` (permanent). 13 transient
+  failures (5 `fetch_failed`, 8 `insufficient_points`) will retry
+  on next run.
+- `analytics_sql.py` — conditional `price_points` DuckDB view
+  (parallel to `clv_by_row`). `yes_points` / `no_points`
+  unnest-able for per-bucket analytics; joinable to `history` /
+  `verdicts` by `run_id`.
+
+Enables future MFE / calibration / web-UI work without touching the
+hot path.
+
+### Part C — V2 preamble refinement + flag flip (commit `d0d87c0`)
+
+Before flipping `PERSONA_V2_PREAMBLE=true`, tightened two weaknesses
+in the session-40 V2 text:
+
+- **Worked example → three-case spectrum.** Replaced the single
+  `probability_score=70, probability_no_score=22` anchor with mild
+  (4-pt gap), severe (10-pt gap + lower conf_no), and symmetric
+  (small gap + matched confidences) cases. Teaches that ignorance
+  mass scales with briefing depth, and explicitly permits honest
+  sum≈100 when evidence is symmetric.
+- **Anti-mirror check softened.** From hard "if sum == 100, stop
+  and recheck" trigger to a signal pattern: sum-near-100 **paired
+  with** matched confidences is the mirror-derivation diagnostic.
+  Avoids inducing noise-injection on symmetric evidence.
+
+`.env` gained `PERSONA_V2_PREAMBLE=true`. V2 preamble size went
+from 4,367 → 5,783 chars. V1 untouched. Stage-1 population rollover
+started: 16 V2 runs queued by end of session (112 `v2:preamble`
+verdicts in the DuckDB view), 0 resolved yet.
+
+### Part D — `reliability_diagram --flag` filter (commit `b8cc48a`)
+
+With v1 + v2 verdicts landing in the same `history.jsonl`, a single
+reliability report mixes populations. Extended the script to split:
+
+- `--flag <label>` — accepts exact matches (`v1`, `v2:preamble`) or
+  a trailing-star glob (`v2:*`). Row label is the UNION of each
+  verdict's `prompt_flags` mapped through an inlined copy of
+  `models.phase1_flag_label` (stdlib-only constraint preserved).
+- Every run now prints `resolved rows by flag label: …` to stderr
+  before any filter — set of filterable labels visible up front.
+- Filtered runs write to `reliability_YYYYMMDD_<slug>.md`
+  (e.g. `reliability_20260419_v2-preamble.md`) so unfiltered daily
+  files aren't overwritten when producing a split pair.
+- Unfiltered path verified bit-identical against the refreshed
+  2026-04-19 baseline (409 rows, 100% v1).
+
+### Part E — Documentation (commit `eb6a1fe`)
+
+- `CLAUDE.md` `## Current State` refreshed to session 41; rollout
+  observation state (16 queued / 0 resolved); reliability_diagram
+  `--flag` added to What's live; aggregator-stability paragraph
+  extended.
+- `NEXT_SESSION_PROMPT.md` rewritten from "initiate rollout" to
+  "observe stage 1." Next action gated on resolution count
+  (≥ ~20 V2 resolved before comparison is actionable). Explicit
+  guard rail against re-editing `_SHARED_PREAMBLE_V2` during stage
+  1 measurement — content changes invalidate the tagged
+  `v2:preamble` population.
+
+### Files modified
+
+- `pqi/agents/personas.py` — V2 preamble content refinement (Part C).
+- `pqi/history.py`, `pqi/models.py`, `pqi/analytics_sql.py` — run_context
+  block (Part A).
+- `pqi/main.py`, `pqi/market/clob.py`, `pqi/sidecar_price_points.py` (new) —
+  CLOB trendlines sidecar (Part B).
+- `scripts/backfill_run_context.py` (new) — Part A backfill.
+- `scripts/backfill_price_points.py` (new) — Part B backfill.
+- `scripts/reliability_diagram.py` — `--flag` filter (Part D).
+- `.env` (not committed; gitignored) — `PERSONA_V2_PREAMBLE=true`.
+- `CLAUDE.md`, `NEXT_SESSION_PROMPT.md` — Part E.
+- `docs/session-log.md` — this entry.
+- `docs/phases/phase_1_signal_quality.md` — Session state updated to
+  observe-stage-1 posture.
+
+### Commits
+
+- `4f3d65f` session 41: persist run_context block on every history
+  entry.
+- `15c8e62` session 41: raw CLOB trendlines sidecar + backfill.
+- `d0d87c0` session 41: phase 1 v2 preamble — softer anti-mirror +
+  three-case examples.
+- `b8cc48a` session 41: reliability_diagram --flag filter for v1/v2
+  side-by-side.
+- `eb6a1fe` session 41: doc updates — stage 1 live,
+  observe-not-escalate hand-off.
+
+### Not touched
+
+- `pqi/scoring.py`, `pqi/stats.py`, `pqi/agent_weights.py`,
+  `~/.pqi/agent_weights.json`. Aggregator math stable since sessions
+  31–32. Phase 0 §7.2 freeze preserved.
+- Persona body texts (anchor snippets, advocacy blocks) — only the
+  V2 preamble was re-edited, and only twice (soften + examples).
+  Anchor/advocacy blocks remain at their session-40 form for stages
+  2–4.
+- Aggregator, `probability_source` rollup logic. Option B shadow
+  layer still descriptive only; step 5 still gated on Phase 1 unified
+  acceptance.
+
+### Observation state at session end
+
+```
+$ pqi query "SELECT flag_label, COUNT(*) AS n FROM verdicts GROUP BY flag_label"
+ v1             2878
+ v2:preamble     112
+
+$ resolved V2 runs / total V2 runs
+ 0 / 16
+```
+
+Next session's first query: check resolution count via
+`pqi query "SELECT v.flag_label, COUNT(DISTINCT v.run_id) AS runs,
+SUM(CASE WHEN h.resolution IS NOT NULL THEN 1 ELSE 0 END) AS resolved
+FROM verdicts v JOIN history h USING (run_id) WHERE v.flag_label LIKE
+'v2:%' GROUP BY v.flag_label"`. If `resolved < 20`, wait. If
+`resolved >= 20`, run the two-filter pair and evaluate against the
+four-criterion unified acceptance.
+
+---
+
 ## Session 40 — Phase 1 Task 1.1 scaffold + analytics tagging
 
 First code-touching session since session 32. Ships the Phase 1
