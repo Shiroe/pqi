@@ -197,6 +197,53 @@ AGENT_WEIGHT_SHRINK: float = float(os.getenv("AGENT_WEIGHT_SHRINK", "2.0"))
 moderate nudge (Rules Lawyer ~1.08, Bear ~0.71 at session-24 lean rates).
 Set to 0.0 to disable the nudge while keeping the file machinery on."""
 
+# ---------------------------------------------------------------------------
+# Phase 1 rollout flags (SHARED_PREAMBLE autonomy rewrite + per-persona
+# anchor/advocacy mechanisms). All default OFF. Toggle individually so each
+# mechanism can be A/B-measured against the 2026-04-18 reliability baseline
+# without being confounded by the others. Rollout order per Phase 1 doc:
+# preamble → statistician → sentiment → specialist → contrarian → bear-alone
+# (Bull unchanged) → bull-alone (Bear reverted) → both if evidence supports.
+# ---------------------------------------------------------------------------
+
+PERSONA_V2_PREAMBLE: bool = os.getenv("PERSONA_V2_PREAMBLE", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 1 — asymmetric-evidence SHARED_PREAMBLE rewrite. Adds a
+mandatory evidence-quality pre-step, a worked asymmetric example, and an
+explicit anti-mirror check. Target: break YES/NO mirror collapse on
+`probability_no_score` outputs (Phase 1 criterion 2 — per-agent |drift|
+> 0.10 on ≥2 agents)."""
+
+PERSONA_V2_ANCHOR_STATISTICIAN: bool = os.getenv("PERSONA_V2_ANCHOR_STATISTICIAN", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 2 — Statistician must cite a concrete historical base-rate
+number in `historical_baseline` before emitting probability. Addresses
+cluster collapse (Phase 1 criterion 1)."""
+
+PERSONA_V2_ANCHOR_SENTIMENT: bool = os.getenv("PERSONA_V2_ANCHOR_SENTIMENT", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 2 — Sentiment must cite a specific crowd-psychology signal
+(news-cycle tone, social volume, price-vs-narrative divergence) in
+reasoning. Raw current price is not a sufficient anchor."""
+
+PERSONA_V2_ANCHOR_SPECIALIST: bool = os.getenv("PERSONA_V2_ANCHOR_SPECIALIST", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 2 — Specialist must cite a concrete field-specific nuance
+(map pool, patch, regulatory constraint, engineering detail) in
+`technical_nuance` before emitting probability."""
+
+PERSONA_V2_ANCHOR_CONTRARIAN: bool = os.getenv("PERSONA_V2_ANCHOR_CONTRARIAN", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 2 — Contrarian's `black_swan_event` must name a specific
+disruption vector from the prioritized list (roster, meta, form, morale,
+structural). Generic "anything could happen" framing no longer satisfies."""
+
+PERSONA_V2_BULL_ADVOCACY: bool = os.getenv("PERSONA_V2_BULL_ADVOCACY", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 3 — Bull probability-after-advocacy sequence. Forces explicit
+construct-case → step-outside-role → emit-honest-probability chain. Target:
+reduce Bull over-prediction on [0.80, 0.95) band (retro §5.2 −0.219 gap)."""
+
+PERSONA_V2_BEAR_ADVOCACY: bool = os.getenv("PERSONA_V2_BEAR_ADVOCACY", "false").lower() in {"1", "true", "yes"}
+"""Mechanism 3 — Bear probability-after-advocacy sequence. Same three-step
+chain as Bull. Target: Bear Brier toward 0.22 cluster floor while Bear's
+pairwise independence stays intact (Phase 1 criterion 3). Highest-leverage
+single flag per retro §5.3."""
+
 # Probability-first recommendation gates
 MIN_COUNCIL_PROBABILITY: float = float(os.getenv("MIN_COUNCIL_PROBABILITY", "0.60"))
 MIN_CONTRARIAN_PROBABILITY: float = float(
