@@ -18,6 +18,12 @@ banded WR comparison). [0.00–0.09) and [0.95–1.00] bookends are
 emitted so no prediction is silently dropped — they should be empty
 or near-empty in practice.
 
+Phase 1 rollout split: every verdict carries
+`AgentVerdict.prompt_flags` (sparse dict, session 40). The row label is
+the UNION of flags across that row's 7 verdicts, mapped via the
+`phase1_flag_label` convention (inlined here to keep stdlib-only):
+empty ⇒ `v1`, one flag ⇒ `v2:<flag>`, many ⇒ `v2:<sorted csv>`.
+
 Outputs:
 
   - ASCII reliability table per agent + council aggregate to stdout.
@@ -25,7 +31,12 @@ Outputs:
   - Cross-agent diversity diagnostics (mean pairwise Pearson, mean
     per-row stddev) — high correlation / low stddev confirms the
     Phase-1 mirror-collapse hypothesis.
-  - Markdown report at ~/.pqi/reports/reliability_YYYYMMDD.md.
+  - Markdown report at ~/.pqi/reports/reliability_YYYYMMDD.md
+    (suffixed with `_<flag-slug>` when `--flag` is supplied).
+
+Filter with `--flag v1`, `--flag v2:preamble`, or `--flag 'v2:*'` to
+isolate one rollout stage. Without `--flag`, the full resolved set is
+aggregated exactly as before.
 
 Stdlib only (json + math); no scipy, no rich. Mirrors the style of
 scripts/backfill_clv.py.
@@ -105,8 +116,45 @@ def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
+def _phase1_label(prompt_flags: dict[str, bool] | None) -> str:
+    """Inline copy of `models.phase1_flag_label` (stdlib-only constraint).
+
+    Empty / None ⇒ `"v1"`. Otherwise `"v2:<sorted csv of active flags>"`.
+    """
+    if not prompt_flags:
+        return "v1"
+    active = sorted(k for k, v in prompt_flags.items() if v)
+    if not active:
+        return "v1"
+    return "v2:" + ",".join(active)
+
+
+def _row_label(verdicts: list[dict]) -> str:
+    """Row-level flag label: UNION of every verdict's `prompt_flags` in the row,
+    mapped through `_phase1_label`. Missing `prompt_flags` on legacy rows
+    collapses to `"v1"` cleanly."""
+    union: dict[str, bool] = {}
+    for v in verdicts:
+        pf = v.get("prompt_flags") or {}
+        for k, val in pf.items():
+            if val:
+                union[k] = True
+    return _phase1_label(union)
+
+
+def _matches_flag(row_label: str, pattern: str | None) -> bool:
+    """Flag filter matcher. None ⇒ pass everything. A trailing `:*` makes the
+    prefix a glob (e.g. `v2:*` matches `v2:preamble`, `v2:preamble,bear_advocacy`)."""
+    if pattern is None:
+        return True
+    if pattern.endswith(":*"):
+        return row_label.startswith(pattern[:-1])
+    return row_label == pattern
+
+
 def _iter_resolved_predictions(history_path: Path):
-    """Yield (entry_yes_price, outcome, council_p, [(key, p), ...]) per resolved row.
+    """Yield (entry_yes_price, outcome, council_p, [(key, p), ...], flag_label)
+    per resolved row.
 
     `outcome` is 1 if final_yes_price > entry_yes_price else 0
     (directional winner; ties counted as NO). Council aggregate uses
@@ -143,16 +191,22 @@ def _iter_resolved_predictions(history_path: Path):
                 if key is None or p is None:
                     continue
                 agent_preds.append((key, float(p)))
-            yield (float(entry_p), outcome, council_p, agent_preds)
+            yield (float(entry_p), outcome, council_p, agent_preds, _row_label(verdicts))
 
 
-def _accumulate(history_path: Path):
-    """Walk history, return per-agent Brier inputs + per-bin counters.
+def _accumulate(rows):
+    """Fold a collection of resolved-prediction rows into per-agent Brier
+    inputs + per-bin counters.
+
+    `rows` is an iterable of tuples in the shape produced by
+    `_iter_resolved_predictions`:
+        (entry_p, outcome, council_p, agent_preds, flag_label)
 
     Returns:
         bins:    {key: {band: {"n": int, "yes": int, "p_sum": float}}}
         briers:  {key: list[(p, y)]}  # all predictions for Brier
         per_row: list[dict]           # for cross-agent diversity diagnostics
+        n_rows:  int
     """
     bins: dict[str, dict[tuple[float, float], dict[str, float | int]]] = {
         k: {b: {"n": 0, "yes": 0, "p_sum": 0.0} for b in BANDS} for k in ALL_KEYS
@@ -161,9 +215,7 @@ def _accumulate(history_path: Path):
     per_row_predictions: list[dict[str, float]] = []
     n_rows = 0
 
-    for entry_p, outcome, council_p, agent_preds in _iter_resolved_predictions(
-        history_path
-    ):
+    for entry_p, outcome, council_p, agent_preds, _label in rows:
         n_rows += 1
         row_preds: dict[str, float] = {}
 
@@ -364,11 +416,18 @@ def _render_diversity(diag: dict[str, float | dict]) -> list[str]:
 
 
 def render_report(
-    bins: dict, briers: dict, per_row: list[dict[str, float]], n_rows: int
+    bins: dict,
+    briers: dict,
+    per_row: list[dict[str, float]],
+    n_rows: int,
+    *,
+    flag_filter: str | None,
+    label_counts: dict[str, int],
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filter_tag = f" ({flag_filter})" if flag_filter else ""
     head = [
-        f"# Reliability diagram — {today}",
+        f"# Reliability diagram — {today}{filter_tag}",
         "",
         f"**Resolved rows analyzed:** {n_rows} (non-legacy, with both entry "
         "and final yes_price).",
@@ -378,6 +437,15 @@ def render_report(
         "`[0.09–0.50, 0.50–0.60, 0.60–0.70, 0.70–0.80, 0.80–0.95]` "
         "with `[0.00–0.09)` and `[0.95–1.00]` bookends.",
         f"**Thin-bin threshold:** flagged when n < {THIN_BIN_THRESHOLD}.",
+    ]
+    if flag_filter is not None:
+        head.append(f"**Flag filter:** `{flag_filter}` (row-union label).")
+    if label_counts:
+        counts_line = ", ".join(
+            f"`{lbl}`={n}" for lbl, n in sorted(label_counts.items(), key=lambda kv: -kv[1])
+        )
+        head.append(f"**Resolved rows by flag label:** {counts_line}.")
+    head += [
         "",
         "## Per-agent reliability",
         "",
@@ -394,10 +462,19 @@ def render_report(
     return "\n".join(head + body + _render_brier_summary(briers) + _render_diversity(diag))
 
 
-def write_report(text: str) -> Path:
+def _flag_slug(flag_filter: str) -> str:
+    """Filesystem-safe slug for a flag filter. `v2:preamble` → `v2-preamble`,
+    `v2:*` → `v2-any`. Keeps the date-only filename when no filter is set."""
+    if flag_filter.endswith(":*"):
+        return flag_filter[:-2] + "-any"
+    return flag_filter.replace(":", "-").replace(",", "+")
+
+
+def write_report(text: str, flag_filter: str | None = None) -> Path:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    out = REPORTS_DIR / f"reliability_{today}.md"
+    suffix = f"_{_flag_slug(flag_filter)}" if flag_filter else ""
+    out = REPORTS_DIR / f"reliability_{today}{suffix}.md"
     out.write_text(text)
     return out
 
@@ -417,21 +494,54 @@ def main() -> int:
         action="store_true",
         help="Skip writing the markdown report; just print to stdout.",
     )
+    parser.add_argument(
+        "--flag",
+        type=str,
+        default=None,
+        help=(
+            "Filter resolved rows by Phase 1 rollout label. Accepts exact "
+            "matches (e.g. `v1`, `v2:preamble`) or a trailing-star prefix "
+            "glob (e.g. `v2:*`). Without this flag, all resolved rows are "
+            "aggregated as before."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.history.exists():
         print(f"No history file at {args.history}", file=sys.stderr)
         return 1
 
-    bins, briers, per_row, n_rows = _accumulate(args.history)
+    all_rows = list(_iter_resolved_predictions(args.history))
+    label_counts: dict[str, int] = {}
+    for row in all_rows:
+        lbl = row[4]
+        label_counts[lbl] = label_counts.get(lbl, 0) + 1
+
+    if label_counts:
+        summary = ", ".join(
+            f"{lbl}={n}"
+            for lbl, n in sorted(label_counts.items(), key=lambda kv: -kv[1])
+        )
+        print(f"resolved rows by flag label: {summary}", file=sys.stderr)
+
+    filtered = [row for row in all_rows if _matches_flag(row[4], args.flag)]
+    bins, briers, per_row, n_rows = _accumulate(filtered)
     if n_rows == 0:
-        print("No non-legacy resolved rows with both entry and final prices.")
+        msg = "No resolved rows matched"
+        if args.flag:
+            msg += f" --flag {args.flag!r}."
+        else:
+            msg += " (no non-legacy rows with both entry and final prices)."
+        print(msg)
         return 0
 
-    text = render_report(bins, briers, per_row, n_rows)
+    text = render_report(
+        bins, briers, per_row, n_rows,
+        flag_filter=args.flag, label_counts=label_counts,
+    )
     print(text)
     if not args.no_write:
-        path = write_report(text)
+        path = write_report(text, flag_filter=args.flag)
         print(f"\nwrote {path}", file=sys.stderr)
     return 0
 
