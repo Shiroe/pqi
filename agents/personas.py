@@ -132,21 +132,33 @@ points, form numbers, named catalysts, absences") and one for the NO path \
 paraphrases of each other. If the YES summary is 3 concrete points and \
 the NO summary is 1 vague gesture, that asymmetry is the signal — reflect \
 it in the numbers.
-  - WORKED EXAMPLE (asymmetric evidence): in a Team A (deep recent-match \
-record) vs Team B (new lineup, one public result) matchup, a correct \
-autonomous output might be `probability_score=70, probability_no_score=22, \
-confidence_yes=72, confidence_no=38`. The 8-point gap (100 − 70 − 22) is \
-IGNORANCE MASS on the NO side where the briefing is thin; the confidence \
-asymmetry reflects that your YES estimate is better grounded than your NO \
-estimate. A mirrored output (p_yes=70, p_no=30, both confidences equal) \
-would have compressed that asymmetry away — that is the failure mode.
-  - ANTI-MIRROR CHECK: if `probability_score + probability_no_score` equals \
-exactly 100, stop and recheck — you have likely skipped the independent \
-reasoning step. The sum SHOULD usually be less than 100 when either \
-side's briefing evidence is thin (reserve mass for ignorance). A sum \
-greater than 100 is acceptable only when the briefing genuinely provides \
-overlapping evidence that supports both outcomes (rare) — flag it in \
-reasoning when it happens.
+  - WORKED EXAMPLES (evidence asymmetry drives ignorance mass; gap size \
+should track briefing depth):
+    · Mild asymmetry — Team A has detailed recent form; Team B has decent \
+but slightly thinner data: `probability_score=66, probability_no_score=30, \
+confidence_yes=68, confidence_no=55`. The small ~4-pt gap captures a \
+modest data imbalance.
+    · Severe asymmetry — same Team A; Team B is a new lineup with one \
+public result: `probability_score=72, probability_no_score=18, \
+confidence_yes=75, confidence_no=32`. The ~10-pt gap and the lower \
+confidence_no together surface the briefing's near-silence on the NO \
+path — the ensemble can weight this down.
+    · Symmetric evidence — both sides well-covered by the briefing: \
+`probability_score=55, probability_no_score=42, confidence_yes=62, \
+confidence_no=60`. A small gap and matched confidences are honest here \
+— don't manufacture ignorance mass when none exists.
+    The gap size IS the health signal: it should track actual evidence \
+asymmetry. A mirrored output (p_yes=70, p_no=30, confidences equal) when \
+the briefing is thin on one side has compressed that asymmetry away — \
+that is the failure mode.
+  - ANTI-MIRROR CHECK: if the sum `probability_score + probability_no_score` \
+lands very close to 100 AND your confidences on the two sides are near \
+equal, that is a signal you may have derived probability_no_score \
+mechanically from probability_score instead of constructing it \
+independently. Go back to your two evidence summaries and confirm the sum \
+reflects the evidence, not a default. A sum of exactly 100 is fine when \
+the briefing genuinely supports both outcomes with comparable depth — the \
+signal is sum-near-100 PAIRED WITH matched confidences.
   - Do NOT compute probability_no_score as `100 - probability_score`. That \
 produces no new information beyond probability_score alone and defeats \
 the purpose of the dual question.
