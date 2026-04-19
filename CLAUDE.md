@@ -373,37 +373,46 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 40 — Phase 1 Task 1.1 scaffold + analytics
-tagging landed. Seven `PERSONA_V2_*` flags (all default OFF) plus dual
-`SHARED_PREAMBLE` variants, four persona anchors, and Bull/Bear
-advocacy-then-probability blocks ship dynamically via `agents/personas.py`
-`_assemble()`. Baseline AGENT_PERSONAS is bit-identical to the
-pre-rewrite text when all flags off. Every verdict now carries
-`AgentVerdict.prompt_flags: dict[str, bool]` (sparse — ON flags only)
-with a `phase1_flag_label()` helper (`"v1"` / `"v2:<sorted csv>"`)
-surfaced as a derived `flag_label` column on the DuckDB `verdicts` view.
-`scripts/backfill_prompt_flags.py` tagged 437 existing history rows /
-2871 verdicts with `{}`; `.prePhase1.bak` preserved. **No rollout yet**
-— all flags remain off; next session begins the independent A/B stages
-(preamble → anchors → bear-alone → bull-alone → both if evidence supports).
+**Last updated:** session 41 — **Phase 1 rollout stage 1 LIVE**
+(`PERSONA_V2_PREAMBLE=true` in `.env`). V2 preamble text refined this
+session before flipping: the single worked example became a three-case
+spectrum (mild / severe / symmetric evidence asymmetry) and the
+anti-mirror check was softened from a hard trigger to a signal pattern
+(sum-near-100 PAIRED WITH matched confidences — not the sum alone).
+`scripts/reliability_diagram.py` gained a `--flag <label>` argument
+(`v1`, `v2:preamble`, `v2:*` glob) so v1 and v2 populations render as
+independent diagrams with flag-suffixed filenames. Session 41 earlier
+also shipped `run_context` persistence on every history entry and a
+raw CLOB-trendlines sidecar + backfill — both infrastructure, no
+pipeline or aggregator touch.
+
+Rollout observation state: **16 V2 runs queued** (112 `v2:preamble`
+verdicts in DuckDB), **0 resolved** yet. The refreshed 2026-04-19
+baseline report is 100% v1 (409 rows): council Brier 0.2156, Bear
+Brier 0.2820, cluster r≥0.85 fraction 9/21 (43%), Bear still
+structurally independent (r≈0 with the 5-agent cluster). V2
+measurement waits on resolutions.
 
 Phase 0 verdict still stands: inconclusive at current n (65 resolved
-BUYs / 385 reliability rows). Council Brier 0.2176 beats 0.25 chance
-baseline by ~3pp; mean pre-event CLV −0.0167 on n=44; no band clears ≥1
-Wilson-CI-width flag. Realized April PnL −0.575/share. Full retrospective:
+BUYs / 385 original reliability rows). Council Brier 0.2176 beats 0.25
+chance baseline by ~3pp; mean pre-event CLV −0.0167 on n=44; no band
+cleared ≥1 Wilson-CI-width flag. Realized April PnL −0.575/share. Full
+retrospective:
 [`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md).
 
-**Highest-leverage next move: Phase 1 rollout stage 1** — turn on
-`PERSONA_V2_PREAMBLE` alone and re-run
-`python -m scripts.reliability_diagram` after ~10–20 fresh analyses.
-Gate knobs explicitly *not* retuned — `BAND_SHRINKAGE_K=5`,
-`MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands, Kelly multiplier,
-`MIN_WIN_RATE_SAMPLES` all stand.
+**Highest-leverage next move: observe stage 1, don't escalate.** Let
+resolutions accumulate until ≥20 V2 rows resolve, then run
+`python -m pqi.scripts.reliability_diagram --flag v1` and
+`--flag v2:preamble` side-by-side against the four-criterion unified
+acceptance. Only flip `PERSONA_V2_PREAMBLE=false` and move to stage 2
+after stage 1 has a verdict — not before. Gate knobs explicitly *not*
+retuned — `BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`,
+ROI bands, Kelly multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
 
-Four-criterion acceptance (all must pass simultaneously vs the
-2026-04-18 baseline): cluster-pair r ≥ 0.85 fraction below 0.50;
-per-agent `|drift|` > 0.10 on ≥2 agents; Bear Brier toward 0.22 with
-independence preserved; council Brier holds or improves from 0.2176.
+Four-criterion acceptance (all must pass simultaneously vs the v1
+frame): cluster-pair r ≥ 0.85 fraction below 0.50; per-agent `|drift|`
+> 0.10 on ≥2 agents; Bear Brier toward 0.22 with independence
+preserved; council Brier holds or improves from 0.2176.
 
 Phase 2 split into three sub-phases (session 39): Phase 2a (Tier A
 auto-BUY, gated on P1), Phase 2b (MFE analysis, parallel-able with P1),
@@ -436,9 +445,12 @@ string, but kept the aggregator math identical. Sessions 34–39 were
 read-only analytics / measurement / synthesis / documentation with no
 pipeline or aggregator touch. Session 40 added Phase 1 rollout scaffold
 (prompt assembly, flags, analytics tagging on `AgentVerdict`) with zero
-aggregator changes — scoring still reads `probability` + the two
-`confidence_*` fields exactly as before. See `docs/session-log.md` for
-per-session detail.
+aggregator changes. Session 41 refined `_SHARED_PREAMBLE_V2`, flipped
+`PERSONA_V2_PREAMBLE=true`, persisted `run_context` per history row,
+added a raw CLOB-trendlines sidecar, and extended `reliability_diagram`
+with `--flag` — still zero aggregator changes; scoring still reads
+`probability` + the two `confidence_*` fields exactly as before. See
+`docs/session-log.md` for per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit
@@ -476,6 +488,8 @@ running the backtest. See
 - **Pre-event CLV backfill** (session 35, `scripts/backfill_clv.py`).
 - **Reliability diagram** (session 36, `scripts/reliability_diagram.py`):
   versioned markdown report at `~/.pqi/reports/reliability_YYYYMMDD.md`.
+  `--flag <label>` (session 41) filters resolved rows by Phase 1 rollout
+  label (`v1`, `v2:preamble`, `v2:*`); flag-suffixed output filenames.
 - **Per-band calibration retrospective** (session 37, no code) and
   **Phase 0 verdict synthesis** (session 38, no code) in
   `docs/retrospectives/phase_0_edge_2026_04.md`.
