@@ -617,11 +617,18 @@ Use `/public-search?q=TEXT` as supplementary fetch for ghost events
 that don't appear in `/events` list queries. See known-issues.md
 "Ghost events" — this is the closest available workaround.
 
-### C.3 Multi-market batch analysis (was item #4)
+### C.3 Multi-market batch analysis (was item #4) — ✅ shipped session 42
 
-Allow `pqi analyze --top 3` to analyze top N markets sequentially.
-(Subsumed by B.2 once that lands; keep as a standalone interim
-deliverable.)
+Shipped as `pqi analyze` multi-select: the event-selection prompt
+accepts `1,3,5`, `3-7`, `1-3,7,9-11`, or `all`. N == 1 preserves the
+single-event UX (sub-market picker + sibling prompt). N ≥ 2 routes
+through a batch driver with bounded parallelism
+(`ANALYZE_BATCH_CONCURRENCY`, default 1; CLI override
+`--concurrency/-j`, practical ceiling 3 on Anthropic Tier 2) and a
+Rich Live status table showing per-row phase + percent. Persistence
+runs sequentially after the batch completes (JSONL append safety).
+`--summary-only` suppresses per-event panels. See session 42 in
+`docs/session-log.md`.
 
 ### C.4 Per-category accuracy slicing (was item #5)
 

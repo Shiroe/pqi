@@ -160,6 +160,18 @@ MIN_VOLUME_SHORT_WINDOW_USD: float = float(
 )
 
 # ---------------------------------------------------------------------------
+# Analyze batch mode
+# ---------------------------------------------------------------------------
+
+ANALYZE_BATCH_CONCURRENCY: int = int(os.getenv("ANALYZE_BATCH_CONCURRENCY", "1"))
+"""Max parallel analyze runs when a multi-select spec is given to
+`analyze`. 1 = strict sequential (default; safest against API rate limits
+and easiest to inspect). 3 is the practical ceiling on Anthropic Tier 2
+(1K RPM, 450K input/min, 90K output/min) assuming a full council + single
+synthesizer call per run. CLI flag `--concurrency/-j` overrides this per
+invocation."""
+
+# ---------------------------------------------------------------------------
 # Scoring & recommendation gates
 # ---------------------------------------------------------------------------
 

@@ -10,11 +10,13 @@ Uses typer for CLI parsing and rich for all terminal output.
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
@@ -259,6 +261,58 @@ def prompt_market_selection(markets: list[MarketData]) -> MarketData:
         console.print(f"[red]Please enter a number between 1 and {len(markets)}.[/red]")
 
 
+def _parse_selection(spec: str, max_n: int) -> list[int]:
+    """Parse a multi-select spec into a sorted unique 1-indexed list.
+
+    Accepted forms (comma-separated, whitespace tolerant):
+      ""            → [1]                 (matches Enter-on-empty)
+      "1"           → [1]
+      "1,3,5"       → [1, 3, 5]
+      "3-7"         → [3, 4, 5, 6, 7]
+      "1-3,7,9-11"  → [1, 2, 3, 7, 9, 10, 11]
+      "all"         → [1, …, max_n]
+
+    Reversed ranges (e.g. `5-3`) are normalized. Raises ValueError with a
+    user-readable message on malformed input or out-of-bound index.
+    """
+    s = spec.strip().lower()
+    if s == "":
+        return [1]
+    if s == "all":
+        return list(range(1, max_n + 1))
+
+    picks: set[int] = set()
+    for token in s.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            lo_str, _, hi_str = token.partition("-")
+            try:
+                lo = int(lo_str)
+                hi = int(hi_str)
+            except ValueError:
+                raise ValueError(
+                    f"'{token}' is not a valid range (use e.g. 3-7)."
+                )
+            if lo > hi:
+                lo, hi = hi, lo
+            if lo < 1 or hi > max_n:
+                raise ValueError(f"Range {lo}-{hi} is outside 1-{max_n}.")
+            picks.update(range(lo, hi + 1))
+        else:
+            try:
+                idx = int(token)
+            except ValueError:
+                raise ValueError(f"'{token}' is not a number.")
+            if idx < 1 or idx > max_n:
+                raise ValueError(f"{idx} is outside 1-{max_n}.")
+            picks.add(idx)
+    if not picks:
+        raise ValueError("No items selected.")
+    return sorted(picks)
+
+
 def _analyzed_market_ids() -> set[str]:
     """Set of market IDs that already have a (non-legacy) entry in history.
 
@@ -458,37 +512,15 @@ def display_event_list(groups: list[EventGroup]) -> None:
     console.print(table)
 
 
-def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, MarketData]:
+def _prompt_sub_market(group: EventGroup) -> MarketData:
+    """Sub-select one market from a multi-market event.
+
+    Single-market events return `group.markets[0]` directly. Moneyline
+    (overall-outcome) is ordered first — matches `_sort_moneyline_first`.
     """
-    Display the event list and prompt the user to select an event, then a market.
-
-    Single-market events skip the sub-selection step.
-    Returns (selected_group, selected_market).
-    """
-    display_event_list(groups)
-
-    # Step 1: pick an event group
-    while True:
-        raw = input(f"\nSelect an event [1–{len(groups)}, Enter for #1]: ").strip()
-        if raw == "":
-            group = groups[0]
-            break
-        try:
-            idx = int(raw)
-            if 1 <= idx <= len(groups):
-                group = groups[idx - 1]
-                break
-        except ValueError:
-            pass
-        console.print(f"[red]Please enter a number between 1 and {len(groups)}.[/red]")
-
-    # Step 2: if single market, return directly
     if len(group.markets) == 1:
-        return group, group.markets[0]
+        return group.markets[0]
 
-    # Step 3: sub-select from sibling markets
-    # Sort moneyline (overall outcome) market first — highest similarity to event title,
-    # then by volume descending as tiebreaker.
     sorted_markets = _sort_moneyline_first(group.markets, group.event_title)
 
     console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
@@ -524,16 +556,242 @@ def prompt_event_selection(groups: list[EventGroup]) -> tuple[EventGroup, Market
             f"\nSelect a market [1–{len(sorted_markets)}, Enter for #1]: "
         ).strip()
         if raw == "":
-            return group, sorted_markets[0]
+            return sorted_markets[0]
         try:
             idx = int(raw)
             if 1 <= idx <= len(sorted_markets):
-                return group, sorted_markets[idx - 1]
+                return sorted_markets[idx - 1]
         except ValueError:
             pass
         console.print(
             f"[red]Please enter a number between 1 and {len(sorted_markets)}.[/red]"
         )
+
+
+def prompt_event_multiselect(
+    groups: list[EventGroup],
+) -> list[tuple[EventGroup, MarketData]]:
+    """Event-list prompt that accepts single or multi-select input.
+
+    Accepted input forms are documented on `_parse_selection`: an index
+    (`3`), comma list (`1,3,5`), range (`3-11`), mixed (`1-3,7,9-11`),
+    literal `all`, or Enter-on-empty → `[1]`.
+
+    For a single-index selection the user also gets the sub-market prompt
+    (moneyline + siblings) — this matches the pre-multi-select UX.
+    Multi-index selections skip that prompt and pick the moneyline /
+    headline market of each event automatically, which is the typical
+    one-per-event workflow.
+    """
+    display_event_list(groups)
+
+    while True:
+        raw = input(
+            f"\nSelect events [1–{len(groups)}, '1,3', '3-7', 'all', "
+            f"Enter for #1]: "
+        ).strip()
+        try:
+            indices = _parse_selection(raw, len(groups))
+            break
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+
+    if len(indices) == 1:
+        group = groups[indices[0] - 1]
+        return [(group, _prompt_sub_market(group))]
+
+    return [
+        (groups[i - 1], _headline_market(groups[i - 1])) for i in indices
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Batch mode state + rendering
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _BatchRow:
+    """Mutable per-event state for the batch-mode Live display.
+
+    Populated by `_run_batch`: `phase` / `percent` advance through
+    `_run_analysis`'s phase callback; `result` / `yes_raw` / `no_raw` are
+    filled on success; `error` on failure. Persistence (history / sidecar
+    append) is deferred to the caller so all file writes stay sequential.
+    """
+    idx: int
+    group: EventGroup
+    market: MarketData
+    phase: str = "not started"
+    percent: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    result: Optional[CouncilResult] = None
+    yes_raw: Optional[list[PricePoint]] = field(default=None)
+    no_raw: Optional[list[PricePoint]] = field(default=None)
+    error: Optional[str] = None
+    run_id: Optional[str] = None
+
+
+_PHASE_STYLES: dict[str, str] = {
+    "not started": "dim",
+    "starting": "dim",
+    "resolving match": "cyan",
+    "synthesizing briefing": "cyan",
+    "fetching price history": "cyan",
+    "council deliberating": "yellow",
+    "scoring": "yellow",
+    "done": "green",
+    "cached": "green",
+    "failed": "red",
+}
+
+
+def _format_elapsed(start: Optional[datetime], end: Optional[datetime]) -> str:
+    if start is None:
+        return "—"
+    tip = end or datetime.now(timezone.utc)
+    secs = max(0, int((tip - start).total_seconds()))
+    return f"{secs // 60:02d}:{secs % 60:02d}"
+
+
+def _render_batch_table(rows: list[_BatchRow], concurrency: int) -> Table:
+    completed = sum(1 for r in rows if r.finished_at is not None)
+    table = Table(
+        title=(
+            f"Batch Analyze — {completed}/{len(rows)} complete  ·  "
+            f"concurrency={concurrency}"
+        ),
+        box=box.ROUNDED,
+        show_lines=False,
+    )
+    table.add_column("#", style="bold cyan", justify="right", width=4)
+    table.add_column("Event", style="white", no_wrap=False)
+    table.add_column("Status", width=24)
+    table.add_column("%", justify="right", width=5)
+    table.add_column("Elapsed", justify="right", width=8)
+    for r in rows:
+        label = r.group.event_title or r.market.question
+        if len(label) > 70:
+            label = label[:69] + "…"
+        style = _PHASE_STYLES.get(r.phase, "white")
+        table.add_row(
+            str(r.idx),
+            label,
+            f"[{style}]{r.phase}[/{style}]",
+            f"{r.percent}%",
+            _format_elapsed(r.started_at, r.finished_at),
+        )
+    return table
+
+
+def _render_batch_summary(rows: list[_BatchRow]) -> None:
+    table = Table(title="Batch Summary", box=box.ROUNDED, show_lines=False)
+    table.add_column("#", style="bold cyan", justify="right", width=4)
+    table.add_column("Event", style="white", no_wrap=False)
+    table.add_column("Result", width=16)
+    table.add_column("Signal", width=18)
+    table.add_column("Price", justify="right", width=8)
+    table.add_column("Max ROI", justify="right", width=9)
+    table.add_column("Elapsed", justify="right", width=8)
+    for r in rows:
+        label = r.group.event_title or r.market.question
+        if len(label) > 55:
+            label = label[:54] + "…"
+        if r.result is None:
+            result_cell = "[red]FAILED[/red]"
+            err = r.error or "—"
+            signal_cell = err if len(err) <= 18 else err[:17] + "…"
+            price_cell = "—"
+            roi_cell = "—"
+        else:
+            res = r.result
+            rec = res.recommendation
+            yes_p = res.market.yes_price
+            no_p = 1.0 - yes_p
+            if rec == "BUY YES":
+                result_cell = "[green]BUY YES[/green]"
+                price = yes_p
+            elif rec == "BUY NO":
+                result_cell = "[green]BUY NO[/green]"
+                price = no_p
+            else:
+                result_cell = "[yellow]PASS[/yellow]"
+                price = yes_p if res.final_score >= res.no_score else no_p
+            sig = res.signal_type or res.pass_reason or ""
+            if len(sig) > 18:
+                sig = sig[:17] + "…"
+            signal_cell = sig
+            price_cell = f"${price:.2f}"
+            roi = (1.0 - price) / price if price > 0 else 0.0
+            roi_cell = f"+{roi:.0%}"
+        table.add_row(
+            str(r.idx),
+            label,
+            result_cell,
+            signal_cell,
+            price_cell,
+            roi_cell,
+            _format_elapsed(r.started_at, r.finished_at),
+        )
+    console.print(table)
+
+
+async def _run_batch(
+    rows: list[_BatchRow], concurrency: int, no_cache: bool
+) -> None:
+    """Run each row's analysis under a shared `asyncio.Semaphore`.
+
+    Live status table refreshes 4 Hz off the shared row states — workers
+    mutate their `phase` / `percent` via the `on_phase` callback threaded
+    into `_run_analysis`. Exceptions are captured per-row (not re-raised)
+    so one failed event does not abort the batch.
+    """
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _work(row: _BatchRow) -> None:
+        async with sem:
+            row.started_at = datetime.now(timezone.utc)
+            row.phase = "starting"
+            row.percent = 0
+
+            def _on_phase(label: str, pct: int) -> None:
+                row.phase = label
+                row.percent = pct
+
+            try:
+                res, yes_pts, no_pts = await _run_analysis(
+                    row.market, no_cache=no_cache, on_phase=_on_phase
+                )
+                row.result = res
+                row.yes_raw = yes_pts
+                row.no_raw = no_pts
+            except Exception as exc:
+                row.error = str(exc) or exc.__class__.__name__
+                row.phase = "failed"
+                row.percent = 100
+                logger.exception("Batch run failed for %s", row.market.id)
+            finally:
+                row.finished_at = datetime.now(timezone.utc)
+
+    workers = [asyncio.create_task(_work(r)) for r in rows]
+
+    with Live(
+        _render_batch_table(rows, concurrency),
+        console=console,
+        refresh_per_second=4,
+        transient=False,
+    ) as live:
+        while not all(t.done() for t in workers):
+            await asyncio.sleep(0.25)
+            live.update(_render_batch_table(rows, concurrency))
+        live.update(_render_batch_table(rows, concurrency))
+
+    # Surface stray exceptions at debug level — `_work` already captured
+    # anything user-facing into `row.error`.
+    for t in workers:
+        if t.exception() is not None:
+            logger.debug("Worker task exception (already captured): %s", t.exception())
 
 
 # ---------------------------------------------------------------------------
@@ -545,12 +803,19 @@ async def _run_analysis(
     market: MarketData,
     no_cache: bool = False,
     shared_briefing: "BriefingDocument | None" = None,
+    on_phase: Callable[[str, int], None] | None = None,
 ) -> "tuple[CouncilResult, list[PricePoint] | None, list[PricePoint] | None]":
     """Execute the full analysis pipeline for one market, with optional cache.
 
     If shared_briefing is provided (e.g. for sibling markets from the same event),
     the synthesizer step is skipped. The briefing's market is rebound to the
     current market so the council sees the right resolution criteria.
+
+    `on_phase(label, percent)` is called at each pipeline checkpoint when
+    provided — used by the batch-mode Live status table to report
+    per-row progress. When `on_phase` is None this function behaves
+    exactly as before, including all `console.print` status lines. When
+    provided the prints are suppressed so the Live display stays clean.
 
     Returns `(result, yes_raw_points, no_raw_points)`. The two point lists
     are the raw CLOB fetch output threaded out to the caller for the
@@ -562,6 +827,14 @@ async def _run_analysis(
     from pqi.agents.council import run_council
     from pqi.scoring import build_council_result
     from pqi.cache import get_cached, store_result
+
+    verbose = on_phase is None
+
+    def _emit(label: str, pct: int) -> None:
+        if on_phase is not None:
+            on_phase(label, pct)
+
+    _emit("resolving match", 2)
 
     # Resolve the structured match record FIRST so it can both inform the
     # cache invalidation key (status changes invalidate even when price
@@ -575,7 +848,7 @@ async def _run_analysis(
             structured_match = await resolve_match(market)
         except Exception as exc:
             logger.warning("Match resolver failed for %s: %s", market.id, exc)
-        if structured_match is not None:
+        if structured_match is not None and verbose:
             console.print(
                 f"[cyan]PandaScore: {structured_match.team_a_name} vs "
                 f"{structured_match.team_b_name} ({structured_match.status}, "
@@ -586,18 +859,34 @@ async def _run_analysis(
     if not no_cache:
         cached = await get_cached(market.id, market.yes_price, structured_status)
         if cached is not None:
-            console.print("[green]Cache hit — using previous council result.[/green]")
+            if verbose:
+                console.print(
+                    "[green]Cache hit — using previous council result.[/green]"
+                )
+            _emit("cached", 100)
             return cached, None, None
 
+    _emit("synthesizing briefing", 5)
+
     if shared_briefing is not None:
-        console.print(
-            f"\n[cyan]Reusing shared event briefing for:[/cyan] {market.question[:80]}"
-        )
+        if verbose:
+            console.print(
+                f"\n[cyan]Reusing shared event briefing for:[/cyan] "
+                f"{market.question[:80]}"
+            )
         briefing = shared_briefing.model_copy(update={"market": market})
     else:
-        console.print(f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}")
+        if verbose:
+            console.print(
+                f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}"
+            )
         briefing = await build_briefing(market, structured_match=structured_match)
-    console.print(f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]")
+    if verbose:
+        console.print(
+            f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]"
+        )
+
+    _emit("fetching price history", 50)
 
     # Enrich briefing with CLOB price history (non-fatal). The raw point
     # lists are threaded out to the caller for the full-fidelity sidecar
@@ -611,34 +900,46 @@ async def _run_analysis(
         if fetch_result:
             price_history, yes_raw_points, no_raw_points = fetch_result
             briefing = briefing.model_copy(update={"price_history": price_history})
-            console.print(
-                f"[cyan]Price history: YES {price_history.yes.data_points}pts "
-                f"{price_history.yes.direction} ({price_history.yes.change_1w_pp:+.1f}pp/wk)  |  "
-                f"NO {price_history.no.data_points}pts "
-                f"{price_history.no.direction} ({price_history.no.change_1w_pp:+.1f}pp/wk)[/cyan]"
-            )
-        else:
+            if verbose:
+                console.print(
+                    f"[cyan]Price history: YES {price_history.yes.data_points}pts "
+                    f"{price_history.yes.direction} ({price_history.yes.change_1w_pp:+.1f}pp/wk)  |  "
+                    f"NO {price_history.no.data_points}pts "
+                    f"{price_history.no.direction} ({price_history.no.change_1w_pp:+.1f}pp/wk)[/cyan]"
+                )
+        elif verbose:
             console.print(
                 "[dim]Price history unavailable — proceeding without trend data.[/dim]"
             )
     except Exception as exc:
         logger.warning("Price history enrichment failed: %s", exc)
-        console.print(
-            "[dim]Price history fetch failed — proceeding without trend data.[/dim]"
-        )
+        if verbose:
+            console.print(
+                "[dim]Price history fetch failed — proceeding without trend data.[/dim]"
+            )
+
+    _emit("council deliberating", 55)
 
     concurrency_info = (
         f"concurrency={config.LOCAL_LLM_CONCURRENCY}"
         if config.LLM_BACKEND == "ollama"
         else "parallel"
     )
-    console.print(f"[cyan]Summoning the Council of Seven… ({concurrency_info})[/cyan]")
+    if verbose:
+        console.print(
+            f"[cyan]Summoning the Council of Seven… ({concurrency_info})[/cyan]"
+        )
     verdicts = await run_council(briefing)
-    console.print(f"[cyan]Council complete: {len(verdicts)}/7 verdicts.[/cyan]\n")
+    if verbose:
+        console.print(f"[cyan]Council complete: {len(verdicts)}/7 verdicts.[/cyan]\n")
+
+    _emit("scoring", 95)
 
     result = build_council_result(market, verdicts)
     result.briefing = briefing
     await store_result(result)
+
+    _emit("done", 100)
     return result, yes_raw_points, no_raw_points
 
 
@@ -693,9 +994,26 @@ def analyze(
         "--no-cache",
         help="Force a fresh council run, ignoring any cached result.",
     ),
+    summary_only: bool = typer.Option(
+        False,
+        "--summary-only",
+        help="Batch mode only: skip per-event detail panels; show just the summary table.",
+    ),
+    concurrency: Optional[int] = typer.Option(
+        None,
+        "--concurrency",
+        "-j",
+        help="Max parallel runs in batch mode. Overrides ANALYZE_BATCH_CONCURRENCY.",
+        min=1,
+    ),
 ) -> None:
     """
     Fetch active Polymarket events, run the Council of Seven, and print recommendations.
+
+    Event selection accepts a single index (`3`), a comma list (`1,3,5`),
+    a range (`3-7`), mixed (`1-3,7,9-11`), or `all`. Multi-index
+    selections run in batch mode with a live progress table; single-index
+    selections keep the sub-market and sibling prompts.
     """
     from pqi.market.polymarket import fetch_events, CategoryNotFoundError
 
@@ -747,86 +1065,145 @@ def analyze(
 
     groups = groups[:top_n]
 
-    if top:
-        group = groups[0]
-        market = group.primary_market
-        console.print(f"[dim]Auto-selected top event by volume.[/dim]")
-        display_event_list([group])
-    else:
-        group, market = prompt_event_selection(groups)
-
-    # Show sibling markets if this is a multi-market event
-    other_siblings = [m for m in group.markets if m.id != market.id]
-
-    if other_siblings:
-        console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
-        console.print(
-            f"[cyan]This event has {len(group.markets)} markets total:[/cyan]"
-        )
-        for i, s in enumerate(group.markets, 1):
-            marker = " [bold green]← selected[/bold green]" if s.id == market.id else ""
-            console.print(f"  {i}. {s.question[:60]}  (YES {s.yes_price:.0%}){marker}")
-
-    console.print(f"\n[bold]Analysing:[/bold] {market.question}\n")
-
-    result, yes_raw_points, no_raw_points = asyncio.run(
-        _run_analysis(market, no_cache=no_cache)
-    )
-    display_council_result(result)
-
     from pqi.history import append_result
     from pqi.sidecar_price_points import append_row as append_price_points
 
-    run_id = append_result(result)
-    console.print("[dim]Result saved to history.[/dim]")
-    # Sidecar write fires only when a fresh CLOB fetch returned usable
-    # points. Cache-hit runs reuse an already-persisted history row whose
-    # sidecar entry (if any) lives from the original fresh run. Missing
-    # sidecar rows are the backfill script's job.
-    if yes_raw_points is not None and no_raw_points is not None:
-        append_price_points(
-            run_id=run_id,
-            market=market,
-            analysis_ran_at=datetime.now(timezone.utc),
-            interval=config.PRICE_HISTORY_INTERVAL,
-            fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
-            yes_points=yes_raw_points,
-            no_points=no_raw_points,
-        )
+    # --- Selection -----------------------------------------------------------
+    if top:
+        group = groups[0]
+        market = group.primary_market
+        console.print("[dim]Auto-selected top event by volume.[/dim]")
+        display_event_list([group])
+        selections: list[tuple[EventGroup, MarketData]] = [(group, market)]
+    else:
+        selections = prompt_event_multiselect(groups)
 
-    # Offer to analyze sibling markets (already known from EventGroup — no extra API call)
-    if other_siblings:
-        console.print(
-            f"\n[cyan]{len(other_siblings)} sibling market(s) available.[/cyan]"
-        )
-        raw = input("Analyze siblings too? [y/N]: ").strip().lower()
-        if raw in ("y", "yes"):
-            # Reuse the parent market's briefing — same event, same news.
-            # Council still runs separately per sibling (different resolution criteria).
-            shared = result.briefing
-            for sibling in other_siblings:
-                console.print(f"\n{'─' * 60}")
-                console.print(f"[bold]Analysing:[/bold] {sibling.question}\n")
-                sib_result, sib_yes_points, sib_no_points = asyncio.run(
-                    _run_analysis(
-                        sibling,
-                        no_cache=no_cache,
-                        shared_briefing=shared,
-                    )
+    # --- Single-event path (preserves sub-select + sibling prompt) -----------
+    if len(selections) == 1:
+        group, market = selections[0]
+        other_siblings = [m for m in group.markets if m.id != market.id]
+
+        if other_siblings:
+            console.print(f"\n[cyan]Event:[/cyan] {group.event_title}")
+            console.print(
+                f"[cyan]This event has {len(group.markets)} markets total:[/cyan]"
+            )
+            for i, s in enumerate(group.markets, 1):
+                marker = (
+                    " [bold green]← selected[/bold green]"
+                    if s.id == market.id
+                    else ""
                 )
-                display_council_result(sib_result)
-                sib_run_id = append_result(sib_result)
-                console.print("[dim]Result saved to history.[/dim]")
-                if sib_yes_points is not None and sib_no_points is not None:
-                    append_price_points(
-                        run_id=sib_run_id,
-                        market=sibling,
-                        analysis_ran_at=datetime.now(timezone.utc),
-                        interval=config.PRICE_HISTORY_INTERVAL,
-                        fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
-                        yes_points=sib_yes_points,
-                        no_points=sib_no_points,
+                console.print(
+                    f"  {i}. {s.question[:60]}  (YES {s.yes_price:.0%}){marker}"
+                )
+
+        console.print(f"\n[bold]Analysing:[/bold] {market.question}\n")
+
+        result, yes_raw_points, no_raw_points = asyncio.run(
+            _run_analysis(market, no_cache=no_cache)
+        )
+        display_council_result(result)
+
+        run_id = append_result(result)
+        console.print("[dim]Result saved to history.[/dim]")
+        # Sidecar write fires only when a fresh CLOB fetch returned usable
+        # points. Cache-hit runs reuse an already-persisted history row
+        # whose sidecar entry (if any) lives from the original fresh run.
+        # Missing sidecar rows are the backfill script's job.
+        if yes_raw_points is not None and no_raw_points is not None:
+            append_price_points(
+                run_id=run_id,
+                market=market,
+                analysis_ran_at=datetime.now(timezone.utc),
+                interval=config.PRICE_HISTORY_INTERVAL,
+                fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
+                yes_points=yes_raw_points,
+                no_points=no_raw_points,
+            )
+
+        # Offer to analyze sibling markets (no extra API call).
+        if other_siblings:
+            console.print(
+                f"\n[cyan]{len(other_siblings)} sibling market(s) available.[/cyan]"
+            )
+            raw = input("Analyze siblings too? [y/N]: ").strip().lower()
+            if raw in ("y", "yes"):
+                shared = result.briefing
+                for sibling in other_siblings:
+                    console.print(f"\n{'─' * 60}")
+                    console.print(f"[bold]Analysing:[/bold] {sibling.question}\n")
+                    sib_result, sib_yes_points, sib_no_points = asyncio.run(
+                        _run_analysis(
+                            sibling,
+                            no_cache=no_cache,
+                            shared_briefing=shared,
+                        )
                     )
+                    display_council_result(sib_result)
+                    sib_run_id = append_result(sib_result)
+                    console.print("[dim]Result saved to history.[/dim]")
+                    if sib_yes_points is not None and sib_no_points is not None:
+                        append_price_points(
+                            run_id=sib_run_id,
+                            market=sibling,
+                            analysis_ran_at=datetime.now(timezone.utc),
+                            interval=config.PRICE_HISTORY_INTERVAL,
+                            fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
+                            yes_points=sib_yes_points,
+                            no_points=sib_no_points,
+                        )
+        return
+
+    # --- Batch path (N ≥ 2 events, moneyline-only, no sibling prompt) --------
+    effective_concurrency = concurrency or config.ANALYZE_BATCH_CONCURRENCY
+    rows = [
+        _BatchRow(idx=i + 1, group=g, market=m)
+        for i, (g, m) in enumerate(selections)
+    ]
+    console.print(
+        f"\n[bold]Batch analysing {len(rows)} event(s), "
+        f"concurrency={effective_concurrency}…[/bold]\n"
+    )
+
+    asyncio.run(_run_batch(rows, effective_concurrency, no_cache))
+
+    # Persist sequentially — append_result / append_price_points append to
+    # JSONL sidecars and parallel writes can interleave lines larger than
+    # PIPE_BUF. Results are written in original selection order.
+    saved = 0
+    for r in rows:
+        if r.result is None:
+            continue
+        r.run_id = append_result(r.result)
+        saved += 1
+        if r.yes_raw is not None and r.no_raw is not None:
+            append_price_points(
+                run_id=r.run_id,
+                market=r.market,
+                analysis_ran_at=datetime.now(timezone.utc),
+                interval=config.PRICE_HISTORY_INTERVAL,
+                fidelity_minutes=config.PRICE_HISTORY_FIDELITY,
+                yes_points=r.yes_raw,
+                no_points=r.no_raw,
+            )
+    failed = sum(1 for r in rows if r.result is None)
+    console.print(
+        f"[dim]{saved}/{len(rows)} saved to history"
+        + (f"  ·  {failed} failed" if failed else "")
+        + ".[/dim]\n"
+    )
+
+    # Per-event detail panels (skipped with --summary-only).
+    if not summary_only:
+        for r in rows:
+            console.rule(f"#{r.idx} — {r.market.question[:80]}")
+            if r.result is not None:
+                display_council_result(r.result)
+            else:
+                console.print(f"[red]Analysis failed:[/red] {r.error}\n")
+
+    _render_batch_summary(rows)
 
 
 @app.command()

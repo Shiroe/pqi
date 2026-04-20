@@ -4,6 +4,132 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 42 — Multi-run analyze (multi-select + bounded parallel + Live status)
+
+The `analyze` command learned to take a multi-select spec at the
+event-selection prompt and run the batch with bounded parallelism and
+a Rich Live status table. This is the shipped form of roadmap item
+C.3 and directly serves the stage-1 V2 observation loop (queue many
+matches, watch them settle, compare populations via
+`reliability_diagram --flag`). Zero aggregator touch; zero changes to
+`_run_analysis`'s pipeline logic beyond an optional progress callback.
+
+### Part A — Selection parsing (`main.py::_parse_selection`)
+
+New pure helper: `_parse_selection(spec: str, max_n: int) -> list[int]`
+that accepts:
+
+- `""` → `[]` (caller falls through to default behavior)
+- `"3"` → `[3]`
+- `"1,3,5"` → `[1, 3, 5]`
+- `"3-7"` → `[3, 4, 5, 6, 7]` (inclusive both ends; reversed ranges
+  normalized, so `"7-3"` is the same)
+- `"1-3,7,9-11"` → mixed
+- `"all"` → `[1, 2, ..., max_n]`
+
+Duplicates collapse, results are sorted ascending, out-of-range or
+non-integer inputs raise `ValueError` with a clear message. 17/17
+inline smoke tests pass.
+
+### Part B — `on_phase` callback in `_run_analysis`
+
+Signature gained `on_phase: Callable[[str, int], None] | None = None`.
+When provided, the function suppresses its `console.print` output
+(`verbose = on_phase is None`) to avoid corrupting the Rich Live
+display, and emits six phase events:
+
+| Phase                    | Percent |
+| ------------------------ | ------: |
+| `resolving match`        |   2     |
+| `synthesizing briefing`  |   5     |
+| `fetching price history` |  50     |
+| `council deliberating`   |  55     |
+| `scoring`                |  95     |
+| `done`                   | 100     |
+
+Cache-hit short-circuit fires `cached` / 100 and returns immediately.
+Single-run behavior is unchanged: when `on_phase is None`, all prints
+still stream to the console exactly as before.
+
+### Part C — Batch driver (`_run_batch` + `_BatchRow` + Rich Live)
+
+`@dataclass _BatchRow` carries mutable state per event:
+`idx, group, market, phase, percent, started_at, finished_at, result,
+yes_raw, no_raw, error, run_id`.
+
+`_run_batch(rows, concurrency, no_cache)`:
+
+- `asyncio.Semaphore(concurrency)` limits in-flight work
+- Each worker captures its row, sets `starting`/0%, registers
+  `_on_phase(label, pct)` that mutates `row.phase` and `row.percent`,
+  then awaits `_run_analysis(..., on_phase=_on_phase)`
+- Exceptions are caught per-row: `row.error` captured, phase goes to
+  `failed` (red), other rows continue
+- A `Live` context refreshes a `_render_batch_table(rows, concurrency)`
+  at 4 Hz while any worker is still running, then paints one final
+  snapshot
+
+`_PHASE_STYLES` maps each phase name to a Rich style
+(dim / cyan / yellow / green / red) so the table is readable at a
+glance. `_format_elapsed` renders `MM:SS`.
+
+### Part D — Persistence separation
+
+History append (`append_result`) and raw CLOB sidecar
+(`append_price_points`) run **sequentially** in the `analyze` command
+**after** `_run_batch` returns. Rationale: a full history entry + raw
+sidecar entry is larger than `PIPE_BUF` on Linux, so concurrent
+`open(..., 'a')` writes can interleave byte-for-byte and corrupt the
+JSONL. Single-writer-after-batch is both simpler and correct.
+
+### Part E — `analyze` command rewrite
+
+- Two new flags: `--summary-only` (bool, off by default) and
+  `--concurrency/-j` (int, defaults to `ANALYZE_BATCH_CONCURRENCY`)
+- Prompt text reads "Pick event(s) — `1`, `1,3-5`, `all`" and feeds
+  the input through `_parse_selection`
+- `N == 1` → routes through `_prompt_sub_market` (extracted from the
+  old `prompt_event_selection`) so sub-market picker + sibling prompt
+  are preserved
+- `N >= 2` → each selected event resolves to its headline market
+  (`_headline_market(group)`), goes through `_run_batch`, then each
+  non-failed result is appended to history sequentially
+- Per-event result panels render after the batch unless
+  `--summary-only`; the final `_render_batch_summary` table always
+  renders
+
+### Part F — Config knob
+
+`ANALYZE_BATCH_CONCURRENCY: int = int(os.getenv("ANALYZE_BATCH_CONCURRENCY", "1"))`
+added to `config.py` with matching entry + comment in `.env.example`.
+Default 1 = strict sequential. Ceiling 3 on Anthropic Tier 2 (1K RPM /
+450K input-tok/min / 90K output-tok/min) since a full council +
+synthesizer is ~80K input / 6K output per run; 3 in-flight is
+~240K input/min, well under the input cap.
+
+### Files touched
+
+- `main.py` — multi-select prompt, `_parse_selection`,
+  `_prompt_sub_market`, `_BatchRow`, `_PHASE_STYLES`,
+  `_render_batch_table`, `_render_batch_summary`, `_run_batch`,
+  `_run_analysis` gained `on_phase` parameter, `analyze` command
+  rewrite
+- `config.py` — `ANALYZE_BATCH_CONCURRENCY` knob
+- `.env.example` — matching entry under new "Analyze batch mode" block
+- `README.md` — Batch mode section under Flags, `-j`/`--summary-only`
+  rows, `ANALYZE_BATCH_CONCURRENCY` in Tuning table
+- `docs/analyze-pipeline.md` — S3 node updated to reference
+  `prompt_event_multiselect()` and split single/batch paths
+- `docs/roadmap.md` — C.3 marked shipped
+
+### Follow-ups
+
+- Pipeline diagram could grow a "Batch path" subgraph under SELECT
+  showing the parallel branch; current edit just updates the S3 node.
+  Adequate until batch mode becomes load-bearing for another phase.
+
+---
+
 ## Session 41 — Stage 1 live + observation infrastructure
 
 Phase 1 rollout stage 1 went live this session

@@ -16,10 +16,11 @@ flowchart TD
     subgraph SELECT["Market Selection  (main.py)"]
         S1{"--top flag?"}
         S2["Auto-select #1<br/>by volume"]
-        S3["display_event_list()<br/>Rich table with Sig/Seen columns<br/>prompt_event_selection()"]
-        S4["User picks event → market"]
-        S5{"Multi-market<br/>event?"}
-        S6["Show sibling markets<br/>from EventGroup"]
+        S3["display_event_list()<br/>Rich table with Sig/Seen columns<br/>prompt_event_multiselect()<br/>accepts list/range/all spec"]
+        S4["User picks event(s) → market(s)"]
+        S5{"N == 1?"}
+        S6["Sub-market picker +<br/>sibling prompt (EventGroup)"]
+        S7["N &gt;= 2: headline market<br/>per event → batch path"]
     end
 
     subgraph CACHE_CHECK["Cache Check  (cache.py)"]

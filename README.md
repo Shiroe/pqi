@@ -111,9 +111,47 @@ python3 -m pqi.main [COMMAND] [OPTIONS]
 | `--live`           | `-l`  | flag    | off        | Only show live events (already started, not yet resolved). Composable with `--starts-within`    |
 | `--min-volume`     | `-v`  | `FLOAT` | _(config)_ | Override minimum volume floor in USD (use `-v 0` to see all)                                    |
 | `--no-cache`       |       | flag    | off        | Force a fresh council run, ignoring any cached result                                           |
+| `--concurrency`    | `-j`  | `INT`   | _(config)_ | Max parallel runs in batch mode. Default from `ANALYZE_BATCH_CONCURRENCY` (1). Ceiling 3 on Anthropic Tier 2 |
+| `--summary-only`   |       | flag    | off        | Batch mode only — skip per-event result panels, keep the final summary table                    |
 
 All flags can be freely combined. For example, `--live -c esports -v 0` shows all
 live esports events regardless of volume.
+
+### Batch mode (multi-select at the prompt)
+
+The event-selection prompt accepts a single index **or** a multi-select spec:
+
+| Input         | Selects                                              |
+| ------------- | ---------------------------------------------------- |
+| `3`           | Event #3 only (single-run UX — sub-market picker + sibling prompt preserved) |
+| `1,3,5`       | Events #1, #3, #5                                    |
+| `3-7`         | Events #3 through #7 inclusive (reversed ranges normalized) |
+| `1-3,7,9-11`  | Mixed list + range                                   |
+| `all`         | Every event in the current list                      |
+
+When the spec resolves to ≥ 2 events, PQI runs them in a batch:
+
+- Each selected event uses its **headline market** (highest-volume market of the `EventGroup`); no per-event sub-prompt
+- Runs execute with bounded parallelism (`-j`, default 1). A Rich Live status table updates at 4 Hz with per-row phase + percent + elapsed time
+- Persistence (history append + price points) runs **sequentially after** the batch completes — JSONL appends larger than `PIPE_BUF` aren't safe to interleave
+- Failures are isolated per-row (`failed` phase, red styling, error message in the summary) — other rows continue
+- `--summary-only` skips the per-event detail panels and prints only the final summary table
+
+Examples:
+
+```bash
+# Queue 5 matches back-to-back, sequential, with full per-event output
+python3 -m pqi.main -c esports --live
+# ... at prompt: 1,2,5,7,9
+
+# Same list but parallel ×3 (Anthropic Tier 2 ceiling)
+python3 -m pqi.main -c esports --live -j 3
+# ... at prompt: 1-5
+
+# Run every listed event, summary table only (good for stage-1 V2 observation)
+python3 -m pqi.main -c esports -s 24 -j 3 --summary-only
+# ... at prompt: all
+```
 
 ### History sub-commands
 
@@ -479,6 +517,7 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `MIN_COUNCIL_VERDICTS`        | `5`     | Minimum agents (of 7) that must return valid verdicts; aborts if below               |
 | `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
 | `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |
+| `ANALYZE_BATCH_CONCURRENCY`   | `1`     | Max parallel runs when `analyze` is given a multi-select spec (list/range/all). Practical ceiling 3 on Anthropic Tier 2. Override per invocation with `-j` |
 | `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Wrap the Anthropic system prompt in a 5-min ephemeral cache block (no behavior change; ~10% input price on cache hits) |
 | `ANTHROPIC_MAX_RETRIES`       | `5`     | Max additional retries per Anthropic call on transient failures (5xx incl. 529, 429, connection / timeout errors) |
 | `ANTHROPIC_RETRY_BASE_DELAY`  | `1.0`   | Base delay (s) for exponential retry backoff (`delay = base * 2**attempt`)           |
