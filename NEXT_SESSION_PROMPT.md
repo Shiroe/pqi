@@ -4,14 +4,24 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 41 (2026-04-19) — Phase 1 rollout STAGE 1
-is LIVE. `PERSONA_V2_PREAMBLE=true` set in `.env` after refining the
-V2 preamble content (three-case worked-example spectrum + softened
-anti-mirror check). `scripts/reliability_diagram.py` gained a
-`--flag <label>` filter for v1/v2 side-by-side comparison. 16 V2 runs
-queued (112 verdicts tagged `v2:preamble`); 0 resolved yet. Zero
-aggregator changes; v1 AGENT_PERSONAS still bit-identical to
-pre-rewrite when flag flipped back off.
+**Last rewritten:** session 43 (2026-04-20) — shipped `pqi history
+equity`, a read-only bankroll-denominated equity curve with max
+drawdown, per-trade Sharpe, walk-forward half-Kelly sizing (`--mode
+kelly` reading the `kelly_stake_scaled` snapshot already on each
+`CouncilResult`; falls back to `bankroll × --kelly-fallback-pct`
+flat, default 5%, for pre-EV-gate rows — so the fallback scales
+with `-b` instead of staying pinned at $5), and an operational cost
+row covering the full pipeline (Tavily + Search Architect +
+Synthesizer + Council, across BUY + PASS + unresolved entries).
+Pure analytics: aggregator untouched, persisted schema unchanged,
+no new env-gated behavior. Smoke across bankrolls on 84 resolved
+BUYs (identical PnL % since everything scales linearly, only infra
+cost is absolute): `-b 100` → Net of cost **−$5.53**; `-b 1000` →
+Net of cost **+$226.38**. Break-even starting bankroll for
+Kelly-mode equity vs $31.29 infra sits around $121 on current
+history. Phase 1 rollout STAGE 1 still LIVE; V2 measurement state
+carries forward unchanged from sessions 41–42 (16 V2 runs queued,
+112 `v2:preamble` verdicts, 0 resolved).
 
 ---
 
@@ -41,7 +51,7 @@ edge, architectural judgment, plus the original code-review stance).
 - `docs/analytics_queries.md` — starter queries for `pqi query` (Q4 uses winning_side semantics)
 - `docs/api-reference.md` — API endpoints, params, response formats (incl. PandaScore)
 - `docs/known-issues.md` — API quirks, edge cases, env setup, persisted state files
-- `docs/session-log.md` — per-session changelog (current through session 40)
+- `docs/session-log.md` — per-session changelog (current through session 43)
 - `docs/roadmap.md` — themed catalog (A/B/C); phase section indexes phases
 - `docs/option_b_migration_plan.md` — full Option B rollout plan (steps 1–4 shipped; step 5 blocked on P1 signal quality)
 - `docs/models-reference.md` — detailed Pydantic class signatures (extracted from CLAUDE.md)
@@ -77,6 +87,21 @@ alone during stage 1 measurement.
   with flag-suffixed filenames (`reliability_YYYYMMDD_v1.md`,
   `reliability_YYYYMMDD_v2-preamble.md`). Unfiltered behaviour
   unchanged.
+
+### Queuing more V2 runs (session 42 tooling)
+
+Multi-run `analyze` shipped this session. To add fresh V2 observations:
+
+```bash
+# Bounded-parallel batch over a list of short-horizon esports events
+python3 -m pqi.main -c esports -s 24 -j 3
+# ... at prompt: 1,2,5,7,9   (or 1-5   or   all)
+```
+
+Default concurrency is 1 (sequential). `-j 3` is the practical
+ceiling on Anthropic Tier 2. Add `--summary-only` to skip per-event
+panels when you just want to seed a lot of V2 verdicts into the log.
+See README.md "Batch mode" section.
 
 ### Next action (gated on data, not calendar)
 

@@ -373,18 +373,30 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 41 — **Phase 1 rollout stage 1 LIVE**
-(`PERSONA_V2_PREAMBLE=true` in `.env`). V2 preamble text refined this
-session before flipping: the single worked example became a three-case
-spectrum (mild / severe / symmetric evidence asymmetry) and the
-anti-mirror check was softened from a hard trigger to a signal pattern
-(sum-near-100 PAIRED WITH matched confidences — not the sum alone).
-`scripts/reliability_diagram.py` gained a `--flag <label>` argument
-(`v1`, `v2:preamble`, `v2:*` glob) so v1 and v2 populations render as
-independent diagrams with flag-suffixed filenames. Session 41 earlier
-also shipped `run_context` persistence on every history entry and a
-raw CLOB-trendlines sidecar + backfill — both infrastructure, no
-pipeline or aggregator touch.
+**Last updated:** session 43 — **`pqi history equity` shipped**
+(read-only analytics, zero pipeline or aggregator change). New
+history sub-command renders a bankroll-denominated equity curve +
+max drawdown + per-trade Sharpe over resolved BUYs under a
+buy-and-hold-to-resolution model. Three sizing modes: `dollars`
+(fixed-$ stake), `shares` (literal share count), and `kelly`
+(walk-forward half-Kelly reading the `kelly_stake_scaled` snapshot
+already persisted on each `CouncilResult` — no look-ahead bias
+because the fraction was frozen at analysis time; falls back to
+`bankroll × --kelly-fallback-pct` flat, default 5%, when EV gate
+was dormant — scales with `-b` instead of staying pinned at $5).
+Summary panel also includes an operational cost block covering the
+full pipeline (Tavily + Search Architect + Synthesizer + Council,
+across every BUY + PASS + unresolved entry in scope) and a **Net
+of cost** row. Four new env knobs (`TAVILY_COST_PER_SEARCH`,
+`SEARCH_ARCHITECT_COST`, `SYNTHESIZER_COST`, `COUNCIL_COST_PER_RUN`)
+drive the cost estimate. Smoke across bankrolls on 513 entries /
+84 resolved BUYs (identical PnL % because everything scales
+linearly, only infra cost is absolute): `-b 100` → +$25.77 / Net
+of cost **−$5.53**; `-b 1000` → +$257.67 / Net of cost **+$226.38**.
+Break-even starting bankroll for Kelly-mode equity vs infra
+spend sits around $121 on current history. Phase 1 rollout STAGE
+1 still LIVE (`PERSONA_V2_PREAMBLE=true`); no V2 content changes
+this session.
 
 Rollout observation state: **16 V2 runs queued** (112 `v2:preamble`
 verdicts in DuckDB), **0 resolved** yet. The refreshed 2026-04-19
@@ -448,9 +460,17 @@ pipeline or aggregator touch. Session 40 added Phase 1 rollout scaffold
 aggregator changes. Session 41 refined `_SHARED_PREAMBLE_V2`, flipped
 `PERSONA_V2_PREAMBLE=true`, persisted `run_context` per history row,
 added a raw CLOB-trendlines sidecar, and extended `reliability_diagram`
-with `--flag` — still zero aggregator changes; scoring still reads
-`probability` + the two `confidence_*` fields exactly as before. See
-`docs/session-log.md` for per-session detail.
+with `--flag`. Session 42 added multi-run `analyze` (multi-select +
+bounded parallel + Rich Live status) — pure tooling around the existing
+pipeline; `_run_analysis` only gained an optional progress callback and
+batch persistence stays serial. Session 43 added `pqi history equity`
+(bankroll-denominated equity curve + max drawdown + per-trade Sharpe +
+walk-forward half-Kelly via the `kelly_stake_scaled` snapshot already on
+`CouncilResult` + operational cost row) — pure read-only analytics over
+the existing JSONL log; no pipeline or schema touch. Still zero aggregator
+changes through session 43; scoring still reads `probability` + the two
+`confidence_*` fields exactly as before. See `docs/session-log.md` for
+per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit
@@ -494,7 +514,13 @@ running the backtest. See
   **Phase 0 verdict synthesis** (session 38, no code) in
   `docs/retrospectives/phase_0_edge_2026_04.md`.
 - CLI: `analyze` (with `--category`, `--top`, `--live`, `--starts-within`,
-  …), `categories`, `query "<SQL>"`, `history` (list/show/sync/stats).
+  …), `categories`, `query "<SQL>"`, `history` (list/show/sync/stats/equity).
+- **`pqi history equity`** (session 43, `analytics.py::equity_curve` +
+  `operational_cost`): bankroll-denominated equity curve, max drawdown,
+  per-trade Sharpe; modes `dollars` / `shares` / `kelly` (walk-forward
+  half-Kelly via persisted `kelly_stake_scaled` snapshot); operational
+  cost row covering Tavily + Search Architect + Synthesizer + Council
+  across all entries (BUY + PASS + unresolved).
 
 ### Environment
 
