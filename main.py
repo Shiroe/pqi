@@ -575,7 +575,10 @@ def prompt_event_multiselect(
 
     Accepted input forms are documented on `_parse_selection`: an index
     (`3`), comma list (`1,3,5`), range (`3-11`), mixed (`1-3,7,9-11`),
-    literal `all`, or Enter-on-empty → `[1]`.
+    literal `all`, or Enter-on-empty → `[1]`. In addition, the literal
+    `new` selects only events where no market has been analyzed before
+    (empty "Seen" column) — handled here rather than in the parser so it
+    can read the analyzed-market-id set in context.
 
     For a single-index selection the user also gets the sub-market prompt
     (moneyline + siblings) — this matches the pre-multi-select UX.
@@ -585,11 +588,27 @@ def prompt_event_multiselect(
     """
     display_event_list(groups)
 
+    analyzed = _analyzed_market_ids()
+    unseen_indices = [
+        i
+        for i, g in enumerate(groups, start=1)
+        if not any(str(m.id) in analyzed for m in g.markets)
+    ]
+
     while True:
         raw = input(
             f"\nSelect events [1–{len(groups)}, '1,3', '3-7', 'all', "
-            f"Enter for #1]: "
+            f"'new' ({len(unseen_indices)} unseen), Enter for #1]: "
         ).strip()
+        if raw.lower() == "new":
+            if not unseen_indices:
+                console.print(
+                    "[yellow]Every event in the list has been analyzed "
+                    "before — no unseen events to pick.[/yellow]"
+                )
+                continue
+            indices = unseen_indices
+            break
         try:
             indices = _parse_selection(raw, len(groups))
             break
@@ -2199,6 +2218,300 @@ def history_stats(
             "negative = agent leaves ignorance mass; "
             "near-zero = effectively mirrored (autonomy not landing).[/dim]"
         )
+
+
+@history_app.command("equity")
+def history_equity(
+    bankroll: float = typer.Option(
+        100.0, "--bankroll", "-b",
+        help="Starting bankroll in dollars. Default $100.",
+    ),
+    stake: float = typer.Option(
+        5.0, "--stake", "-s",
+        help="Per-trade stake. Dollars in --mode dollars, shares in "
+             "--mode shares. Unused in --mode kelly (see "
+             "--kelly-fallback-pct).",
+    ),
+    mode: str = typer.Option(
+        "dollars", "--mode", "-m",
+        help="Sizing mode: 'dollars' (fixed-$ stake; default), 'shares' "
+             "(fixed share count), or 'kelly' (use the half-Kelly fraction "
+             "persisted at bet time; falls back to a "
+             "--kelly-fallback-pct share of the bankroll for pre-EV-gate "
+             "BUYs where kelly_stake_scaled was 0).",
+    ),
+    kelly_fallback_pct: float = typer.Option(
+        0.05, "--kelly-fallback-pct", "-k",
+        help="Fraction of the starting bankroll used as the flat fallback "
+             "stake for pre-EV-gate BUYs in --mode kelly (default 0.05 = "
+             "5%%, i.e. $5 at a $100 bankroll, $50 at $1000). Ignored in "
+             "other modes.",
+    ),
+    last: int = typer.Option(
+        15, "--last", "-n",
+        help="Show the last N trades in the detail table (0 = all).",
+    ),
+    no_auto_sync: bool = typer.Option(
+        False, "--no-auto-sync", help="Skip background sync.",
+    ),
+) -> None:
+    """Equity curve: bankroll PnL, max drawdown, per-trade Sharpe.
+
+    Walks resolved BUYs chronologically under a buy-and-hold-to-resolution
+    model. PASSes, unresolved entries, and true voids are excluded.
+
+    Per-trade Sharpe is naïve (unitless, no annualization, excess-return
+    baseline = 0). At small n it's a descriptive number, not a decision
+    threshold — the drawdown figure is the sturdier one to lean on.
+    """
+    from pqi.history import load_history
+    from pqi.analytics import equity_curve, equity_metrics, operational_cost
+
+    if mode not in ("dollars", "shares", "kelly"):
+        console.print(
+            f"[red]--mode must be 'dollars', 'shares', or 'kelly' "
+            f"(got {mode!r})[/red]"
+        )
+        raise typer.Exit(1)
+    if bankroll <= 0 or stake <= 0:
+        console.print("[red]--bankroll and --stake must be positive.[/red]")
+        raise typer.Exit(1)
+    if not (0 < kelly_fallback_pct <= 1):
+        console.print(
+            "[red]--kelly-fallback-pct must be in (0, 1] "
+            "(e.g. 0.05 for 5%).[/red]"
+        )
+        raise typer.Exit(1)
+
+    entries = load_history()
+    if not entries:
+        console.print("[yellow]No history yet.[/yellow]")
+        raise typer.Exit(0)
+
+    if not no_auto_sync:
+        _spawn_auto_sync()
+
+    curve = equity_curve(
+        entries,
+        bankroll=bankroll,
+        stake=stake,
+        mode=mode,
+        kelly_fallback_pct=kelly_fallback_pct,
+    )
+    metrics = equity_metrics(curve, bankroll=bankroll)
+
+    if metrics["n_trades"] == 0:
+        console.print(
+            "[yellow]No resolved BUYs in history yet — nothing to compute. "
+            "Run `pqi history sync` first if you think some should be "
+            "resolved.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    if mode == "dollars":
+        stake_desc = f"${stake:.2f} flat stake / trade"
+    elif mode == "shares":
+        stake_desc = f"{stake:g} shares / trade"
+    else:  # kelly
+        fallback_dollars = bankroll * kelly_fallback_pct
+        stake_desc = (
+            f"half-Kelly sizing (fallback {kelly_fallback_pct*100:.1f}% "
+            f"of bankroll = ${fallback_dollars:.2f} for pre-EV-gate rows)"
+        )
+
+    pnl = metrics["net_pnl"]
+    pnl_color = "green" if pnl > 0 else ("red" if pnl < 0 else "white")
+    pnl_sign = "+" if pnl >= 0 else ""
+    pct_sign = "+" if metrics["net_pnl_pct"] >= 0 else ""
+
+    best = metrics["best_trade"]
+    worst = metrics["worst_trade"]
+    sharpe = metrics["sharpe_per_trade"]
+    sharpe_str = (
+        f"{sharpe:.3f}" if sharpe is not None
+        else "n/a (stdev = 0 or n < 2)"
+    )
+
+    peak_ts = (
+        metrics["peak_timestamp"].strftime("%Y-%m-%d")
+        if metrics["peak_timestamp"] else "—"
+    )
+    trough_ts = (
+        metrics["trough_timestamp"].strftime("%Y-%m-%d")
+        if metrics["trough_timestamp"] else "—"
+    )
+
+    lines = [
+        f"Resolved BUYs:      [bold]{metrics['n_trades']}[/bold]",
+        f"Starting bankroll:  ${bankroll:.2f}",
+        f"Final bankroll:     [{pnl_color}]${metrics['final_bankroll']:.2f}[/{pnl_color}]",
+        (
+            f"Net PnL:            [{pnl_color}]{pnl_sign}${pnl:.2f} "
+            f"({pct_sign}{metrics['net_pnl_pct'] * 100:.1f}%)[/{pnl_color}]"
+        ),
+        (
+            f"Peak:               ${metrics['peak_balance']:.2f} "
+            f"at trade #{metrics['peak_idx']} ({peak_ts})"
+        ),
+        (
+            f"Trough:             ${metrics['trough_balance']:.2f} "
+            f"at trade #{metrics['trough_idx']} ({trough_ts})"
+        ),
+        (
+            f"Max drawdown:       [red]{metrics['max_drawdown_pct'] * 100:.1f}%[/red] "
+            f"([red]${metrics['max_drawdown_dollar']:.2f}[/red])"
+        ),
+        (
+            f"Wins / Losses:      [green]{metrics['n_wins']}[/green] / "
+            f"[red]{metrics['n_losses']}[/red]"
+            + (
+                f" / [dim]{metrics['n_break_even']} push[/dim]"
+                if metrics['n_break_even'] else ""
+            )
+            + f"  ([cyan]{metrics['win_rate'] * 100:.1f}%[/cyan] win rate)"
+        ),
+        (
+            f"Best trade:         [green]+${best['pnl']:.2f}[/green] — "
+            f"{(best['title'] or '')[:56]}"
+        ),
+        (
+            f"Worst trade:        [red]-${abs(worst['pnl']):.2f}[/red] — "
+            f"{(worst['title'] or '')[:56]}"
+        ),
+        (
+            f"Mean PnL / trade:   "
+            f"{'+' if metrics['mean_pnl'] >= 0 else ''}${metrics['mean_pnl']:.3f}"
+        ),
+        f"Stdev PnL / trade:  ${metrics['stdev_pnl']:.3f}",
+        (
+            f"Per-trade Sharpe:   [magenta]{sharpe_str}[/magenta] "
+            f"[dim](pnl/cost returns, no annualization)[/dim]"
+        ),
+    ]
+
+    if mode == "kelly":
+        fallback_dollars = bankroll * kelly_fallback_pct
+        lines.append(
+            f"Sizing mix:         "
+            f"[magenta]{metrics['n_kelly_sized']}[/magenta] Kelly-sized · "
+            f"[dim]{metrics['n_fallback']} fallback "
+            f"@ {kelly_fallback_pct*100:.1f}% (${fallback_dollars:.2f})[/dim]"
+        )
+
+    # ----- Operational cost (all analyses, not just resolved BUYs) ---------
+    costs = operational_cost(
+        entries,
+        tavily_searches_per_analysis=config.TAVILY_SEARCHES_PER_MARKET,
+        tavily_cost_per_search=config.TAVILY_COST_PER_SEARCH,
+        search_architect_cost=config.SEARCH_ARCHITECT_COST,
+        synthesizer_cost=config.SYNTHESIZER_COST,
+        council_cost_per_run=config.COUNCIL_COST_PER_RUN,
+    )
+    net_of_cost = metrics["final_bankroll"] - bankroll - costs["total"]
+    net_color = "green" if net_of_cost > 0 else ("red" if net_of_cost < 0 else "white")
+
+    lines.extend([
+        "",  # blank separator
+        (
+            f"[bold]Operational cost[/bold] [dim](all pipeline runs, "
+            f"BUY + PASS; cached re-runs not subtracted)[/dim]"
+        ),
+        (
+            f"Analyses:           [bold]{costs['n_total']}[/bold] "
+            f"([green]{costs['n_buy']} BUY[/green] · "
+            f"[yellow]{costs['n_pass']} PASS[/yellow])"
+        ),
+        (
+            f"Per-analysis:       ${costs['per_analysis']:.4f} "
+            f"[dim](${costs['tavily_per_analysis']:.4f} tavily · "
+            f"${costs['llm_per_analysis']:.4f} LLM)[/dim]"
+        ),
+        (
+            f"Total cost:         [red]${costs['total']:.2f}[/red] "
+            f"[dim](${costs['total_tavily']:.2f} tavily · "
+            f"${costs['total_llm']:.2f} LLM)[/dim]"
+        ),
+        (
+            f"Net of cost:        [{net_color}]"
+            f"{'+$' if net_of_cost >= 0 else '-$'}{abs(net_of_cost):.2f}"
+            f"[/{net_color}] "
+            f"[dim](equity PnL − infra cost)[/dim]"
+        ),
+    ])
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=(
+                f"[bold]Equity Curve[/bold] · bankroll ${bankroll:.2f} · "
+                f"{stake_desc}\n[dim]Buy-and-hold to resolution · PASSes / "
+                "unresolved / voided excluded from PnL[/dim]"
+            ),
+            border_style="cyan",
+        )
+    )
+
+    # ----- Per-trade detail ------------------------------------------------
+    to_show = curve if last == 0 else curve[-last:]
+    title = (
+        f"All {len(curve)} trades"
+        if last == 0 or len(curve) <= last
+        else f"Last {len(to_show)} of {len(curve)} trades"
+    )
+    tbl = Table(title=title, box=box.SIMPLE, show_edge=False)
+    tbl.add_column("#", justify="right", style="dim")
+    tbl.add_column("Date", style="dim")
+    tbl.add_column("Event", overflow="ellipsis", max_width=36, no_wrap=True)
+    tbl.add_column("Side", justify="center")
+    tbl.add_column("Entry", justify="right")
+    tbl.add_column("Final", justify="right")
+    if mode == "kelly":
+        tbl.add_column("Size", justify="center", style="dim")
+    tbl.add_column("Shares", justify="right", style="dim")
+    tbl.add_column("Cost", justify="right", style="dim")
+    tbl.add_column("PnL", justify="right")
+    tbl.add_column("Balance", justify="right")
+    tbl.add_column("DD%", justify="right", style="red")
+
+    for r in to_show:
+        p = r["pnl"]
+        pnl_style = "green" if p > 0 else ("red" if p < 0 else "dim")
+        pnl_str = (
+            f"[{pnl_style}]{'+' if p >= 0 else ''}${p:.2f}[/{pnl_style}]"
+        )
+        date_str = (
+            r["timestamp"].strftime("%Y-%m-%d") if r["timestamp"] else "—"
+        )
+        side = "YES" if "YES" in r["recommendation"] else "NO"
+        side_style = "green" if side == "YES" else "red"
+        dd = r["drawdown_pct"]
+        dd_str = f"{dd * 100:.1f}%" if dd > 0.0005 else "—"
+
+        row_cells = [
+            str(r["idx"]),
+            date_str,
+            r["title"] or "—",
+            f"[{side_style}]{side}[/{side_style}]",
+            f"{r['side_entry_price']:.2f}",
+            f"{r['side_final_price']:.2f}",
+        ]
+        if mode == "kelly":
+            src = r.get("sizing_source", "")
+            if src == "kelly":
+                size_cell = f"[magenta]K{r['kelly_stake_scaled'] * 100:.1f}%[/magenta]"
+            else:
+                size_cell = "[dim]flat[/dim]"
+            row_cells.append(size_cell)
+        row_cells.extend([
+            f"{r['shares']:.2f}",
+            f"${r['cost']:.2f}",
+            pnl_str,
+            f"${r['balance']:.2f}",
+            dd_str,
+        ])
+        tbl.add_row(*row_cells)
+
+    console.print(tbl)
 
 
 if __name__ == "__main__":

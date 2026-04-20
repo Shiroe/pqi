@@ -128,6 +128,7 @@ The event-selection prompt accepts a single index **or** a multi-select spec:
 | `3-7`         | Events #3 through #7 inclusive (reversed ranges normalized) |
 | `1-3,7,9-11`  | Mixed list + range                                   |
 | `all`         | Every event in the current list                      |
+| `new`         | Only events with **no** prior analysis on any of their markets (empty "Seen" column). Matches the Seen-column semantic exactly: an event counts as seen as soon as one of its markets has been analyzed. Re-prompts if the current list has no unseen events |
 
 When the spec resolves to ≥ 2 events, PQI runs them in a batch:
 
@@ -151,6 +152,11 @@ python3 -m pqi.main -c esports --live -j 3
 # Run every listed event, summary table only (good for stage-1 V2 observation)
 python3 -m pqi.main -c esports -s 24 -j 3 --summary-only
 # ... at prompt: all
+
+# Only un-analyzed events (skips anything with a ● in the Seen column) —
+# ideal for incremental stage-1 V2 queuing: new matches only, no re-runs
+python3 -m pqi.main -c esports -s 24 -j 3 --summary-only
+# ... at prompt: new
 ```
 
 ### History sub-commands
@@ -163,6 +169,7 @@ python3 -m pqi.main -c esports -s 24 -j 3 --summary-only
 | `pqi history show <#\|run_id>` | Detailed view: header, recommendation panel, **per-agent verdict table** (with hit/✗ + Brier when resolved), postmortem panel, briefing recap                                                                                                                                                                  |
 | `pqi history sync [--auto]`    | Fetch resolutions for unresolved entries from the Gamma API. `--auto` mode is used by the background sync subprocess and only touches entries past their `end_date`                                                                                                                                            |
 | `pqi history stats`            | Council overview (totals, outcome counts, **council-level lean accuracy** computed across all resolved entries with the same dead band as the `list` view) + per-agent leaderboard (n, hit %, weighted hit %, **lean %**, Brier, high-conf accuracy %) with an **Average** footer row of micro-averaged totals |
+| `pqi history equity [flags]`   | Bankroll-denominated PnL, max drawdown, per-trade Sharpe over resolved BUYs under a buy-and-hold-to-resolution model. Summary panel + per-trade detail table                                                                                                                                                    |
 
 #### `history list` flags
 
@@ -254,6 +261,88 @@ so stable references survive, but `resolution` and `analysis` are cleared
 (they're derived from the now-stale result and will be re-synced on the next
 `history sync`). Sibling markets under the same parent event remain
 distinct entries because the key is market id, not event id.
+
+#### `history equity` flags
+
+`pqi history equity` walks resolved BUYs chronologically under a
+buy-and-hold-to-resolution model and reports a bankroll-denominated
+equity curve. PASSes, unresolved entries, and true voids are excluded.
+
+| Flag             | Short | Type    | Default   | Description                                                                                     |
+| ---------------- | ----- | ------- | --------- | ----------------------------------------------------------------------------------------------- |
+| `--bankroll`     | `-b`  | `FLOAT` | `100.0`   | Starting bankroll in dollars                                                                    |
+| `--stake`        | `-s`  | `FLOAT` | `5.0`     | Per-trade stake. Dollars in `--mode dollars`, shares in `--mode shares`. Unused in `--mode kelly` (see `--kelly-fallback-pct`) |
+| `--mode`         | `-m`  | `TEXT`  | `dollars` | `dollars` = fixed-$ stake per trade, shares derived from entry price. `shares` = literal fixed share count. `kelly` = walk-forward half-Kelly using the `kelly_stake_scaled` fraction frozen on each `CouncilResult` at analysis time (falls back to `--kelly-fallback-pct` of the bankroll when the EV gate was dormant and no Kelly fraction was recorded) |
+| `--kelly-fallback-pct` | `-k` | `FLOAT` | `0.05` | Fraction of the **starting** bankroll used as the flat fallback for pre-EV-gate BUYs in `--mode kelly` (e.g. `0.05` = 5% → $5 at a $100 bankroll, $50 at $1000). Scales the fallback with capital instead of pinning it at a flat dollar amount. Ignored in other modes |
+| `--last`         | `-n`  | `INT`   | `15`      | Show the last N trades in the detail table. `0` shows all                                       |
+| `--no-auto-sync` |       | flag    | off       | Skip background `history sync`                                                                  |
+
+**PnL math (per-share Polymarket mechanics):**
+
+```
+BUY YES  shares=N entry=p  →  cost = N * p,       proceeds = N * final_yes_price
+BUY NO   shares=N entry=p  →  cost = N * (1-p),   proceeds = N * (1 - final_yes_price)
+pnl = proceeds - cost
+```
+
+Worked example: a 5-share BUY YES at 50c that wins clean settles at
+$1.00. Cost = 5 × $0.50 = $2.50; proceeds = 5 × $1.00 = $5.00; PnL =
+**+$2.50**. A 5-share BUY YES at 60c that loses clean: cost = $3.00,
+proceeds = $0, PnL = **−$3.00**. Intermediate settlements (e.g. 0.50
+draws) are real PnL at the settlement price, not voids.
+
+**Reported metrics:**
+
+- **Final bankroll / Net PnL** — end-of-series balance vs starting bankroll
+- **Peak / Trough** — running balance extremes, with trade # and date
+- **Max drawdown** — the worst peak-to-trough decline anywhere on the curve, expressed as both % of peak and $
+- **Wins / Losses / Win rate** — count of trades with PnL > 0 / < 0
+- **Best / Worst trade** — single largest gain and loss, with event titles
+- **Mean / Stdev PnL per trade** — dollar summary
+- **Per-trade Sharpe** — `mean(pnl_i / cost_i) / stdev(pnl_i / cost_i)`. Unitless, no annualization (per-trade holding periods vary hours → weeks; annualizing without that data would add noise, not signal). Excess-return baseline = 0. At small n this is descriptive, not a decision threshold — the drawdown number is the sturdier one
+- **Sizing mix** (Kelly mode only) — count of Kelly-sized rows vs `$`-fallback rows (EV gate was dormant at analysis time, or Kelly fraction was ≤ 0)
+- **Operational cost** — pipeline cost ledger across **every** entry in scope (BUY + PASS, resolved + unresolved), broken into Tavily (`TAVILY_SEARCHES_PER_MARKET × TAVILY_COST_PER_SEARCH`) + LLM (`SEARCH_ARCHITECT_COST + SYNTHESIZER_COST + COUNCIL_COST_PER_RUN`). Shows total + per-analysis + **Net of cost** (equity PnL − infra cost). Upper bound — cached re-runs aren't subtracted
+
+**Kelly mode mechanics (walk-forward):**
+
+Each `CouncilResult` written to history already carries a
+`kelly_stake_scaled` field snapshot: the advisory half-Kelly fraction
+computed at analysis time from the band-smoothed WR that existed then.
+`--mode kelly` reads that snapshot verbatim — there is no look-ahead
+bias because the fraction was frozen against the bankroll state of
+that moment. Stake per trade = `current_balance × kelly_stake_scaled`,
+capped at `current_balance`. When the EV gate was dormant
+(`resolved_buys < MIN_WIN_RATE_SAMPLES`) the stored Kelly fraction is
+`0.0`, so the walker falls back to a flat
+`bankroll × --kelly-fallback-pct` stake (default 5% of the starting
+bankroll). This makes the fallback scale with capital: at `-b 100`
+the fallback is $5, at `-b 1000` it's $50. The infrastructure cost
+row is **not** bankroll-scaled (it's a real-dollar pipeline spend),
+so `Net of cost` moves from negative at low bankrolls to positive
+above the PnL/infra break-even (~$121 on current history).
+
+Examples:
+
+```bash
+# Default: $100 bankroll, $5 fixed dollar stake per trade, last 15 trades
+python3 -m pqi.main history equity
+
+# Larger bankroll, 10% stake, all trades
+python3 -m pqi.main history equity -b 1000 -s 100 -n 0
+
+# Fixed 5 shares per trade (matches "5 shares at 50c" pedagogy)
+python3 -m pqi.main history equity --mode shares --stake 5
+
+# Walk-forward half-Kelly sizing, default 5% fallback (= $5 at $100 bankroll)
+python3 -m pqi.main history equity --mode kelly
+
+# Bigger bankroll — fallback auto-scales to $50 (5% of $1000); infra cost stays
+# absolute, so Net of cost flips positive above the break-even bankroll
+python3 -m pqi.main history equity --mode kelly -b 1000
+
+# Tighter fallback at 2% for a more conservative pre-EV-gate stance
+python3 -m pqi.main history equity --mode kelly -b 500 -k 0.02
+```
 
 #### Outcome classification
 
@@ -534,6 +623,10 @@ All thresholds are set in `.env` (see `.env.example` for full documentation):
 | `CATEGORY_CACHE_PATH`         | `~/.pqi/category_cache.json` | JSON cache of resolved `--category` lookups. Only positive resolutions are cached; misses retry the live resolver. Delete the file to force a refresh |
 | `PRICE_HISTORY_INTERVAL`      | `1w`    | CLOB price history window (1d, 1w, 1m)                                               |
 | `PRICE_HISTORY_FIDELITY`      | `60`    | Price history resolution in minutes (60 = hourly)                                    |
+| `TAVILY_COST_PER_SEARCH`      | `0.008` | Estimated $ cost per Tavily search request (used by `history equity` operational cost row; not a spend cap) |
+| `SEARCH_ARCHITECT_COST`       | `0.001` | Estimated $ cost per Search Architect LLM call per analysis                          |
+| `SYNTHESIZER_COST`            | `0.005` | Estimated $ cost per Synthesizer LLM call per analysis                               |
+| `COUNCIL_COST_PER_RUN`        | `0.015` | Estimated $ cost per full 7-agent council run                                        |
 
 ---
 

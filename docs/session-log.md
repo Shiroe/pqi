@@ -4,6 +4,286 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 43 — `pqi history equity` (bankroll PnL + drawdown + Sharpe)
+
+New history sub-command that turns the per-BUY PnL math already in
+`analytics.py` into a bankroll-denominated equity curve with max
+drawdown and a naïve per-trade Sharpe. Pure read-only analytics —
+aggregator / pipeline / persisted schema all untouched.
+
+### Motivation
+
+User asked whether drawdown / Sharpe were derivable from current
+history. They were — every resolved BUY already has entry price +
+final redemption price via `analytics.py::_final_yes_price`, and
+every entry has a `timestamp` — but nothing tied them to a bankroll
+or reported drawdown. With the Phase 1 rollout on an observe-only
+hold, this is a useful parallel surface for answering "what would
+this have done with real capital" without touching the aggregator.
+
+### Part A — `analytics.py::equity_curve()` + `equity_metrics()`
+
+Two pure functions.
+
+`equity_curve(entries, bankroll=100.0, stake=5.0, mode="dollars")`:
+
+- Walks resolved BUYs chronologically (by `entry.timestamp`)
+- Two sizing modes:
+  - `"dollars"` (default): each trade commits a fixed dollar stake,
+    `shares = stake / side_entry_price`. Capped to remaining balance
+    so a busted curve can't go infinitely negative. This is standard
+    portfolio sizing — each bet risks the same capital.
+  - `"shares"`: each trade buys a literal fixed share count,
+    `cost = shares * side_entry_price`. Matches the user's "5 shares
+    at 50c" pedagogical framing.
+- Per-row: entry side price, final side price, shares, cost,
+  proceeds, pnl, running balance, running peak, drawdown %
+- Filters: PASSes, unresolved, voided (no redemption) all excluded
+
+PnL math (identical to existing `analytics.classify_outcome`):
+
+```
+BUY YES: cost = N*p_yes,       proceeds = N*final_yes
+BUY NO:  cost = N*(1-p_yes),   proceeds = N*(1-final_yes)
+pnl = proceeds - cost
+```
+
+Hand-verified:
+- 5-share BUY YES @ 50c clean win → +$2.50 ✓
+- 5-share BUY YES @ 60c clean loss → −$3.00 ✓
+- 5-share BUY NO  @ yes=60c (NO=40c) clean NO win → +$3.00 ✓
+
+`equity_metrics(curve, bankroll)`:
+
+- Final bankroll, net PnL ($ + %)
+- Peak / trough (balance, trade #, timestamp)
+- Max drawdown (% of peak + $)
+- Wins / losses / break-evens / win rate
+- Best / worst trade
+- Mean + stdev of per-trade PnL
+- Per-trade Sharpe computed on `pnl_i / cost_i` (unitless returns on
+  deployed capital — size-invariant for uniform stakes, which is why
+  dollars-mode and shares-mode on the same history produce the same
+  Sharpe in practice)
+
+Sharpe is naïve: no annualization (per-trade holding periods vary
+hours → weeks; annualizing without that data adds noise), excess-
+return baseline = 0 (short-horizon risk-free rate is lost in the
+noise). At small n the figure is descriptive, not a decision
+threshold — drawdown is the sturdier number for a 65-BUY sample.
+
+### Part B — `pqi history equity` CLI (`main.py`)
+
+New typer command under the `history` sub-app. Flags:
+
+| Flag             | Short | Default   | Note |
+| ---------------- | ----- | --------- | ---- |
+| `--bankroll`     | `-b`  | `100.0`   |      |
+| `--stake`        | `-s`  | `5.0`     | dollars or shares depending on `--mode` |
+| `--mode`         | `-m`  | `dollars` | `dollars` \| `shares` |
+| `--last`         | `-n`  | `15`      | `0` = all |
+| `--no-auto-sync` |       | off       | skips bg sync |
+
+Renders a Rich summary panel (headline metrics, color-coded
+positive/negative) plus a detail `Table` with one row per trade
+(date, event, side, entry price, final price, shares, cost, PnL,
+balance, drawdown %). `Event` column uses `no_wrap=True,
+overflow="ellipsis"` so rows stay single-line on standard terminal
+widths.
+
+### Part C — First real-history smoke
+
+Against the live history file (84 resolved BUYs as of
+session-start):
+
+- Default ($100 bankroll, $5 flat stake): final $117.04, net +17.0%,
+  peak $131.68 at trade #43, max drawdown 21.7% ($28.62), win rate
+  73.8%, per-trade Sharpe 0.067
+- Shares mode (5 shares/trade): final $112.53, net +12.5%, max
+  drawdown 16.0%, same win rate (as expected — mode only changes
+  sizing, not which side wins), per-trade Sharpe 0.067 (size-
+  invariant as predicted)
+- Best trade in shares mode: +$2.50 at 5 × 50c — exactly the user's
+  pedagogical example
+
+73.8% win rate at +17% net is consistent with the Phase 0 finding
+that the council is barely clearing break-even price-weighted — most
+BUYs cluster at 0.60–0.85 entry where break-even win rates are 60–85%.
+
+### Files touched
+
+- `analytics.py` — `datetime`, `mean`, `pstdev` imports;
+  `_entry_timestamp`, `_entry_title`, `equity_curve`,
+  `equity_metrics`
+- `main.py` — `@history_app.command("equity")` `history_equity(...)`
+- `README.md` — `history equity` row in sub-commands table; new
+  `#### history equity flags` section with formula, metric
+  definitions, examples
+
+### Part D — `--mode kelly` + operational cost row
+
+User follow-up: add walk-forward half-Kelly sizing that degrades to
+`$5` flat for pre-EV-gate trades, plus a row capturing what the
+system actually cost to run end-to-end (not just the council).
+
+**Kelly mode is walk-forward by construction.** Every
+`CouncilResult` already persists `kelly_stake_scaled` — the half-
+Kelly fraction `KELLY_MULTIPLIER × ((b·p − q) / b)` computed at
+analysis time from the band-smoothed WR *that existed at that
+moment*. Reading that stored snapshot is walk-forward-correct with
+no look-ahead bias; no `recompute_from_history` replay needed (the
+follow-up note from Part C was too pessimistic).
+
+- `equity_curve()` gained `EquityMode = Literal["dollars", "shares",
+  "kelly"]` and a fallback path: when the stored Kelly fraction is
+  `≤ 0` (EV gate dormant for that row — `resolved_buys <
+  MIN_WIN_RATE_SAMPLES` at the time), stake falls back to
+  `min(balance, float(stake))`. Each row tags `sizing_source`
+  (`"kelly"` / `"fallback"` / `"dollars"` / `"shares"`) so the panel
+  can show the mix.
+- `equity_metrics()` surfaces `n_kelly_sized` vs `n_fallback` in
+  Kelly mode.
+- Detail table gains a `Size` column in Kelly mode: `K7.7%` (magenta,
+  Kelly-sized) or `flat` (dim, fallback).
+
+**Operational cost row.** Existing cost attribution only covered
+council runs. User asked for the full pipeline: Tavily searches +
+Search Architect + Synthesizer + Council, counted across **every**
+entry in scope (BUY + PASS, resolved + unresolved — the system paid
+for the PASSes too). Added:
+
+- Four env knobs in `config.py` + `.env.example`:
+  `TAVILY_COST_PER_SEARCH=0.008`, `SEARCH_ARCHITECT_COST=0.001`,
+  `SYNTHESIZER_COST=0.005`, `COUNCIL_COST_PER_RUN=0.015`
+- `analytics.operational_cost(entries, …)` returns per-analysis +
+  total, split by tavily vs LLM, plus BUY/PASS + resolved/unresolved
+  counts
+- Panel renders a blank-separated block: Analyses, Per-analysis,
+  Total cost, **Net of cost** (equity PnL − infra cost). Upper bound
+  — cached re-runs pay $0 in reality but aren't subtracted (we don't
+  persist cache-hit flags)
+
+Real-history smoke against 513 entries (84 resolved BUYs):
+
+- Flat $5 / trade: +$17.04 (+17.0%)
+- Kelly mode: **+$25.77 (+25.8%)**, 28 Kelly-sized + 56 fallback,
+  max DD 25.5% ($39.76) — Kelly tolerates deeper drawdowns than
+  flat, as expected
+- Operational cost: **513 × $0.0610 = $31.29** ($20.52 tavily +
+  $10.77 LLM)
+- Net of cost (Kelly): $25.77 − $31.29 = **−$5.53** — at current
+  pricing assumptions the system is infrastructure-negative even
+  on its best-sized variant. The headline PnL number has always
+  been gross; this row makes the drag explicit
+
+Minor polish after first render: the Event column in the detail
+table was wrapping across many lines (Rich's default). Fix:
+`no_wrap=True, overflow="ellipsis", max_width=36`. Net-of-cost
+formatting also switched from `${value:+.2f}` (which rendered
+`$-5.53`) to `{sign}${abs(value):.2f}` for consistency with the
+`+$25.77` Net PnL row.
+
+### Part E — `--kelly-fallback-pct` flag (fallback scales with bankroll)
+
+Follow-up the same session: the flat $5 Kelly fallback doesn't
+scale when `--bankroll` is bumped. At `-b 1000` users still got a
+$5 stake per pre-EV-gate BUY, which is a rounding error against the
+$10–$100 Kelly-sized rows. Fix: replace the fixed `stake` dollar
+amount with `bankroll × kelly_fallback_pct`.
+
+- `equity_curve()` gained `kelly_fallback_pct: float = 0.05` kwarg.
+  Validated in (0, 1]. Fallback cost = `min(balance, bankroll *
+  kelly_fallback_pct)` (bankroll = starting, not current — keeps the
+  fallback a fixed dollar per-trade across the backtest, matching
+  the prior mental model; only the dollar figure now scales with
+  `--bankroll`).
+- `main.py` gained `--kelly-fallback-pct` / `-k` (default 0.05).
+- Panel title + Sizing-mix line both reworded to show
+  `"fallback 5.0% of bankroll = $5.00"` / `"56 fallback @ 5.0%
+  ($5.00)"` so the fraction and the dollar figure are both visible
+  at a glance.
+
+Smoke verified across three bankrolls on the same 84-BUY history
+(identical PnL % because all sizes scale linearly; only the infra
+cost is absolute):
+
+| Bankroll | Fallback $ | Final bankroll | Net PnL     | Net of cost |
+| -------- | ---------- | -------------- | ----------- | ----------- |
+| $100     | $5.00      | $125.77        | +$25.77     | **−$5.53**  |
+| $500     | $25.00     | $628.87        | +$128.87    | +$97.58     |
+| $1000    | $50.00     | $1257.67       | +$257.67    | +$226.38    |
+
+The inflection point — where Kelly-sized equity PnL first covers
+the $31.29 infra spend — sits around a $121 starting bankroll on
+current history. Below that the system is infrastructure-negative;
+above it, positive. This is the key framing the new flag unlocks:
+infrastructure cost doesn't scale, so capital-efficiency is the
+dominant lever, not sizing tweaks.
+
+Also tested a non-default `-k 0.02` at `-b 500` → fallback $10,
+final $593.20, Net of cost +$61.90 — confirms the flag is live.
+
+### Part F — `new` keyword in the multi-select prompt
+
+Tiny UX add to close out the session. Before this, incremental
+queuing for stage-1 V2 observation meant eyeballing the "Seen"
+column (empty cell = fresh) and building the comma-list by hand.
+The new `new` keyword resolves to exactly the indices where the
+Seen cell is empty — "every event with no prior analysis on any
+of its markets" — matching the column's semantic exactly so there
+are no surprises about which rows get picked.
+
+Implementation stays scoped: `_parse_selection` is unchanged
+(still pure, no I/O); `new` is handled directly in
+`prompt_event_multiselect` where the `groups` list and
+`_analyzed_market_ids()` are already in scope. Empty unseen set
+→ re-prompt with a yellow message rather than silent no-op.
+Prompt string updated to show the unseen count inline so the
+user can see at a glance whether `new` would pick anything:
+`"... 'all', 'new' (3 unseen), Enter for #1"`.
+
+Use case the user called out: stage-1 V2 observation loop. They
+can now run `python3 -m pqi.main -c esports -s 24 -j 3
+--summary-only` then type `new` — skip anything already in
+history, queue only fresh markets for V2 preamble tagging.
+
+### Files touched (cumulative)
+
+- `analytics.py` — `datetime`, `mean`, `pstdev` imports;
+  `_entry_timestamp`, `_entry_title`, `_rec_of`, `equity_curve`
+  (+ `EquityMode` + Kelly branch + `sizing_source` tagging +
+  `kelly_fallback_pct` param), `equity_metrics` (+ Kelly sizing
+  mix), `operational_cost`
+- `main.py` — `@history_app.command("equity")` `history_equity(...)`
+  + `--kelly-fallback-pct` / `-k` flag + Size column + operational
+  cost block + percent-aware panel/Sizing-mix text;
+  `prompt_event_multiselect` gained the `new` keyword (resolves
+  to unseen-event indices; empty-set reprompt guard)
+- `config.py` — four cost knobs after `ANALYZE_BATCH_CONCURRENCY`
+- `.env.example` — new "Operational cost estimation" section
+- `README.md` — `history equity` sub-commands row; `#### history
+  equity flags` section (formula, metric definitions, Kelly
+  mechanics incl. bankroll scaling, examples for all three modes
+  + multi-bankroll + `-k` examples); four cost env vars in the
+  Tuning table; Batch-mode selection table gained `new` row +
+  matching `new` example in the code block
+
+### Follow-ups (not done this session, consciously scoped out)
+
+- **Per-run cost override.** Today cost is uniform per analysis.
+  Sibling re-runs skip Tavily + Synthesizer and only pay the
+  council; cached results pay $0. A `cache_hit` / `pipeline_variant`
+  tag on `HistoryEntry` would let us subtract those — today it's an
+  upper bound, noted in the panel text.
+- **No chart.** Rich has sparkline-adjacent primitives; a small
+  equity-vs-time sparkline would be nice in the summary panel.
+  Low-priority nice-to-have.
+- **No per-category slice.** `--category esports` would be trivial
+  (filter `entries` before passing to `equity_curve`). Deferred until
+  we actually have cross-category history worth comparing.
+
+---
+
 ## Session 42 — Multi-run analyze (multi-select + bounded parallel + Live status)
 
 The `analyze` command learned to take a multi-select spec at the

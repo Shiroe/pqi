@@ -31,7 +31,8 @@ Per-agent stats:
 
 from __future__ import annotations
 
-from statistics import median
+from datetime import datetime
+from statistics import mean, median, pstdev
 from typing import Literal
 
 from pqi.history import update_analysis
@@ -508,3 +509,333 @@ def option_b_per_agent(entries: list[dict]) -> dict[str, dict]:
             "phase": phase,
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# Equity curve — bankroll-denominated PnL / drawdown / per-trade Sharpe
+# ---------------------------------------------------------------------------
+#
+# Walks resolved BUYs chronologically under a buy-and-hold-to-resolution
+# model. Per-share Polymarket mechanics (entry=p, win=1.0, lose=0.0):
+#
+#   BUY YES shares=N entry=p → cost = N*p, proceeds = N*final_yes_price
+#   BUY NO  shares=N entry=p → cost = N*(1-p), proceeds = N*(1-final_yes_price)
+#   pnl = proceeds - cost
+#
+# A clean 5-share win at 50c → cost $2.50, proceeds $5.00, pnl +$2.50.
+# A clean 5-share loss at 60c → cost $3.00, proceeds $0.00, pnl -$3.00.
+#
+# Intermediate settlements (e.g. 0.50/0.50 draws) are real PnL — they
+# settle at the non-extreme final price.
+
+
+def _entry_timestamp(entry: dict) -> datetime | None:
+    raw = entry.get("timestamp")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_title(entry: dict) -> str:
+    m = _market(entry)
+    return m.get("question") or m.get("title") or f"market {m.get('id', '?')}"
+
+
+EquityMode = Literal["dollars", "shares", "kelly"]
+
+
+def equity_curve(
+    entries: list[dict],
+    bankroll: float = 100.0,
+    stake: float = 5.0,
+    mode: EquityMode = "dollars",
+    kelly_fallback_pct: float = 0.05,
+) -> list[dict]:
+    """Walk resolved BUYs chronologically and return a list of trade rows.
+
+    Modes:
+
+    - `"dollars"` (default): each trade commits a fixed dollar `stake`
+      (capped to remaining balance). Shares = stake / entry_price_on_side.
+    - `"shares"`: each trade buys a literal `stake` share count of the
+      chosen side; cost = shares * entry_price_on_side. No balance cap —
+      the curve can go negative, which surfaces "you would have been wiped
+      out here" visually.
+    - `"kelly"`: each trade sizes via `balance * kelly_stake_scaled` where
+      `kelly_stake_scaled` is the half-Kelly (or whatever scaler was in
+      force at run time) fraction persisted on the `CouncilResult`. This
+      reads a frozen snapshot, so the backtest is walk-forward-legitimate
+      — each trade is sized against the band-smoothed WR that existed
+      **at the moment of the bet**, not today's rolling number. For BUYs
+      with `kelly_stake_scaled == 0.0` (pre-EV-gate history, or rows where
+      Kelly wasn't computed) the trade falls back to a flat dollar stake
+      of `bankroll * kelly_fallback_pct` (default 5% of the starting
+      bankroll, so the fallback scales with capital instead of staying
+      pinned at $5). Each row carries `sizing_source="kelly"` or
+      `"fallback"` in this mode so the summary can report both counts.
+
+    PASSes, unresolved entries, and true voids are excluded. Each row
+    carries running `balance`, `peak`, and `drawdown_pct` (fraction off peak).
+    """
+    if mode not in ("dollars", "shares", "kelly"):
+        raise ValueError(
+            f"mode must be 'dollars', 'shares', or 'kelly'; got {mode!r}"
+        )
+    if bankroll <= 0 or stake <= 0:
+        raise ValueError("bankroll and stake must be positive")
+    if kelly_fallback_pct <= 0 or kelly_fallback_pct > 1:
+        raise ValueError("kelly_fallback_pct must be in (0, 1]")
+
+    kelly_fallback_dollars = bankroll * kelly_fallback_pct
+
+    trades: list[tuple[datetime | None, dict, str, float, float, float]] = []
+    for e in entries:
+        r = _result(e)
+        rec = r.get("recommendation", "PASS")
+        if not rec.startswith("BUY"):
+            continue
+        final_yes = _final_yes_price(e)
+        if final_yes is None:
+            continue
+        entry_yes = float(_market(e).get("yes_price", 0.5))
+        kelly_scaled = float(r.get("kelly_stake_scaled", 0.0) or 0.0)
+        trades.append(
+            (_entry_timestamp(e), e, rec, entry_yes, final_yes, kelly_scaled)
+        )
+
+    trades.sort(key=lambda t: (t[0] is None, t[0] or datetime.max))
+
+    rows: list[dict] = []
+    balance = bankroll
+    peak = bankroll
+
+    for idx, (ts, entry, rec, entry_yes, final_yes, kelly_scaled) in enumerate(
+        trades, start=1
+    ):
+        buy_yes = "YES" in rec
+        side_entry = entry_yes if buy_yes else (1.0 - entry_yes)
+        side_final = final_yes if buy_yes else (1.0 - final_yes)
+        side_entry = max(1e-4, min(0.9999, side_entry))
+        side_final = max(0.0, min(1.0, side_final))
+
+        sizing_source = mode
+        if mode == "shares":
+            shares = float(stake)
+            cost = shares * side_entry
+        elif mode == "kelly":
+            if kelly_scaled > 0 and balance > 0:
+                cost = min(balance, balance * kelly_scaled)
+                sizing_source = "kelly"
+            else:
+                # Pre-EV-gate history (or PASS-sized rows that still settled
+                # a BUY). Fall back to kelly_fallback_pct of the starting
+                # bankroll so the fallback scales with capital instead of
+                # staying pinned at $5.
+                cost = (
+                    min(balance, kelly_fallback_dollars)
+                    if balance > 0
+                    else kelly_fallback_dollars
+                )
+                sizing_source = "fallback"
+            shares = cost / side_entry if side_entry > 0 else 0.0
+        else:  # dollars
+            cost = min(balance, float(stake)) if balance > 0 else float(stake)
+            shares = cost / side_entry
+
+        proceeds = shares * side_final
+        pnl = proceeds - cost
+        balance += pnl
+        peak = max(peak, balance)
+        dd_pct = ((peak - balance) / peak) if peak > 0 else 0.0
+
+        rows.append({
+            "idx": idx,
+            "timestamp": ts,
+            "title": _entry_title(entry),
+            "recommendation": rec,
+            "entry_price_yes": entry_yes,
+            "final_price_yes": final_yes,
+            "side_entry_price": side_entry,
+            "side_final_price": side_final,
+            "kelly_stake_scaled": kelly_scaled,
+            "sizing_source": sizing_source,
+            "shares": shares,
+            "cost": cost,
+            "proceeds": proceeds,
+            "pnl": pnl,
+            "balance": balance,
+            "peak": peak,
+            "drawdown_pct": dd_pct,
+        })
+
+    return rows
+
+
+def equity_metrics(curve: list[dict], bankroll: float) -> dict:
+    """Summarize an equity curve produced by `equity_curve()`.
+
+    Per-trade Sharpe is computed from `pnl / cost` returns (unitless, the
+    return on capital actually deployed that trade). Excess-return baseline
+    is 0 — short-horizon event markets settle in hours-to-weeks and the
+    risk-free rate over those intervals is noise. Annualization would
+    require per-trade holding periods, which are not currently tracked.
+    """
+    if not curve:
+        return {
+            "n_trades": 0,
+            "final_bankroll": bankroll,
+            "net_pnl": 0.0,
+            "net_pnl_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "max_drawdown_dollar": 0.0,
+            "peak_balance": bankroll,
+            "peak_idx": None,
+            "peak_timestamp": None,
+            "trough_balance": bankroll,
+            "trough_idx": None,
+            "trough_timestamp": None,
+            "n_wins": 0,
+            "n_losses": 0,
+            "n_break_even": 0,
+            "win_rate": 0.0,
+            "best_trade": None,
+            "worst_trade": None,
+            "mean_pnl": 0.0,
+            "stdev_pnl": 0.0,
+            "sharpe_per_trade": None,
+        }
+
+    final_bankroll = curve[-1]["balance"]
+    net_pnl = final_bankroll - bankroll
+    net_pnl_pct = (net_pnl / bankroll) if bankroll > 0 else 0.0
+
+    peak_row = max(curve, key=lambda r: r["balance"])
+    trough_row = min(curve, key=lambda r: r["balance"])
+
+    max_dd_pct = max((r["drawdown_pct"] for r in curve), default=0.0)
+    max_dd_dollar = max((r["peak"] - r["balance"] for r in curve), default=0.0)
+
+    wins = sum(1 for r in curve if r["pnl"] > 0)
+    losses = sum(1 for r in curve if r["pnl"] < 0)
+    break_even = sum(1 for r in curve if r["pnl"] == 0)
+
+    best = max(curve, key=lambda r: r["pnl"])
+    worst = min(curve, key=lambda r: r["pnl"])
+
+    returns = [(r["pnl"] / r["cost"]) if r["cost"] > 0 else 0.0 for r in curve]
+    mean_r = mean(returns)
+    std_r = pstdev(returns) if len(returns) >= 2 else 0.0
+    sharpe = (mean_r / std_r) if std_r > 0 else None
+
+    pnl_list = [r["pnl"] for r in curve]
+    mean_pnl = mean(pnl_list)
+    std_pnl = pstdev(pnl_list) if len(pnl_list) >= 2 else 0.0
+
+    n_kelly_sized = sum(1 for r in curve if r.get("sizing_source") == "kelly")
+    n_fallback = sum(1 for r in curve if r.get("sizing_source") == "fallback")
+
+    return {
+        "n_trades": len(curve),
+        "final_bankroll": final_bankroll,
+        "net_pnl": net_pnl,
+        "net_pnl_pct": net_pnl_pct,
+        "max_drawdown_pct": max_dd_pct,
+        "max_drawdown_dollar": max_dd_dollar,
+        "peak_balance": peak_row["balance"],
+        "peak_idx": peak_row["idx"],
+        "peak_timestamp": peak_row["timestamp"],
+        "trough_balance": trough_row["balance"],
+        "trough_idx": trough_row["idx"],
+        "trough_timestamp": trough_row["timestamp"],
+        "n_wins": wins,
+        "n_losses": losses,
+        "n_break_even": break_even,
+        "n_kelly_sized": n_kelly_sized,
+        "n_fallback": n_fallback,
+        "win_rate": (wins / len(curve)),
+        "best_trade": best,
+        "worst_trade": worst,
+        "mean_pnl": mean_pnl,
+        "stdev_pnl": std_pnl,
+        "sharpe_per_trade": sharpe,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Operational cost — what we paid for running the pipeline, pass or buy
+# ---------------------------------------------------------------------------
+#
+# Every analyze run (regardless of BUY / PASS / unresolved outcome) costs
+# the same pipeline: one Search Architect LLM call + N Tavily searches
+# + one Synthesizer LLM call + one Council run (7 parallel LLM calls).
+#
+# Cached re-runs cost $0 but we don't currently persist a cache-hit flag,
+# so the figure this function returns is an upper bound. For a user who
+# mostly runs each market once (typical), the bound is tight.
+
+
+def _rec_of(entry: dict) -> str:
+    return _result(entry).get("recommendation", "PASS")
+
+
+def operational_cost(
+    entries: list[dict],
+    tavily_searches_per_analysis: int,
+    tavily_cost_per_search: float,
+    search_architect_cost: float,
+    synthesizer_cost: float,
+    council_cost_per_run: float,
+) -> dict:
+    """Aggregate operational cost over ALL history entries.
+
+    Counts every entry as a full fresh pipeline run (an upper bound —
+    cached re-runs don't have a persisted flag yet). Breakdown by
+    recommendation class lets the CLI show "you paid for N PASSes that
+    didn't generate any equity on top of M BUYs."
+    """
+    from collections import Counter
+
+    tavily_per = tavily_searches_per_analysis * tavily_cost_per_search
+    llm_per = search_architect_cost + synthesizer_cost + council_cost_per_run
+    per_analysis = tavily_per + llm_per
+
+    rec_counts: Counter[str] = Counter()
+    for e in entries:
+        rec = _rec_of(e)
+        # Collapse specific BUY kinds into a single bucket for the summary.
+        if rec.startswith("BUY"):
+            rec_counts["BUY"] += 1
+        else:
+            rec_counts["PASS"] += 1
+
+    # Secondary slice: resolution state. Useful for "X BUYs are still
+    # pending — they'll settle later but we paid for them already."
+    n_total = len(entries)
+    n_resolved = sum(
+        1
+        for e in entries
+        if (e.get("resolution") or {}).get("final_yes_price") is not None
+    )
+    n_unresolved = n_total - n_resolved
+
+    return {
+        "n_total": n_total,
+        "n_buy": rec_counts.get("BUY", 0),
+        "n_pass": rec_counts.get("PASS", 0),
+        "n_resolved": n_resolved,
+        "n_unresolved": n_unresolved,
+        "tavily_searches_per_analysis": tavily_searches_per_analysis,
+        "tavily_cost_per_search": tavily_cost_per_search,
+        "tavily_per_analysis": tavily_per,
+        "llm_per_analysis": llm_per,
+        "search_architect_cost": search_architect_cost,
+        "synthesizer_cost": synthesizer_cost,
+        "council_cost_per_run": council_cost_per_run,
+        "per_analysis": per_analysis,
+        "total_tavily": n_total * tavily_per,
+        "total_llm": n_total * llm_per,
+        "total": n_total * per_analysis,
+    }

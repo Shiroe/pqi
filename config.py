@@ -172,6 +172,32 @@ synthesizer call per run. CLI flag `--concurrency/-j` overrides this per
 invocation."""
 
 # ---------------------------------------------------------------------------
+# Operational cost estimation (used by `pqi history equity`)
+# ---------------------------------------------------------------------------
+
+TAVILY_COST_PER_SEARCH: float = float(os.getenv("TAVILY_COST_PER_SEARCH", "0.008"))
+"""USD per Tavily search request. A full analysis fires
+`TAVILY_SEARCHES_PER_MARKET` searches, so per-analysis Tavily cost is the
+product. Tune this to match your actual Tavily plan."""
+
+SEARCH_ARCHITECT_COST: float = float(os.getenv("SEARCH_ARCHITECT_COST", "0.001"))
+"""USD per Search Architect LLM call (one per fresh analysis; cached
+analyses cost $0). Haiku 4.5 with a small input (market description) +
+5-query JSON output lands around $0.001 at current pricing."""
+
+SYNTHESIZER_COST: float = float(os.getenv("SYNTHESIZER_COST", "0.005"))
+"""USD per Synthesizer LLM call (one per fresh analysis; reused for
+siblings under the same event). Synthesizer ingests 5 Tavily result sets
+and emits a briefing doc — larger input + medium output, so ~$0.005
+under Haiku 4.5 with prompt caching."""
+
+COUNCIL_COST_PER_RUN: float = float(os.getenv("COUNCIL_COST_PER_RUN", "0.015"))
+"""USD per council run (7 parallel Haiku 4.5 calls). Derived from the
+pre-prompt-cache estimate of ~$0.015 per council in CLAUDE.md. Prompt
+caching makes this a high estimate on cache hits; tune down if your
+Anthropic bill comes in lower."""
+
+# ---------------------------------------------------------------------------
 # Scoring & recommendation gates
 # ---------------------------------------------------------------------------
 
