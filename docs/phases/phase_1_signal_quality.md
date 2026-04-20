@@ -503,7 +503,32 @@ Either:
 
 ## Session state
 
-**Last work session:** session 41 (2026-04-19) — Phase 1 rollout
+**Last work session:** session 44 (2026-04-21) — first stage-1
+monitor pass. n = 38 v2:preamble resolved vs 414 v1 resolved.
+**1 of 4 unified acceptance criteria pass.** Cluster-pair r ≥ 0.85
+fraction moved the *wrong* direction (43% → 71%): Bull collapsed
+into the 5-agent cluster (its pair-correlations jumped from ~0.6
+to 0.86–0.90). Bear remained structurally independent (r ∈
+[−0.17, 0.02]) but Bear Brier did not improve (0.2822 → 0.2851).
+Council Brier improved (0.2147 → 0.1919) — likely because the
+tighter cluster is more unanimous on a small/easier slice, not
+better calibration; per-band v2 cells outside [0.09, 0.50) are all
+`thin`. **Decision deferred** — ~93 markets pending resolution in
+24h, re-run the two-filter pair after the v2 sample reaches ~100+.
+Stage 1 remains live; V2 preamble text untouched.
+
+Reports: `~/.pqi/reports/reliability_20260420_v1.md` and
+`reliability_20260420_v2-preamble.md`. Detail in
+`docs/session-log.md` §Session 44.
+
+**Carry-over bug:** `pqi.analytics_sql.get_connection()` fails with
+`BinderException: No function matches 'map_keys(STRUCT(preamble
+BOOLEAN))'` because DuckDB infers `prompt_flags` as STRUCT when
+every sampled row has the same single key. `pqi query` against
+`verdicts` is broken until the view is fixed (script-based path
+remained functional).
+
+**Prior work session:** session 41 (2026-04-19) — Phase 1 rollout
 **stage 1 LIVE**. `PERSONA_V2_PREAMBLE=true` in `.env` after refining
 the V2 preamble content; `reliability_diagram --flag` shipped so v1
 and v2 populations can be rendered as independent reports.

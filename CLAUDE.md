@@ -373,37 +373,39 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 43 — **`pqi history equity` shipped**
-(read-only analytics, zero pipeline or aggregator change). New
-history sub-command renders a bankroll-denominated equity curve +
-max drawdown + per-trade Sharpe over resolved BUYs under a
-buy-and-hold-to-resolution model. Three sizing modes: `dollars`
-(fixed-$ stake), `shares` (literal share count), and `kelly`
-(walk-forward half-Kelly reading the `kelly_stake_scaled` snapshot
-already persisted on each `CouncilResult` — no look-ahead bias
-because the fraction was frozen at analysis time; falls back to
-`bankroll × --kelly-fallback-pct` flat, default 5%, when EV gate
-was dormant — scales with `-b` instead of staying pinned at $5).
-Summary panel also includes an operational cost block covering the
-full pipeline (Tavily + Search Architect + Synthesizer + Council,
-across every BUY + PASS + unresolved entry in scope) and a **Net
-of cost** row. Four new env knobs (`TAVILY_COST_PER_SEARCH`,
-`SEARCH_ARCHITECT_COST`, `SYNTHESIZER_COST`, `COUNCIL_COST_PER_RUN`)
-drive the cost estimate. Smoke across bankrolls on 513 entries /
-84 resolved BUYs (identical PnL % because everything scales
-linearly, only infra cost is absolute): `-b 100` → +$25.77 / Net
-of cost **−$5.53**; `-b 1000` → +$257.67 / Net of cost **+$226.38**.
-Break-even starting bankroll for Kelly-mode equity vs infra
-spend sits around $121 on current history. Phase 1 rollout STAGE
-1 still LIVE (`PERSONA_V2_PREAMBLE=true`); no V2 content changes
-this session.
+**Last updated:** session 44 — **first stage-1 monitor pass on
+`v2:preamble`** (read-only analytics, zero pipeline change). 38 V2
+rows resolved, baseline now 414 v1 rows. Two-filter pair written to
+`~/.pqi/reports/reliability_20260420_v1.md` and
+`reliability_20260420_v2-preamble.md`. **1 of 4 unified acceptance
+criteria pass** on this slice — and the headline finding is the
+*opposite* of what the autonomy patch was supposed to deliver:
 
-Rollout observation state: **16 V2 runs queued** (112 `v2:preamble`
-verdicts in DuckDB), **0 resolved** yet. The refreshed 2026-04-19
-baseline report is 100% v1 (409 rows): council Brier 0.2156, Bear
-Brier 0.2820, cluster r≥0.85 fraction 9/21 (43%), Bear still
-structurally independent (r≈0 with the 5-agent cluster). V2
-measurement waits on resolutions.
+| Criterion | v1 (n=414) | v2:preamble (n=38) | Pass? |
+|---|---|---|---|
+| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | **15/21 (71%)** | ❌ worse |
+| \|drift\| > 0.10 on ≥2 agents | — | max \|drift\|=0.033 | ❌ |
+| Bear Brier toward 0.22, independence held | 0.2822 | **0.2851** (Bear still indep r≈0) | ❌ |
+| Council Brier holds/improves from 0.2176 | 0.2147 | **0.1919** | ✅ |
+
+Bull joined the cluster under v2 (4 of its 6 pair-correlations now
+≥ 0.85 vs 0 under v1). Bear remains the only structurally
+independent agent. Council Brier improved, but plausibly because the
+tighter cluster is more unanimous on a small/easier 38-row slice —
+not better calibration. **n=38 is small** (every v2 band except
+[0.09, 0.50) is `thin`), so the trend is directional, not decisive.
+Decision deferred: ~93 markets pending resolution in the next 24h
+will roughly triple the v2 sample. Re-check then before any
+roll-back / escalation call. STAGE 1 stays LIVE
+(`PERSONA_V2_PREAMBLE=true`); preamble text untouched this session.
+
+**Known gotcha for next session:** `pqi.analytics_sql.get_connection()`
+currently fails when DuckDB's schema sample lands on rows where
+`prompt_flags` only contains the `preamble` key — DuckDB infers
+STRUCT instead of MAP and `map_keys()` on line 26 of the verdicts
+view rejects it. Use `scripts/reliability_diagram.py` (which reads
+the JSONL directly) for now. Quick fix: cast or build the map
+explicitly in the view.
 
 Phase 0 verdict still stands: inconclusive at current n (65 resolved
 BUYs / 385 original reliability rows). Council Brier 0.2176 beats 0.25
@@ -412,14 +414,17 @@ cleared ≥1 Wilson-CI-width flag. Realized April PnL −0.575/share. Full
 retrospective:
 [`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md).
 
-**Highest-leverage next move: observe stage 1, don't escalate.** Let
-resolutions accumulate until ≥20 V2 rows resolve, then run
-`python -m pqi.scripts.reliability_diagram --flag v1` and
-`--flag v2:preamble` side-by-side against the four-criterion unified
-acceptance. Only flip `PERSONA_V2_PREAMBLE=false` and move to stage 2
-after stage 1 has a verdict — not before. Gate knobs explicitly *not*
-retuned — `BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`,
-ROI bands, Kelly multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
+**Highest-leverage next move: re-run the two-filter pair after the
+~93 pending resolutions land.** First monitor pass at n=38 fails
+3 of 4 criteria; before flipping the flag off, let the v2 sample
+grow to ~100+ resolved rows so the Wilson CIs tighten and the 71%
+cluster-fraction reading either confirms (→ revert + redesign the
+preamble framing) or relaxes back toward 43% (→ keep observing /
+escalate as planned). Do NOT edit `_SHARED_PREAMBLE_V2` between
+now and the re-check — content drift invalidates the tagged
+population. Gate knobs explicitly *not* retuned —
+`BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands,
+Kelly multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
 
 Four-criterion acceptance (all must pass simultaneously vs the v1
 frame): cluster-pair r ≥ 0.85 fraction below 0.50; per-agent `|drift|`
@@ -467,8 +472,10 @@ batch persistence stays serial. Session 43 added `pqi history equity`
 (bankroll-denominated equity curve + max drawdown + per-trade Sharpe +
 walk-forward half-Kelly via the `kelly_stake_scaled` snapshot already on
 `CouncilResult` + operational cost row) — pure read-only analytics over
-the existing JSONL log; no pipeline or schema touch. Still zero aggregator
-changes through session 43; scoring still reads `probability` + the two
+the existing JSONL log; no pipeline or schema touch. Session 44 was
+read-only measurement (first stage-1 monitor pass against the 4-criterion
+unified acceptance); no code change at all. Still zero aggregator
+changes through session 44; scoring still reads `probability` + the two
 `confidence_*` fields exactly as before. See `docs/session-log.md` for
 per-session detail.
 

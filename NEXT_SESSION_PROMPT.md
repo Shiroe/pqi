@@ -4,24 +4,33 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 43 (2026-04-20) — shipped `pqi history
-equity`, a read-only bankroll-denominated equity curve with max
-drawdown, per-trade Sharpe, walk-forward half-Kelly sizing (`--mode
-kelly` reading the `kelly_stake_scaled` snapshot already on each
-`CouncilResult`; falls back to `bankroll × --kelly-fallback-pct`
-flat, default 5%, for pre-EV-gate rows — so the fallback scales
-with `-b` instead of staying pinned at $5), and an operational cost
-row covering the full pipeline (Tavily + Search Architect +
-Synthesizer + Council, across BUY + PASS + unresolved entries).
-Pure analytics: aggregator untouched, persisted schema unchanged,
-no new env-gated behavior. Smoke across bankrolls on 84 resolved
-BUYs (identical PnL % since everything scales linearly, only infra
-cost is absolute): `-b 100` → Net of cost **−$5.53**; `-b 1000` →
-Net of cost **+$226.38**. Break-even starting bankroll for
-Kelly-mode equity vs $31.29 infra sits around $121 on current
-history. Phase 1 rollout STAGE 1 still LIVE; V2 measurement state
-carries forward unchanged from sessions 41–42 (16 V2 runs queued,
-112 `v2:preamble` verdicts, 0 resolved).
+**Last rewritten:** session 44 (2026-04-21) — first stage-1 monitor
+pass on `v2:preamble` (read-only, no code change). 38 V2 rows
+resolved (well over the ≥20 trigger). Two-filter pair written to
+`~/.pqi/reports/reliability_20260420_v1.md` and
+`reliability_20260420_v2-preamble.md`. **1 of 4 unified acceptance
+criteria pass** at this n. Headline finding is the *opposite*
+of intent: cluster-pair r≥0.85 fraction jumped 43% → 71% under v2,
+with Bull collapsing into the cluster (4 of its 6 pair-correlations
+now ≥ 0.85, vs 0 under v1). Bear remains the only structurally
+independent agent. Council Brier improved (0.2147 → 0.1919) but
+plausibly because the tighter cluster is more unanimous on a
+small/easier 38-row slice — not better calibration. n=38 is small
+(every v2 band except [0.09, 0.50) is `thin`) so the trend is
+directional, not decisive. **Decision deferred:** ~93 markets pending
+resolution in next 24h — recheck then. STAGE 1 stays LIVE
+(`PERSONA_V2_PREAMBLE=true`); preamble text untouched this session.
+
+**Known gotcha:** `pqi.analytics_sql.get_connection()` currently
+fails when DuckDB's schema sample lands on rows where `prompt_flags`
+contains only the `preamble` key — DuckDB infers STRUCT instead of
+MAP and `map_keys()` on line 26 of the verdicts view rejects it. So
+`pqi query` against `verdicts` is broken right now. Workaround used
+this session: `scripts/reliability_diagram.py` reads the JSONL
+directly and bypasses DuckDB. Quick fix for next session: cast or
+build the map explicitly in the view (e.g. `map_from_entries(…)` or
+force-construct from a struct), or set `sample_size=-1` *and* an
+explicit MAP column type on the read.
 
 ---
 
@@ -59,34 +68,77 @@ edge, architectural judgment, plus the original code-review stance).
 
 ---
 
-## PRIORITY — observe stage 1, don't escalate yet
+## PRIORITY — re-run the monitor pass after the ~93 pending resolutions land
 
 Default entry point: `docs/phases/phase_1_signal_quality.md` §Session state.
 
-Phase 1 rollout stage 1 is **live**. `PERSONA_V2_PREAMBLE=true` in
-`.env` since session 41. V2 preamble content landed this session:
-three-case worked-example spectrum (mild / severe / symmetric
-asymmetry) replaced the single-gap anchor so agents learn ignorance
-mass scales with briefing depth rather than anchoring on one magic
-number; anti-mirror check softened to "sum-near-100 PAIRED WITH
-matched confidences" — signal, not trigger. These content changes
-pollute the tagged population if changed again, so: leave V2 wording
-alone during stage 1 measurement.
+Phase 1 rollout stage 1 remains **live**. `PERSONA_V2_PREAMBLE=true`.
+V2 preamble text untouched since session 41 — keep it that way during
+stage 1 measurement.
 
-### What's in flight
+### Where stage 1 stands (session 44 first monitor pass)
 
-- **16 V2 runs queued**, **0 resolved yet** — `pqi query "SELECT
-  flag_label, COUNT(*) FROM verdicts GROUP BY flag_label"` returns
-  `v1=2878, v2:preamble=112` as of session 41 end.
-- **Refreshed baseline:** `~/.pqi/reports/reliability_20260419.md`
-  (409 rows, 100% v1 since 0 V2 has resolved). Council Brier 0.2156,
-  Bear Brier 0.2820, cluster r≥0.85 fraction 9/21 = 43%, Bear
-  independence still intact.
-- **Filtered reports tool:** `python -m pqi.scripts.reliability_diagram
-  --flag v1` and `--flag v2:preamble` produce independent diagrams
-  with flag-suffixed filenames (`reliability_YYYYMMDD_v1.md`,
-  `reliability_YYYYMMDD_v2-preamble.md`). Unfiltered behaviour
-  unchanged.
+n = 38 v2:preamble resolved vs 414 v1 resolved. Reports at
+`~/.pqi/reports/reliability_20260420_v1.md` and
+`reliability_20260420_v2-preamble.md`.
+
+| Criterion | v1 (n=414) | v2:preamble (n=38) | Pass? |
+|---|---|---|---|
+| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | 15/21 (71%) | ❌ worse |
+| \|drift\| > 0.10 on ≥2 agents | — | max \|drift\|=0.033 | ❌ |
+| Bear Brier toward 0.22, indep held | 0.2822 | 0.2851 (Bear still indep) | ❌ |
+| Council Brier holds/improves | 0.2147 | 0.1919 | ✅ |
+
+Per-agent Brier deltas (v2 − v1, all negative = improved): rules_lawyer
+−0.033, bull −0.024, bear +0.003, statistician −0.016, sentiment −0.026,
+specialist −0.022, contrarian −0.014, council −0.023. None exceed the
+±0.10 drift threshold.
+
+The diagnostic to watch: under v2, Bull's pair-correlations jumped
+from ~0.6 (v1) to ~0.86–0.90 with the 5-agent cluster. The preamble
+appears to be increasing shared anchoring, not breaking it. Bear
+remains structurally independent (r ≈ −0.17 to 0.02 with all others).
+
+### Why we're waiting, not flipping the flag
+
+n=38 is small. Every v2 band except [0.09, 0.50) is `thin`; the 71%
+cluster fraction is a strong directional signal but the per-band
+realized rates are noisy. User reports ~93 markets pending resolution
+in the next 24h — that should roughly triple the v2 sample to ~100+
+resolved rows. Tighter Wilson CIs after that batch lands will either
+confirm the regression (→ revert + redesign the preamble) or relax
+the reading back toward 43% (→ keep observing / run stage 2).
+
+### Next action this session (after the 24h soak)
+
+1. Re-run both filters against the latest history:
+   ```
+   python scripts/reliability_diagram.py --flag v1
+   python scripts/reliability_diagram.py --flag v2:preamble
+   ```
+2. Re-evaluate against the four-criterion unified acceptance.
+3. Decision tree:
+   - **If cluster fraction stays ≥ 60% on n ≥ 100:** flip
+     `PERSONA_V2_PREAMBLE=false`, write a brief retro on what about
+     the V2 preamble framing concentrated rather than diversified the
+     cluster, and redesign before re-flipping.
+   - **If cluster fraction drops below 50% AND ≥ 2 agents show
+     |drift| > 0.10 AND Bear Brier moves toward 0.22 AND council
+     Brier holds:** stage 1 passes. Flip the flag off and proceed to
+     stage 2 (anchors).
+   - **If neither — mixed/in-between:** keep observing. Don't flip
+     either way until one of the above resolves.
+4. **Fix the analytics_sql binder bug** if you want `pqi query` back
+   on the `verdicts` view. The script-based pipeline is unblocked
+   without it.
+
+### Constraints (hard)
+
+- Do **NOT** edit `_SHARED_PREAMBLE_V2` between now and the verdict.
+  Content drift invalidates the tagged `v2:preamble` population.
+- Do **NOT** retune aggregator knobs based on the v2 slice. The
+  Phase 0 freeze stands.
+- Do **NOT** advance to stage 2 without a stage-1 verdict.
 
 ### Queuing more V2 runs (session 42 tooling)
 
@@ -103,20 +155,19 @@ ceiling on Anthropic Tier 2. Add `--summary-only` to skip per-event
 panels when you just want to seed a lot of V2 verdicts into the log.
 See README.md "Batch mode" section.
 
-### Next action (gated on data, not calendar)
+### Resolution count check (use script, `pqi query` is broken)
 
-Check resolution count first: `pqi query "SELECT v.flag_label,
-COUNT(DISTINCT v.run_id) AS runs, SUM(CASE WHEN h.resolution IS NOT
-NULL THEN 1 ELSE 0 END) AS resolved FROM verdicts v JOIN history h
-USING (run_id) WHERE v.flag_label LIKE 'v2:%' GROUP BY v.flag_label"`.
+`pqi query` on the `verdicts` view raises a DuckDB binder error
+right now (analytics_sql.py:99 — STRUCT vs MAP inference on
+`prompt_flags`). Until that's fixed, use:
 
-- **If resolved V2 runs < ~20:** do nothing. Keep queuing fresh V2
-  analyses on short-horizon markets (esports typically resolves in
-  days). Do NOT flip the flag off, do NOT escalate to stage 2.
-- **If resolved V2 runs ≥ ~20:** produce the two-filter pair
-  (`--flag v1` vs `--flag v2:preamble`) and evaluate the four-criterion
-  unified acceptance below. Only after stage 1 has a verdict should
-  the preamble flag flip off and stage 2 begin.
+```
+python scripts/reliability_diagram.py --no-write 2>&1 | head -2
+```
+
+The first stderr line is `resolved rows by flag label: v1=…,
+v2:preamble=…`. Session 44 saw `v1=414, v2:preamble=38`. Target
+for the next monitor pass is `v2:preamble ≥ 100`.
 
 ### Rollout order (each stage is an INDEPENDENT A/B, not cumulative)
 

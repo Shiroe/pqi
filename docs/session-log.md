@@ -4,6 +4,86 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 44 — first stage-1 monitor pass on `v2:preamble`
+
+Read-only measurement session. No code change. Triggered by user noting
+the v2 sample had crossed the ≥20 trigger threshold.
+
+### Population check
+
+`scripts/reliability_diagram.py` stderr line: `resolved rows by flag
+label: v1=414, v2:preamble=38`. Note that `pqi query` against the
+`verdicts` view is currently broken (DuckDB binder error — see
+"Carry-over bug" below); the script-based path remained functional
+because it reads the JSONL directly.
+
+### Two-filter pair
+
+```
+python scripts/reliability_diagram.py --flag v1
+python scripts/reliability_diagram.py --flag v2:preamble
+```
+
+Wrote `~/.pqi/reports/reliability_20260420_v1.md` and
+`reliability_20260420_v2-preamble.md`.
+
+### Verdict against the four-criterion unified acceptance
+
+| Criterion | v1 (n=414) | v2:preamble (n=38) | Pass? |
+|---|---|---|---|
+| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | **15/21 (71%)** | ❌ worse |
+| \|drift\| > 0.10 on ≥2 agents | — | max \|drift\|=0.033 | ❌ |
+| Bear Brier toward 0.22, indep held | 0.2822 | 0.2851 | ❌ |
+| Council Brier holds/improves from 0.2176 | 0.2147 | **0.1919** | ✅ |
+
+**1 of 4. Stage 1 fails the unified acceptance on this slice.**
+
+### What's notable
+
+- Cluster fraction moved the *wrong* direction (43% → 71%). Bull
+  collapsed into the 5-agent cluster: under v1 Bull's pair-correlations
+  with the cluster sit near 0.6; under v2 they jumped to 0.86–0.90.
+- Bear remains structurally independent (r ∈ [−0.17, 0.02] with all
+  others) — independence preserved, calibration unchanged.
+- Council Brier improved (0.2147 → 0.1919) but plausibly because the
+  tighter cluster is more unanimous on a small/easier 38-row slice,
+  not because calibration improved. Per-band v2 cells are all `thin`
+  (n < 10) outside [0.09, 0.50).
+- Per-agent Brier deltas (v2 − v1, all negative = improved):
+  rules_lawyer −0.033, bull −0.024, bear +0.003, statistician −0.016,
+  sentiment −0.026, specialist −0.022, contrarian −0.014, council
+  −0.023. None cross the ±0.10 drift threshold.
+
+### Decision
+
+**Decision deferred, not made.** n=38 is small and Wilson CIs are
+wide. User reports ~93 markets pending resolution in the next 24h
+which will roughly triple the v2 sample. Stage 1 stays live
+(`PERSONA_V2_PREAMBLE=true`); preamble text untouched. Re-run the
+two-filter pair after the soak window closes.
+
+If the cluster-fraction reading stays ≥ 60% on n ≥ 100, the
+preamble framing is concentrating shared anchoring rather than
+breaking it — revert and redesign before re-flipping. If the reading
+relaxes back toward 43% with the larger sample, keep observing.
+
+### Carry-over bug for next session
+
+`pqi.analytics_sql.get_connection()` now raises
+`BinderException: No function matches 'map_keys(STRUCT(preamble
+BOOLEAN))'` because DuckDB's schema sample landed on rows where
+`prompt_flags` only contained the `preamble` key. With one key it
+gets inferred as STRUCT, not MAP, so the verdicts view's
+`map_keys(v.prompt_flags)` clause (analytics_sql.py:124–127) fails
+at view-creation time. Workarounds:
+
+- Use `scripts/reliability_diagram.py` (reads JSONL directly).
+- Quick fix in the view: build the map explicitly via
+  `map_from_entries(...)` from the struct fields, or pass an
+  explicit `columns={...}` MAP type to `read_json_auto`.
+
+---
+
 ## Session 43 — `pqi history equity` (bankroll PnL + drawdown + Sharpe)
 
 New history sub-command that turns the per-BUY PnL math already in
