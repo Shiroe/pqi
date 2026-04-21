@@ -4,33 +4,46 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 44 (2026-04-21) — first stage-1 monitor
-pass on `v2:preamble` (read-only, no code change). 38 V2 rows
-resolved (well over the ≥20 trigger). Two-filter pair written to
-`~/.pqi/reports/reliability_20260420_v1.md` and
-`reliability_20260420_v2-preamble.md`. **1 of 4 unified acceptance
-criteria pass** at this n. Headline finding is the *opposite*
-of intent: cluster-pair r≥0.85 fraction jumped 43% → 71% under v2,
-with Bull collapsing into the cluster (4 of its 6 pair-correlations
-now ≥ 0.85, vs 0 under v1). Bear remains the only structurally
-independent agent. Council Brier improved (0.2147 → 0.1919) but
-plausibly because the tighter cluster is more unanimous on a
-small/easier 38-row slice — not better calibration. n=38 is small
-(every v2 band except [0.09, 0.50) is `thin`) so the trend is
-directional, not decisive. **Decision deferred:** ~93 markets pending
-resolution in next 24h — recheck then. STAGE 1 stays LIVE
-(`PERSONA_V2_PREAMBLE=true`); preamble text untouched this session.
+**Last rewritten:** session 45 (2026-04-21) — directional re-check
+at n=78 (v2 sample doubled from 38) + two QoL fixes. **0 of 4
+unified acceptance criteria pass now** (was 1 of 4 at n=38). Reports
+at `~/.pqi/reports/reliability_20260421_v1.md` and
+`reliability_20260421_v2-preamble.md`. Cluster fraction pinned at 71%
+through the 2× doubling — not a small-sample artifact. Bear Brier
+moved *away* from the 0.22 cluster floor (0.2822 → 0.3073), Council
+Brier gave back the earlier apparent improvement (0.1919 → 0.2182,
+roughly on par with v1's 0.2147). **n=78 is still below the formal
+n ≥ 100 verdict threshold, but the direction is now stable.** STAGE 1
+stays LIVE (`PERSONA_V2_PREAMBLE=true`) for exactly one more sample
+batch before the revert trigger fires. Preamble text untouched.
 
-**Known gotcha:** `pqi.analytics_sql.get_connection()` currently
-fails when DuckDB's schema sample lands on rows where `prompt_flags`
-contains only the `preamble` key — DuckDB infers STRUCT instead of
-MAP and `map_keys()` on line 26 of the verdicts view rejects it. So
-`pqi query` against `verdicts` is broken right now. Workaround used
-this session: `scripts/reliability_diagram.py` reads the JSONL
-directly and bypasses DuckDB. Quick fix for next session: cast or
-build the map explicitly in the view (e.g. `map_from_entries(…)` or
-force-construct from a struct), or set `sample_size=-1` *and* an
-explicit MAP column type on the read.
+**QoL this session:**
+
+- `history sync` now parallelises `fetch_resolution` via a bounded
+  worker pool + global pacer. Heuristic derived from
+  `GAMMA_RATE_LIMIT_DELAY` (no new knob): `60/delay` req/min budget
+  with 20% headroom; workers `clamp(ceil(1.5/min_interval), 2, 8)`.
+  Default (delay=0.5s) → 3 workers at 96 req/min cap. New
+  `history.update_resolutions_batch()` applies all patches in a
+  single load → rewrite so concurrent workers can't race on the
+  jsonl. 66 entries synced in 41.5s (pacer-bound, vs ~60s
+  sequentially).
+- Batch `analyze` `_run_batch` now attaches a root-handler logging
+  Filter that drops records from `httpx` / `httpcore` / `anthropic`
+  loggers for the duration of the Live panel, restored in
+  `try/finally`. Filter-based silencing (not `setLevel`) because child
+  loggers have their own level — only a handler-side prefix filter
+  catches `httpx._client` / `httpcore.connection` /
+  `anthropic._base_client` uniformly. Single-analyze path unchanged.
+
+**Known gotcha (carry-over from session 44):**
+`pqi.analytics_sql.get_connection()` still fails when DuckDB's schema
+sample lands on rows where `prompt_flags` contains only the `preamble`
+key — STRUCT vs MAP inference on `map_keys()`. `pqi query` against
+`verdicts` stays broken. `scripts/reliability_diagram.py` bypasses it
+(reads JSONL directly). Quick fix: cast or build the map explicitly
+in the view (`map_from_entries(…)`), or pass an explicit MAP column
+type to `read_json_auto`.
 
 ---
 
@@ -68,69 +81,92 @@ edge, architectural judgment, plus the original code-review stance).
 
 ---
 
-## PRIORITY — re-run the monitor pass after the ~93 pending resolutions land
+## PRIORITY — one more monitor pass, then expect to revert
 
 Default entry point: `docs/phases/phase_1_signal_quality.md` §Session state.
 
 Phase 1 rollout stage 1 remains **live**. `PERSONA_V2_PREAMBLE=true`.
-V2 preamble text untouched since session 41 — keep it that way during
-stage 1 measurement.
+V2 preamble text untouched since session 41 — keep it that way.
 
-### Where stage 1 stands (session 44 first monitor pass)
+### Where stage 1 stands (session 45 re-check at n=78)
 
-n = 38 v2:preamble resolved vs 414 v1 resolved. Reports at
-`~/.pqi/reports/reliability_20260420_v1.md` and
-`reliability_20260420_v2-preamble.md`.
+n = 78 v2:preamble resolved vs 414 v1 resolved. Reports at
+`~/.pqi/reports/reliability_20260421_v1.md` and
+`reliability_20260421_v2-preamble.md`.
 
-| Criterion | v1 (n=414) | v2:preamble (n=38) | Pass? |
-|---|---|---|---|
-| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | 15/21 (71%) | ❌ worse |
-| \|drift\| > 0.10 on ≥2 agents | — | max \|drift\|=0.033 | ❌ |
-| Bear Brier toward 0.22, indep held | 0.2822 | 0.2851 (Bear still indep) | ❌ |
-| Council Brier holds/improves | 0.2147 | 0.1919 | ✅ |
+| Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
+|---|---|---|---|---|
+| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | 15/21 (71%) | **15/21 (71%)** | ❌ unchanged |
+| \|drift\| > 0.10 on ≥2 agents | — | max 0.033 | **max ~0.025** | ❌ |
+| Bear Brier toward 0.22, indep held | 0.2822 | 0.2851 | **0.3073** (indep held) | ❌ worse |
+| Council Brier holds/improves from 0.2147 | — | 0.1919 | **0.2182** | ❌ regressed |
 
-Per-agent Brier deltas (v2 − v1, all negative = improved): rules_lawyer
-−0.033, bull −0.024, bear +0.003, statistician −0.016, sentiment −0.026,
-specialist −0.022, contrarian −0.014, council −0.023. None exceed the
-±0.10 drift threshold.
+**0 of 4 now** (was 1 of 4 at n=38). The doubling confirmed that
+the session-44 reading was not a small-sample artifact: cluster
+fraction pinned at 71%, Bull still inside the cluster (all 6
+pair-correlations ≥ 0.87), Bear Brier drifted *away* from the 0.22
+floor, Council Brier gave back the earlier improvement.
 
-The diagnostic to watch: under v2, Bull's pair-correlations jumped
-from ~0.6 (v1) to ~0.86–0.90 with the 5-agent cluster. The preamble
-appears to be increasing shared anchoring, not breaking it. Bear
-remains structurally independent (r ≈ −0.17 to 0.02 with all others).
+### Why we're still waiting one more batch, not flipping this session
 
-### Why we're waiting, not flipping the flag
+The formal decision rule written into session 44's handoff is
+"cluster fraction ≥ 60% on **n ≥ 100**". At n=78 we are short by
+~22 rows. The direction is now stable enough that the verdict is
+effectively foregone, but keeping the rule honest preserves the
+audit trail — flipping at n=78 would look like we moved the
+goalposts on ourselves. One more resolution batch should cross
+n=100; then the revert is rule-driven, not discretionary.
 
-n=38 is small. Every v2 band except [0.09, 0.50) is `thin`; the 71%
-cluster fraction is a strong directional signal but the per-band
-realized rates are noisy. User reports ~93 markets pending resolution
-in the next 24h — that should roughly triple the v2 sample to ~100+
-resolved rows. Tighter Wilson CIs after that batch lands will either
-confirm the regression (→ revert + redesign the preamble) or relax
-the reading back toward 43% (→ keep observing / run stage 2).
+### Next action this session (once v2 crosses n ≥ 100)
 
-### Next action this session (after the 24h soak)
+1. Resolution count check (takes 2s):
+   ```
+   python scripts/reliability_diagram.py --no-write 2>&1 | head -2
+   ```
+   The first stderr line reports `v1=…, v2:preamble=…`. Proceed only
+   when `v2:preamble ≥ 100`.
 
-1. Re-run both filters against the latest history:
+2. Re-run both filters:
    ```
    python scripts/reliability_diagram.py --flag v1
    python scripts/reliability_diagram.py --flag v2:preamble
    ```
-2. Re-evaluate against the four-criterion unified acceptance.
-3. Decision tree:
-   - **If cluster fraction stays ≥ 60% on n ≥ 100:** flip
-     `PERSONA_V2_PREAMBLE=false`, write a brief retro on what about
-     the V2 preamble framing concentrated rather than diversified the
-     cluster, and redesign before re-flipping.
+
+3. Apply the decision tree:
+   - **If cluster fraction ≥ 60% on n ≥ 100** (expected): flip
+     `PERSONA_V2_PREAMBLE=false`, write a short retro on why the v2
+     preamble framing concentrated rather than diversified the
+     cluster (hypothesis: the "autonomy" language made the 5-agent
+     cluster more agreeable, not less; Bear's structural wiring
+     stayed independent for separate reasons). Redesign before any
+     re-flip.
    - **If cluster fraction drops below 50% AND ≥ 2 agents show
      |drift| > 0.10 AND Bear Brier moves toward 0.22 AND council
      Brier holds:** stage 1 passes. Flip the flag off and proceed to
-     stage 2 (anchors).
-   - **If neither — mixed/in-between:** keep observing. Don't flip
-     either way until one of the above resolves.
+     stage 2 (anchors). This is unlikely given the stability of the
+     n=38 → n=78 reading.
+   - **If neither:** keep observing. Do not flip until one resolves.
+
 4. **Fix the analytics_sql binder bug** if you want `pqi query` back
-   on the `verdicts` view. The script-based pipeline is unblocked
-   without it.
+   on the `verdicts` view — still broken from session 44. The
+   script-based pipeline is unblocked without it.
+
+### Running more v2 observations faster
+
+Session 45 parallelized `history sync`, so the resolution catch-up
+loop runs at the Gamma pacer floor now. If you want to seed more V2
+runs between now and the next monitor pass:
+
+```bash
+# Batch analyze over a list of short-horizon esports events
+python3 -m pqi.main -c esports -s 24 -j 3
+# ... at prompt: 1,2,5,7,9   (or 1-5   or   all)
+```
+
+Default concurrency is 1 (sequential). `-j 3` is the practical
+ceiling on Anthropic Tier 2. Add `--summary-only` for summary-only
+output. See README.md "Batch mode". Session 45 also silenced httpx
+noise during the batch Live panel — no more mid-render log breaks.
 
 ### Constraints (hard)
 
@@ -166,8 +202,9 @@ python scripts/reliability_diagram.py --no-write 2>&1 | head -2
 ```
 
 The first stderr line is `resolved rows by flag label: v1=…,
-v2:preamble=…`. Session 44 saw `v1=414, v2:preamble=38`. Target
-for the next monitor pass is `v2:preamble ≥ 100`.
+v2:preamble=…`. Session 44 saw `v1=414, v2:preamble=38`; session 45
+saw `v1=414, v2:preamble=78`. Target for the next monitor pass is
+`v2:preamble ≥ 100`.
 
 ### Rollout order (each stage is an INDEPENDENT A/B, not cumulative)
 

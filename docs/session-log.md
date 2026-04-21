@@ -4,6 +4,134 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 45 — directional monitor re-check (n=78) + sync/batch QoL
+
+Two threads: (1) a cheap directional re-run of the Phase 1 stage-1
+monitor pass now that the v2 sample has roughly doubled; (2) two QoL
+fixes on `history sync` and batch `analyze`. No aggregator touch.
+
+### Monitor re-check at n=78 (up from n=38 at session 44)
+
+Resolved-row count by flag: `v1=414, v2:preamble=78`. Still below the
+formal n ≥ 100 threshold for a verdict, but the 2× sample doubling is
+enough to tell whether the session-44 reading was a small-sample blip
+or a stable observation.
+
+Two-filter pair written to `~/.pqi/reports/reliability_20260421_v1.md`
+and `reliability_20260421_v2-preamble.md`.
+
+| Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
+|---|---|---|---|---|
+| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | 15/21 (71%) | **15/21 (71%)** | ❌ unchanged |
+| \|drift\| > 0.10 on ≥2 agents | — | max 0.033 | **max ~0.025** | ❌ |
+| Bear Brier toward 0.22, indep held | 0.2822 | 0.2851 | **0.3073** (indep held) | ❌ worse |
+| Council Brier holds/improves from 0.2147 | — | 0.1919 | **0.2182** | ❌ regressed |
+
+**0 of 4 now** (was 1 of 4 at n=38). Cluster fraction pinned at 71% held
+through the doubling — not a small-sample artifact. Bear Brier moved
+away from the 0.22 cluster floor (0.2822 → 0.3073), the opposite of
+intent. Council Brier gave back the earlier apparent improvement and is
+now roughly on par with v1. Bull remains inside the cluster (all 6 of
+its pair-correlations ≥ 0.87 under v2 vs 0 ≥ 0.85 under v1). Bear still
+the only structurally independent agent.
+
+### Decision
+
+Decision still deferred by the rulebook (n=78 < 100), but the
+directional read is "fail confirmed" rather than "awaiting signal."
+Flag not flipped this session per user direction — pivoted to QoL —
+but the next session should expect to revert `PERSONA_V2_PREAMBLE=false`
+and open a retro on why the preamble framing concentrated rather than
+diversified the cluster. Preamble text untouched.
+
+### QoL 1 — parallel `history sync`
+
+Sequential loop in `main.py` `history_sync` replaced with a bounded
+worker pool + global pacer derived from `GAMMA_RATE_LIMIT_DELAY`. No
+new config knob.
+
+**Heuristic (main.py:1836–1847):**
+```
+delay        = GAMMA_RATE_LIMIT_DELAY              # 0.5s default
+budget       = 60 / delay req/min                  # 120/min default
+effective    = budget × 0.8                        # 96/min (20% headroom)
+min_interval = 60 / effective = delay / 0.8        # 0.625s default
+workers      = clamp(ceil(1.5 / min_interval), 2, 8)   # 3 at default
+```
+
+Scales:
+
+| delay | effective | workers |
+|---|---|---|
+| 0.2s | 240/min | 6 |
+| **0.5s** (default) | **96/min** | **3** |
+| 1.0s | 48/min | 2 |
+| 5.0s | 10/min | 2 |
+
+**Implementation (main.py:1855–1907):**
+
+- `asyncio.Semaphore(workers)` gates concurrency.
+- A single `asyncio.Lock` + `next_dispatch` timestamp enforces the
+  global `min_interval` spacing between successive request starts —
+  pacer is the binding rate constraint regardless of how many workers
+  finish simultaneously.
+- Workers return `(run_id, status, resolution_dict | None)`.
+- Writes are collected and applied once via a new batch helper
+  `history.update_resolutions_batch(mapping)` (history.py:344–361) —
+  single load → patch in-memory → single rewrite. Prevents the
+  `load → mutate → rewrite` cycle in `_update_entry` from racing
+  itself under concurrent resolve events.
+- Auto-mode stays silent; interactive mode prints a single "Syncing N
+  entries (×W workers, ~R req/min cap)" line before dispatch.
+
+**Live smoke test:** 66 unresolved entries completed in 41.5s — almost
+exactly the pacer floor (66 / 1.6 req/sec = 41.25s). 4 newly resolved,
+0 errors, jsonl integrity confirmed (581 rows, valid JSON). Lowering
+`GAMMA_RATE_LIMIT_DELAY` now scales linearly without touching code.
+
+### QoL 2 — silence httpx noise during batch Live panel
+
+Stray `INFO:httpx:HTTP Request: …` log lines (and equivalents from
+`httpcore`, `anthropic`) were breaking the rich `Live` table
+mid-render in batch `analyze` runs. Silencing scoped to `_run_batch`
+only so single-analyze paths keep the full request trace.
+
+First attempt (`setLevel("httpx", WARNING)` with save/restore in
+try/finally) was insufficient: `setLevel` on a parent logger does not
+suppress child loggers that have their own level set
+(`httpx._client`, `httpcore.connection`, `anthropic._base_client` all
+log HTTP request lines under their own names).
+
+**Fix (main.py:796–811, 830–831):** handler-level `logging.Filter`
+with prefix matching on `("httpx", "httpcore", "anthropic")` attached
+to every root handler on entry to `_run_batch`, removed on exit in a
+`try/finally`. Filters run at emit time, so they can't be bypassed by
+downstream `setLevel` calls, and prefix matching catches every
+sub-logger. Pqi's own loggers pass through untouched.
+
+Verified empirically: `httpx`, `httpx._client`, `httpcore.connection`,
+`anthropic._client` all suppressed during the filter window; `pqi.*`
+records unaffected; logs restored cleanly after.
+
+### Files touched
+
+- `pqi/main.py` — `history_sync` rewrite, `_run_batch` filter
+- `pqi/history.py` — new `update_resolutions_batch` helper
+
+No changes to: scoring, stats, personas, preamble text, config
+defaults, or the aggregator path.
+
+### Carry-over for next session
+
+- DuckDB STRUCT-vs-MAP binder bug on `prompt_flags` (session 44
+  carry-over) — still present. `scripts/reliability_diagram.py`
+  bypasses it.
+- Phase 1 stage-1 verdict: expected to be "revert" once v2 sample
+  crosses n ≥ 100. Do NOT edit `_SHARED_PREAMBLE_V2` until that
+  decision is made and a retro is written.
+
+---
+
 ## Session 44 — first stage-1 monitor pass on `v2:preamble`
 
 Read-only measurement session. No code change. Triggered by user noting

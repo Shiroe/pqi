@@ -373,39 +373,53 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 44 — **first stage-1 monitor pass on
-`v2:preamble`** (read-only analytics, zero pipeline change). 38 V2
-rows resolved, baseline now 414 v1 rows. Two-filter pair written to
-`~/.pqi/reports/reliability_20260420_v1.md` and
-`reliability_20260420_v2-preamble.md`. **1 of 4 unified acceptance
-criteria pass** on this slice — and the headline finding is the
-*opposite* of what the autonomy patch was supposed to deliver:
+**Last updated:** session 45 — **directional re-check of stage 1 at
+n=78** (v2 sample doubled from 38) + two QoL fixes. Re-run numbers
+**worsened** vs session 44; still one resolution batch below the
+formal n ≥ 100 verdict threshold but the direction is now a stable
+observation, not a small-sample artifact.
 
-| Criterion | v1 (n=414) | v2:preamble (n=38) | Pass? |
-|---|---|---|---|
-| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | **15/21 (71%)** | ❌ worse |
-| \|drift\| > 0.10 on ≥2 agents | — | max \|drift\|=0.033 | ❌ |
-| Bear Brier toward 0.22, independence held | 0.2822 | **0.2851** (Bear still indep r≈0) | ❌ |
-| Council Brier holds/improves from 0.2176 | 0.2147 | **0.1919** | ✅ |
+| Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
+|---|---|---|---|---|
+| Cluster r≥0.85 fraction < 0.50 | 9/21 (43%) | 15/21 (71%) | **15/21 (71%)** | ❌ unchanged |
+| \|drift\| > 0.10 on ≥2 agents | — | max 0.033 | **max ~0.025** | ❌ |
+| Bear Brier toward 0.22, indep held | 0.2822 | 0.2851 | **0.3073** (indep held) | ❌ worse |
+| Council Brier holds/improves from 0.2147 | — | 0.1919 | **0.2182** | ❌ regressed |
 
-Bull joined the cluster under v2 (4 of its 6 pair-correlations now
-≥ 0.85 vs 0 under v1). Bear remains the only structurally
-independent agent. Council Brier improved, but plausibly because the
-tighter cluster is more unanimous on a small/easier 38-row slice —
-not better calibration. **n=38 is small** (every v2 band except
-[0.09, 0.50) is `thin`), so the trend is directional, not decisive.
-Decision deferred: ~93 markets pending resolution in the next 24h
-will roughly triple the v2 sample. Re-check then before any
-roll-back / escalation call. STAGE 1 stays LIVE
-(`PERSONA_V2_PREAMBLE=true`); preamble text untouched this session.
+**0 of 4 now** (was 1 of 4 at n=38). Bull still inside the cluster
+(all 6 pair-correlations ≥ 0.87 under v2); Bear still the only
+structurally independent agent. Cluster fraction pinned at 71% held
+through the 2× sample doubling. Council Brier gave back the earlier
+improvement; Bear Brier moved *away* from the 0.22 floor. STAGE 1
+stays LIVE (`PERSONA_V2_PREAMBLE=true`) for one more sample to cross
+the formal n ≥ 100 trigger before flipping. Preamble text untouched.
 
-**Known gotcha for next session:** `pqi.analytics_sql.get_connection()`
-currently fails when DuckDB's schema sample lands on rows where
-`prompt_flags` only contains the `preamble` key — DuckDB infers
-STRUCT instead of MAP and `map_keys()` on line 26 of the verdicts
-view rejects it. Use `scripts/reliability_diagram.py` (which reads
-the JSONL directly) for now. Quick fix: cast or build the map
-explicitly in the view.
+Reports: `~/.pqi/reports/reliability_20260421_v1.md`,
+`reliability_20260421_v2-preamble.md`.
+
+**QoL this session — no pipeline/aggregator touch:**
+
+- **Parallel `history sync`** — bounded worker pool + global pacer
+  derived from `GAMMA_RATE_LIMIT_DELAY` (no new knob). Heuristic:
+  `60/delay` req/min budget × 0.8 buffer → `min_interval = delay/0.8`;
+  workers = `clamp(ceil(1.5 / min_interval), 2, 8)`. Default (delay
+  0.5s) → 3 workers at 96 req/min cap. New
+  `history.update_resolutions_batch` applies all patches in one
+  load → rewrite cycle (concurrency-safe). 66 unresolved synced in
+  41.5s (pacer-bound, was ~60s sequentially).
+- **Batch `analyze` Live panel silences HTTP noise** — `_run_batch`
+  now attaches a root-handler `logging.Filter` that drops records
+  from loggers whose name starts with `httpx` / `httpcore` /
+  `anthropic`, restored in `try/finally`. Filters run at emit time so
+  child loggers (`httpx._client`, `httpcore.connection`, etc.) are
+  caught too. Single-analyze paths unchanged.
+
+**Known gotcha (carry-over from session 44):**
+`pqi.analytics_sql.get_connection()` still fails when DuckDB's schema
+sample lands on rows where `prompt_flags` contains only the `preamble`
+key — STRUCT vs MAP inference on `map_keys()`. Use
+`scripts/reliability_diagram.py` (reads JSONL directly) until the view
+is fixed.
 
 Phase 0 verdict still stands: inconclusive at current n (65 resolved
 BUYs / 385 original reliability rows). Council Brier 0.2176 beats 0.25
@@ -414,17 +428,16 @@ cleared ≥1 Wilson-CI-width flag. Realized April PnL −0.575/share. Full
 retrospective:
 [`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md).
 
-**Highest-leverage next move: re-run the two-filter pair after the
-~93 pending resolutions land.** First monitor pass at n=38 fails
-3 of 4 criteria; before flipping the flag off, let the v2 sample
-grow to ~100+ resolved rows so the Wilson CIs tighten and the 71%
-cluster-fraction reading either confirms (→ revert + redesign the
-preamble framing) or relaxes back toward 43% (→ keep observing /
-escalate as planned). Do NOT edit `_SHARED_PREAMBLE_V2` between
-now and the re-check — content drift invalidates the tagged
-population. Gate knobs explicitly *not* retuned —
-`BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`, ROI bands,
-Kelly multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
+**Highest-leverage next move: one more monitor pass once v2 crosses
+n ≥ 100, then revert.** Session 45's n=78 re-check shows the regression
+is stable, not a small-sample artifact. The formal decision rule
+(n ≥ 100 + cluster fraction ≥ 60%) is the one sample batch away;
+expect to flip `PERSONA_V2_PREAMBLE=false` and open a retro on why
+the v2 preamble concentrated rather than diversified the cluster. Do
+NOT edit `_SHARED_PREAMBLE_V2` between now and the verdict — content
+drift invalidates the tagged population. Gate knobs explicitly *not*
+retuned — `BAND_SHRINKAGE_K=5`, `MIN_CONTRARIAN_PROBABILITY=0.60`,
+ROI bands, Kelly multiplier, `MIN_WIN_RATE_SAMPLES` all stand.
 
 Four-criterion acceptance (all must pass simultaneously vs the v1
 frame): cluster-pair r ≥ 0.85 fraction below 0.50; per-agent `|drift|`
@@ -474,10 +487,15 @@ walk-forward half-Kelly via the `kelly_stake_scaled` snapshot already on
 `CouncilResult` + operational cost row) — pure read-only analytics over
 the existing JSONL log; no pipeline or schema touch. Session 44 was
 read-only measurement (first stage-1 monitor pass against the 4-criterion
-unified acceptance); no code change at all. Still zero aggregator
-changes through session 44; scoring still reads `probability` + the two
-`confidence_*` fields exactly as before. See `docs/session-log.md` for
-per-session detail.
+unified acceptance); no code change at all. Session 45 added two QoL
+fixes on tooling — parallel `history sync` (bounded worker pool +
+pacer derived from `GAMMA_RATE_LIMIT_DELAY`, no new knob) and an
+httpx/httpcore/anthropic log filter scoped to `_run_batch` so the
+batch `analyze` Live panel renders cleanly — plus a directional
+re-check of the Phase 1 stage-1 monitor at n=78. Still zero
+aggregator changes through session 45; scoring still reads
+`probability` + the two `confidence_*` fields exactly as before. See
+`docs/session-log.md` for per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit
