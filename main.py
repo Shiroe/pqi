@@ -793,24 +793,48 @@ async def _run_batch(
             finally:
                 row.finished_at = datetime.now(timezone.utc)
 
-    workers = [asyncio.create_task(_work(r)) for r in rows]
+    # Silence httpx/httpcore/anthropic HTTP traces for the duration of the
+    # Live panel — stray HTTP request logs otherwise break the table
+    # mid-render before the next 4 Hz tick redraws it. A handler-level
+    # Filter is used (not `setLevel`) so the silencing is immune to any
+    # downstream code that adjusts logger levels mid-run. Single-analyze
+    # paths don't go through `_run_batch`, so request traces remain
+    # visible there.
+    _noisy_prefixes = ("httpx", "httpcore", "anthropic")
 
-    with Live(
-        _render_batch_table(rows, concurrency),
-        console=console,
-        refresh_per_second=4,
-        transient=False,
-    ) as live:
-        while not all(t.done() for t in workers):
-            await asyncio.sleep(0.25)
+    class _DropNoisyHTTP(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return not record.name.startswith(_noisy_prefixes)
+
+    _filter = _DropNoisyHTTP()
+    _filtered_handlers: list[logging.Handler] = []
+    for h in logging.getLogger().handlers:
+        h.addFilter(_filter)
+        _filtered_handlers.append(h)
+    try:
+        workers = [asyncio.create_task(_work(r)) for r in rows]
+
+        with Live(
+            _render_batch_table(rows, concurrency),
+            console=console,
+            refresh_per_second=4,
+            transient=False,
+        ) as live:
+            while not all(t.done() for t in workers):
+                await asyncio.sleep(0.25)
+                live.update(_render_batch_table(rows, concurrency))
             live.update(_render_batch_table(rows, concurrency))
-        live.update(_render_batch_table(rows, concurrency))
 
-    # Surface stray exceptions at debug level — `_work` already captured
-    # anything user-facing into `row.error`.
-    for t in workers:
-        if t.exception() is not None:
-            logger.debug("Worker task exception (already captured): %s", t.exception())
+        # Surface stray exceptions at debug level — `_work` already captured
+        # anything user-facing into `row.error`.
+        for t in workers:
+            if t.exception() is not None:
+                logger.debug(
+                    "Worker task exception (already captured): %s", t.exception()
+                )
+    finally:
+        for h in _filtered_handlers:
+            h.removeFilter(_filter)
 
 
 # ---------------------------------------------------------------------------
@@ -1833,33 +1857,79 @@ def history_sync(
     ),
 ) -> None:
     """Fetch resolutions for unresolved entries from the Polymarket Gamma API."""
-    from pqi.history import iter_unresolved, update_resolution
+    import math
+    from pqi.history import iter_unresolved, update_resolutions_batch
     from pqi.resolution import fetch_resolution
 
+    # Heuristic pacing derived from GAMMA_RATE_LIMIT_DELAY:
+    # treat `60 / delay` as the implicit requests-per-minute budget, reserve
+    # a 20% headroom, and size a bounded worker pool to hide worst-case
+    # ~1.5s Gamma call latency. No new knob — if GAMMA_RATE_LIMIT_DELAY
+    # moves, pacing and concurrency move with it.
+    _delay = max(config.GAMMA_RATE_LIMIT_DELAY, 0.01)
+    _budget_per_min = 60.0 / _delay
+    _effective_per_min = _budget_per_min * 0.8
+    _min_interval = 60.0 / _effective_per_min  # == _delay / 0.8
+    _workers = max(2, min(8, math.ceil(1.5 / _min_interval)))
+
     async def _run() -> tuple[int, int, int]:
-        resolved = pending = errors = 0
         targets = list(iter_unresolved(past_end_only=auto))
-        for entry in targets:
+        if not targets:
+            return 0, 0, 0
+
+        sem = asyncio.Semaphore(_workers)
+        pace_lock = asyncio.Lock()
+        loop = asyncio.get_event_loop()
+        next_dispatch = loop.time()
+
+        async def _one(entry: dict) -> tuple[str, str, dict | None]:
+            nonlocal next_dispatch
             r = entry.get("result") or {}
             market_id = (r.get("market") or {}).get("id")
+            run_id = entry.get("run_id") or ""
             if not market_id:
-                continue
-            if not auto:
-                console.print(f"[dim]Syncing {market_id}…[/dim]")
-            try:
-                res = await fetch_resolution(market_id)
-            except Exception as exc:
-                errors += 1
-                if not auto:
-                    console.print(f"[red]  error: {exc}[/red]")
-                await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
-                continue
+                return run_id, "skipped", None
+            async with sem:
+                # Global pacer: enforce min_interval between successive
+                # request starts across all workers.
+                async with pace_lock:
+                    now = loop.time()
+                    wait = next_dispatch - now
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                        now = loop.time()
+                    next_dispatch = now + _min_interval
+                try:
+                    res = await fetch_resolution(market_id)
+                except Exception as exc:
+                    if not auto:
+                        console.print(
+                            f"[red]error syncing {market_id}: {exc}[/red]"
+                        )
+                    return run_id, "error", None
             if res is None:
-                pending += 1
-            else:
-                update_resolution(entry["run_id"], dict(res))
-                resolved += 1
-            await asyncio.sleep(config.GAMMA_RATE_LIMIT_DELAY)
+                return run_id, "pending", None
+            return run_id, "resolved", dict(res)
+
+        if not auto:
+            console.print(
+                f"[dim]Syncing {len(targets)} entries "
+                f"(×{_workers} workers, ~{_effective_per_min:.0f} req/min cap)…[/dim]"
+            )
+
+        results = await asyncio.gather(*(_one(t) for t in targets))
+
+        patches = {
+            rid: res
+            for rid, status, res in results
+            if status == "resolved" and res is not None
+        }
+        if patches:
+            update_resolutions_batch(patches)
+
+        resolved = sum(1 for _, s, _ in results if s == "resolved")
+        pending = sum(1 for _, s, _ in results if s == "pending")
+        errors = sum(1 for _, s, _ in results if s == "error")
         return resolved, pending, errors
 
     resolved, pending, errors = asyncio.run(_run())

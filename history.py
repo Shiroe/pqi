@@ -340,6 +340,27 @@ def update_resolution(run_id: str, resolution: dict) -> bool:
     return _update_entry(run_id, {"resolution": resolution})
 
 
+def update_resolutions_batch(resolutions: dict[str, dict]) -> int:
+    """Persist many resolutions in a single load → patch → rewrite cycle.
+
+    Safe for use after a parallel fetch pass: the serialized rewrite here
+    replaces N overlapping `update_resolution` calls that would otherwise
+    race on the jsonl file. Returns the number of entries actually patched.
+    """
+    if not resolutions:
+        return 0
+    entries = load_history()
+    applied = 0
+    for e in entries:
+        rid = e.get("run_id")
+        if rid in resolutions:
+            e["resolution"] = resolutions[rid]
+            applied += 1
+    if applied:
+        _rewrite_all(entries)
+    return applied
+
+
 def update_analysis(run_id: str, analysis: dict) -> bool:
     """Persist an analysis (postmortem) block onto the entry with the given run_id."""
     return _update_entry(run_id, {"analysis": analysis})
