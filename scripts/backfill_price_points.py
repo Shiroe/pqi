@@ -43,8 +43,11 @@ from pathlib import Path
 
 import httpx
 
-HISTORY_FILE = Path.home() / ".pqi" / "history.jsonl"
-SIDECAR_FILE = Path.home() / ".pqi" / "price_points.jsonl"
+_PQI_DATA_DIR = Path(
+    os.getenv("PQI_DATA_DIR", str(Path(__file__).resolve().parent.parent / ".pqi"))
+).expanduser()
+HISTORY_FILE = _PQI_DATA_DIR / "history.jsonl"
+SIDECAR_FILE = _PQI_DATA_DIR / "price_points.jsonl"
 
 CLOB_BASE_URL = "https://clob.polymarket.com"
 CLOB_INTERVAL = "max"

@@ -54,6 +54,7 @@ if str(PARENT) not in sys.path:
 from rich.console import Console  # noqa: E402
 from rich.table import Table  # noqa: E402
 
+from pqi import config  # noqa: E402
 from pqi.history import load_history  # noqa: E402
 
 CONSOLE = Console()
@@ -602,7 +603,7 @@ def run(verbose: bool = False) -> dict[str, Any]:
                 + f" | {e['question']}"
             )
 
-    out_dir = Path.home() / ".pqi" / "backtests"
+    out_dir = config.PQI_DATA_DIR / "backtests"
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     artifact = {

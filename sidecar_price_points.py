@@ -49,11 +49,12 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pqi import config
 from pqi.models import MarketData, PricePoint
 
 logger = logging.getLogger(__name__)
 
-SIDECAR_DIR = Path.home() / ".pqi"
+SIDECAR_DIR = config.PQI_DATA_DIR
 SIDECAR_FILE = SIDECAR_DIR / "price_points.jsonl"
 
 

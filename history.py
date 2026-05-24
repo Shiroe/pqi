@@ -19,11 +19,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from pqi import config
 from pqi.models import CouncilResult, RunContext
 
 logger = logging.getLogger(__name__)
 
-HISTORY_DIR = Path.home() / ".pqi"
+HISTORY_DIR = config.PQI_DATA_DIR
 HISTORY_FILE = HISTORY_DIR / "history.jsonl"
 
 

@@ -51,10 +51,11 @@ from pathlib import Path
 
 import duckdb
 
+from pqi import config
 from pqi.history import HISTORY_FILE
 
-CLV_FILE = Path.home() / ".pqi" / "clv.jsonl"
-PRICE_POINTS_FILE = Path.home() / ".pqi" / "price_points.jsonl"
+CLV_FILE = config.PQI_DATA_DIR / "clv.jsonl"
+PRICE_POINTS_FILE = config.PQI_DATA_DIR / "price_points.jsonl"
 
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 

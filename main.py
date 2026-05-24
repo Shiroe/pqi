@@ -1318,7 +1318,7 @@ def query(
     ),
 ) -> None:
     """
-    Run an ad-hoc SQL query against ~/.pqi/history.jsonl.
+    Run an ad-hoc SQL query against the persisted history.jsonl.
 
     Two views are pre-registered:
 

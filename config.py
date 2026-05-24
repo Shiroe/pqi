@@ -311,14 +311,25 @@ between letting real price-band signal through and resisting thin-band
 overfit."""
 
 # ---------------------------------------------------------------------------
+# Data directory (history, cache, reports, weights, …)
+# ---------------------------------------------------------------------------
+
+# Default to a `.pqi/` directory next to this file so persisted state lives
+# inside the repo and can be synced across machines via git. Override with
+# PQI_DATA_DIR to keep the legacy ~/.pqi location or point elsewhere.
+PQI_DATA_DIR: Path = Path(
+    os.getenv("PQI_DATA_DIR", str(Path(__file__).resolve().parent / ".pqi"))
+).expanduser()
+
+# ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
 
-CACHE_DB_PATH: str = os.getenv("CACHE_DB_PATH", str(Path.home() / ".pqi" / "cache.db"))
+CACHE_DB_PATH: str = os.getenv("CACHE_DB_PATH", str(PQI_DATA_DIR / "cache.db"))
 CACHE_PRICE_DELTA: float = float(os.getenv("CACHE_PRICE_DELTA", "0.02"))
 CATEGORY_CACHE_PATH: str = os.getenv(
     "CATEGORY_CACHE_PATH",
-    str(Path.home() / ".pqi" / "category_cache.json"),
+    str(PQI_DATA_DIR / "category_cache.json"),
 )
 
 # ---------------------------------------------------------------------------

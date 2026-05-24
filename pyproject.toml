@@ -1,0 +1,28 @@
+[project]
+name = "pqi"
+version = "0.1.0"
+description = "Polymarket Qualitative Intelligence — 7-agent LLM council for event-driven prediction markets"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "httpx>=0.27",
+    "anthropic>=0.28",
+    "ollama>=0.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "tavily-python>=0.3",
+    "python-dotenv>=1.0",
+    "py-clob-client>=0.1",
+    "aiosqlite>=0.20",
+    "duckdb>=1.0",
+    "rapidfuzz>=3.0",
+]
+
+[tool.uv]
+# Non-installable project: this repo's source layout puts the `pqi` package
+# at the repo root (not under src/pqi or pqi/pqi), so it isn't a buildable
+# wheel. uv treats this as a dependency manifest only — `uv sync` creates
+# .venv/ with the deps and the code is imported via sys.path (run from the
+# parent directory, or with `uv run python -m pqi.main ...`).
+package = false

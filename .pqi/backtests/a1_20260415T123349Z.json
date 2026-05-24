@@ -1,0 +1,764 @@
+{
+  "generated_at": "20260415T123349Z",
+  "phase": "beta",
+  "eligible_rows": 228,
+  "split": {
+    "train_n": 159,
+    "holdout_n": 69,
+    "train_frac": 0.7
+  },
+  "criteria": {
+    "brier_delta_max": -0.005,
+    "net_correct_delta_min": -1,
+    "bootstrap_n": 1000,
+    "ci_pct": [
+      2.5,
+      97.5
+    ]
+  },
+  "gate_thresholds": {
+    "prob_min": 0.6,
+    "conf_min": 0.67,
+    "roi_min": 0.1,
+    "price_floor": 0.09,
+    "price_ceiling": 0.9,
+    "logit_eps": 0.01,
+    "dempster_ignorance_ceil": 0.45,
+    "dempster_mass_gap_min": 0.15,
+    "shrink_gap_min": 0.2
+  },
+  "notes": [
+    "Decision gate simplified: price/prob/conf/ROI only. Contrarian and EV gates skipped.",
+    "missed_op: PASS where the council's favored side (yes_score vs no_score) won.",
+    "Per-agent application: each candidate transforms each agent's verdict before council aggregation.",
+    "Train/holdout split is chronological by timestamp."
+  ],
+  "verdicts": {
+    "baseline": "\u2014",
+    "shrinkage": "REJECT",
+    "logodds": "REJECT",
+    "dempster": "REJECT",
+    "SH2_selective": "REJECT",
+    "LO2_mean": "REJECT",
+    "D1_ign": "REJECT",
+    "D2_gap": "REJECT",
+    "D3_both": "REJECT"
+  },
+  "train_summary": {
+    "baseline": {
+      "n": 159,
+      "brier_mean": 0.2167,
+      "correct_buy": 20,
+      "wrong_buy": 5,
+      "net_correct": 15,
+      "missed_opportunity": 86,
+      "correct_pass": 48,
+      "pass_total": 134,
+      "buy_wr": 0.8,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": null
+    },
+    "shrinkage": {
+      "n": 159,
+      "brier_mean": 0.242,
+      "correct_buy": 4,
+      "wrong_buy": 1,
+      "net_correct": 3,
+      "missed_opportunity": 88,
+      "correct_pass": 66,
+      "pass_total": 154,
+      "buy_wr": 0.8,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": 0.0253,
+        "correct_buy": -16,
+        "wrong_buy": -4,
+        "net_correct": -12,
+        "missed_op": 2,
+        "pass_total": 20,
+        "buy_wr": 0.0
+      }
+    },
+    "logodds": {
+      "n": 159,
+      "brier_mean": 0.2159,
+      "correct_buy": 18,
+      "wrong_buy": 5,
+      "net_correct": 13,
+      "missed_opportunity": 88,
+      "correct_pass": 48,
+      "pass_total": 136,
+      "buy_wr": 0.7826,
+      "ignorance_mean": null,
+      "logodds_abs_mean": 0.5345,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0008,
+        "correct_buy": -2,
+        "wrong_buy": 0,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": 2,
+        "buy_wr": -0.0174
+      }
+    },
+    "dempster": {
+      "n": 159,
+      "brier_mean": 0.2148,
+      "correct_buy": 21,
+      "wrong_buy": 8,
+      "net_correct": 13,
+      "missed_opportunity": 87,
+      "correct_pass": 43,
+      "pass_total": 130,
+      "buy_wr": 0.7241,
+      "ignorance_mean": 0.4349,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0019,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 1,
+        "pass_total": -4,
+        "buy_wr": -0.0759
+      }
+    },
+    "SH2_selective": {
+      "n": 159,
+      "brier_mean": 0.221,
+      "correct_buy": 13,
+      "wrong_buy": 2,
+      "net_correct": 11,
+      "missed_opportunity": 91,
+      "correct_pass": 53,
+      "pass_total": 144,
+      "buy_wr": 0.8667,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": 2.3522,
+      "delta_vs_baseline": {
+        "brier": 0.0043,
+        "correct_buy": -7,
+        "wrong_buy": -3,
+        "net_correct": -4,
+        "missed_op": 5,
+        "pass_total": 10,
+        "buy_wr": 0.0667
+      }
+    },
+    "LO2_mean": {
+      "n": 159,
+      "brier_mean": 0.216,
+      "correct_buy": 18,
+      "wrong_buy": 5,
+      "net_correct": 13,
+      "missed_opportunity": 88,
+      "correct_pass": 48,
+      "pass_total": 136,
+      "buy_wr": 0.7826,
+      "ignorance_mean": null,
+      "logodds_abs_mean": 0.5364,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0007,
+        "correct_buy": -2,
+        "wrong_buy": 0,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": 2,
+        "buy_wr": -0.0174
+      }
+    },
+    "D1_ign": {
+      "n": 159,
+      "brier_mean": 0.2148,
+      "correct_buy": 21,
+      "wrong_buy": 8,
+      "net_correct": 13,
+      "missed_opportunity": 87,
+      "correct_pass": 43,
+      "pass_total": 130,
+      "buy_wr": 0.7241,
+      "ignorance_mean": 0.4349,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0019,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 1,
+        "pass_total": -4,
+        "buy_wr": -0.0759
+      }
+    },
+    "D2_gap": {
+      "n": 159,
+      "brier_mean": 0.2148,
+      "correct_buy": 21,
+      "wrong_buy": 8,
+      "net_correct": 13,
+      "missed_opportunity": 87,
+      "correct_pass": 43,
+      "pass_total": 130,
+      "buy_wr": 0.7241,
+      "ignorance_mean": 0.4349,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0019,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 1,
+        "pass_total": -4,
+        "buy_wr": -0.0759
+      }
+    },
+    "D3_both": {
+      "n": 159,
+      "brier_mean": 0.2148,
+      "correct_buy": 21,
+      "wrong_buy": 8,
+      "net_correct": 13,
+      "missed_opportunity": 87,
+      "correct_pass": 43,
+      "pass_total": 130,
+      "buy_wr": 0.7241,
+      "ignorance_mean": 0.4349,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0019,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 1,
+        "pass_total": -4,
+        "buy_wr": -0.0759
+      }
+    }
+  },
+  "holdout_summary": {
+    "baseline": {
+      "n": 69,
+      "brier_mean": 0.2065,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 41,
+      "correct_pass": 19,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": null
+    },
+    "shrinkage": {
+      "n": 69,
+      "brier_mean": 0.2395,
+      "correct_buy": 2,
+      "wrong_buy": 0,
+      "net_correct": 2,
+      "missed_opportunity": 35,
+      "correct_pass": 32,
+      "pass_total": 67,
+      "buy_wr": 1.0,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": 0.033,
+        "correct_buy": -4,
+        "wrong_buy": -3,
+        "net_correct": -1,
+        "missed_op": -6,
+        "pass_total": 7,
+        "buy_wr": 0.3333
+      }
+    },
+    "logodds": {
+      "n": 69,
+      "brier_mean": 0.2044,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 41,
+      "correct_pass": 19,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": null,
+      "logodds_abs_mean": 0.5359,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.002,
+        "correct_buy": 0,
+        "wrong_buy": 0,
+        "net_correct": 0,
+        "missed_op": 0,
+        "pass_total": 0,
+        "buy_wr": 0.0
+      }
+    },
+    "dempster": {
+      "n": 69,
+      "brier_mean": 0.1975,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 42,
+      "correct_pass": 18,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": 0.454,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.009,
+        "correct_buy": 0,
+        "wrong_buy": 0,
+        "net_correct": 0,
+        "missed_op": 1,
+        "pass_total": 0,
+        "buy_wr": 0.0
+      }
+    },
+    "SH2_selective": {
+      "n": 69,
+      "brier_mean": 0.2178,
+      "correct_buy": 4,
+      "wrong_buy": 2,
+      "net_correct": 2,
+      "missed_opportunity": 44,
+      "correct_pass": 19,
+      "pass_total": 63,
+      "buy_wr": 0.6667,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": 2.2174,
+      "delta_vs_baseline": {
+        "brier": 0.0113,
+        "correct_buy": -2,
+        "wrong_buy": -1,
+        "net_correct": -1,
+        "missed_op": 3,
+        "pass_total": 3,
+        "buy_wr": 0.0
+      }
+    },
+    "LO2_mean": {
+      "n": 69,
+      "brier_mean": 0.205,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 41,
+      "correct_pass": 19,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": null,
+      "logodds_abs_mean": 0.534,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0014,
+        "correct_buy": 0,
+        "wrong_buy": 0,
+        "net_correct": 0,
+        "missed_op": 0,
+        "pass_total": 0,
+        "buy_wr": 0.0
+      }
+    },
+    "D1_ign": {
+      "n": 69,
+      "brier_mean": 0.1975,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 42,
+      "correct_pass": 18,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": 0.454,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.009,
+        "correct_buy": 0,
+        "wrong_buy": 0,
+        "net_correct": 0,
+        "missed_op": 1,
+        "pass_total": 0,
+        "buy_wr": 0.0
+      }
+    },
+    "D2_gap": {
+      "n": 69,
+      "brier_mean": 0.1975,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 42,
+      "correct_pass": 18,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": 0.454,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.009,
+        "correct_buy": 0,
+        "wrong_buy": 0,
+        "net_correct": 0,
+        "missed_op": 1,
+        "pass_total": 0,
+        "buy_wr": 0.0
+      }
+    },
+    "D3_both": {
+      "n": 69,
+      "brier_mean": 0.1975,
+      "correct_buy": 6,
+      "wrong_buy": 3,
+      "net_correct": 3,
+      "missed_opportunity": 42,
+      "correct_pass": 18,
+      "pass_total": 60,
+      "buy_wr": 0.6667,
+      "ignorance_mean": 0.454,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.009,
+        "correct_buy": 0,
+        "wrong_buy": 0,
+        "net_correct": 0,
+        "missed_op": 1,
+        "pass_total": 0,
+        "buy_wr": 0.0
+      }
+    }
+  },
+  "full_summary": {
+    "baseline": {
+      "n": 228,
+      "brier_mean": 0.2136,
+      "correct_buy": 26,
+      "wrong_buy": 8,
+      "net_correct": 18,
+      "missed_opportunity": 127,
+      "correct_pass": 67,
+      "pass_total": 194,
+      "buy_wr": 0.7647,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": null
+    },
+    "shrinkage": {
+      "n": 228,
+      "brier_mean": 0.2413,
+      "correct_buy": 6,
+      "wrong_buy": 1,
+      "net_correct": 5,
+      "missed_opportunity": 123,
+      "correct_pass": 98,
+      "pass_total": 221,
+      "buy_wr": 0.8571,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": 0.0277,
+        "correct_buy": -20,
+        "wrong_buy": -7,
+        "net_correct": -13,
+        "missed_op": -4,
+        "pass_total": 27,
+        "buy_wr": 0.0924
+      }
+    },
+    "logodds": {
+      "n": 228,
+      "brier_mean": 0.2125,
+      "correct_buy": 24,
+      "wrong_buy": 8,
+      "net_correct": 16,
+      "missed_opportunity": 129,
+      "correct_pass": 67,
+      "pass_total": 196,
+      "buy_wr": 0.75,
+      "ignorance_mean": null,
+      "logodds_abs_mean": 0.5349,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0011,
+        "correct_buy": -2,
+        "wrong_buy": 0,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": 2,
+        "buy_wr": -0.0147
+      }
+    },
+    "dempster": {
+      "n": 228,
+      "brier_mean": 0.2095,
+      "correct_buy": 27,
+      "wrong_buy": 11,
+      "net_correct": 16,
+      "missed_opportunity": 129,
+      "correct_pass": 61,
+      "pass_total": 190,
+      "buy_wr": 0.7105,
+      "ignorance_mean": 0.4407,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0041,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": -4,
+        "buy_wr": -0.0542
+      }
+    },
+    "SH2_selective": {
+      "n": 228,
+      "brier_mean": 0.22,
+      "correct_buy": 17,
+      "wrong_buy": 4,
+      "net_correct": 13,
+      "missed_opportunity": 135,
+      "correct_pass": 72,
+      "pass_total": 207,
+      "buy_wr": 0.8095,
+      "ignorance_mean": null,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": 2.3114,
+      "delta_vs_baseline": {
+        "brier": 0.0064,
+        "correct_buy": -9,
+        "wrong_buy": -4,
+        "net_correct": -5,
+        "missed_op": 8,
+        "pass_total": 13,
+        "buy_wr": 0.0448
+      }
+    },
+    "LO2_mean": {
+      "n": 228,
+      "brier_mean": 0.2127,
+      "correct_buy": 24,
+      "wrong_buy": 8,
+      "net_correct": 16,
+      "missed_opportunity": 129,
+      "correct_pass": 67,
+      "pass_total": 196,
+      "buy_wr": 0.75,
+      "ignorance_mean": null,
+      "logodds_abs_mean": 0.5357,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0009,
+        "correct_buy": -2,
+        "wrong_buy": 0,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": 2,
+        "buy_wr": -0.0147
+      }
+    },
+    "D1_ign": {
+      "n": 228,
+      "brier_mean": 0.2095,
+      "correct_buy": 27,
+      "wrong_buy": 11,
+      "net_correct": 16,
+      "missed_opportunity": 129,
+      "correct_pass": 61,
+      "pass_total": 190,
+      "buy_wr": 0.7105,
+      "ignorance_mean": 0.4407,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0041,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": -4,
+        "buy_wr": -0.0542
+      }
+    },
+    "D2_gap": {
+      "n": 228,
+      "brier_mean": 0.2095,
+      "correct_buy": 27,
+      "wrong_buy": 11,
+      "net_correct": 16,
+      "missed_opportunity": 129,
+      "correct_pass": 61,
+      "pass_total": 190,
+      "buy_wr": 0.7105,
+      "ignorance_mean": 0.4407,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0041,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": -4,
+        "buy_wr": -0.0542
+      }
+    },
+    "D3_both": {
+      "n": 228,
+      "brier_mean": 0.2095,
+      "correct_buy": 27,
+      "wrong_buy": 11,
+      "net_correct": 16,
+      "missed_opportunity": 129,
+      "correct_pass": 61,
+      "pass_total": 190,
+      "buy_wr": 0.7105,
+      "ignorance_mean": 0.4407,
+      "logodds_abs_mean": null,
+      "shrink_triggered_mean": null,
+      "delta_vs_baseline": {
+        "brier": -0.0041,
+        "correct_buy": 1,
+        "wrong_buy": 3,
+        "net_correct": -2,
+        "missed_op": 2,
+        "pass_total": -4,
+        "buy_wr": -0.0542
+      }
+    }
+  },
+  "train_ci95_brier_delta": {
+    "baseline": [
+      0.0,
+      0.0
+    ],
+    "shrinkage": [
+      0.0077,
+      0.0445
+    ],
+    "logodds": [
+      -0.0039,
+      0.0022
+    ],
+    "dempster": [
+      -0.009,
+      0.0057
+    ],
+    "SH2_selective": [
+      -0.0038,
+      0.0122
+    ],
+    "LO2_mean": [
+      -0.0033,
+      0.0018
+    ],
+    "D1_ign": [
+      -0.009,
+      0.0057
+    ],
+    "D2_gap": [
+      -0.009,
+      0.0057
+    ],
+    "D3_both": [
+      -0.009,
+      0.0057
+    ]
+  },
+  "holdout_ci95_brier_delta": {
+    "baseline": [
+      0.0,
+      0.0
+    ],
+    "shrinkage": [
+      0.0081,
+      0.0552
+    ],
+    "logodds": [
+      -0.0045,
+      0.0003
+    ],
+    "dempster": [
+      -0.0177,
+      0.0005
+    ],
+    "SH2_selective": [
+      0.0011,
+      0.0208
+    ],
+    "LO2_mean": [
+      -0.0032,
+      0.0003
+    ],
+    "D1_ign": [
+      -0.0177,
+      0.0005
+    ],
+    "D2_gap": [
+      -0.0177,
+      0.0005
+    ],
+    "D3_both": [
+      -0.0177,
+      0.0005
+    ]
+  },
+  "full_ci95_brier_delta": {
+    "baseline": [
+      0.0,
+      0.0
+    ],
+    "shrinkage": [
+      0.0136,
+      0.0423
+    ],
+    "logodds": [
+      -0.0035,
+      0.001
+    ],
+    "dempster": [
+      -0.0102,
+      0.0024
+    ],
+    "SH2_selective": [
+      0.0002,
+      0.0127
+    ],
+    "LO2_mean": [
+      -0.0028,
+      0.0009
+    ],
+    "D1_ign": [
+      -0.0102,
+      0.0024
+    ],
+    "D2_gap": [
+      -0.0102,
+      0.0024
+    ],
+    "D3_both": [
+      -0.0102,
+      0.0024
+    ]
+  }
+}

@@ -31,7 +31,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-HISTORY_FILE = Path.home() / ".pqi" / "history.jsonl"
+_PQI_DATA_DIR = Path(
+    os.getenv("PQI_DATA_DIR", str(Path(__file__).resolve().parent.parent / ".pqi"))
+).expanduser()
+HISTORY_FILE = _PQI_DATA_DIR / "history.jsonl"
 BACKUP_FILE = HISTORY_FILE.with_suffix(".jsonl.preB.bak")
 
 

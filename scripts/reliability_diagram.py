@@ -47,13 +47,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-HISTORY_FILE = Path.home() / ".pqi" / "history.jsonl"
-REPORTS_DIR = Path.home() / ".pqi" / "reports"
+_PQI_DATA_DIR = Path(
+    os.getenv("PQI_DATA_DIR", str(Path(__file__).resolve().parent.parent / ".pqi"))
+).expanduser()
+HISTORY_FILE = _PQI_DATA_DIR / "history.jsonl"
+REPORTS_DIR = _PQI_DATA_DIR / "reports"
 
 # EV-gate price bands (session 31). [0.09–0.50, …, 0.80–0.95] is the
 # block Task 0.4 will join against. The two bookends keep this script
