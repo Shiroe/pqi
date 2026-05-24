@@ -373,11 +373,16 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 45 — **directional re-check of stage 1 at
-n=78** (v2 sample doubled from 38) + two QoL fixes. Re-run numbers
-**worsened** vs session 44; still one resolution batch below the
-formal n ≥ 100 verdict threshold but the direction is now a stable
-observation, not a small-sample artifact.
+**Last updated:** session 46 — **repo portability**. Persisted state
+(history, cache, weights, reports, …) moved from `~/.pqi/` into
+`<repo>/.pqi/` so it travels with git, and dependency management
+swapped from `requirements.txt` to `pyproject.toml` + `uv.lock`.
+Single env-overridable `config.PQI_DATA_DIR` is the source of truth
+for every persisted path; all 7 `scripts/*.py` got inline env-var
+fallbacks so they still run without sys.path tricks. Laptop is now
+clone-and-go: `git clone … && cd pqi && uv sync`. Zero aggregator
+touch. Phase 1 stage-1 monitor stays parked at the session-45
+state (n=78, 0/4 acceptance — table below unchanged).
 
 | Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
 |---|---|---|---|---|
@@ -492,8 +497,12 @@ fixes on tooling — parallel `history sync` (bounded worker pool +
 pacer derived from `GAMMA_RATE_LIMIT_DELAY`, no new knob) and an
 httpx/httpcore/anthropic log filter scoped to `_run_batch` so the
 batch `analyze` Live panel renders cleanly — plus a directional
-re-check of the Phase 1 stage-1 monitor at n=78. Still zero
-aggregator changes through session 45; scoring still reads
+re-check of the Phase 1 stage-1 monitor at n=78. Session 46 was
+infrastructure-only: persisted state moved from `~/.pqi/` to
+`<repo>/.pqi/` (all paths derive from a new env-overridable
+`config.PQI_DATA_DIR`), and the dependency manifest swapped from
+`requirements.txt` to `pyproject.toml` + `uv.lock`. Still zero
+aggregator changes through session 46; scoring still reads
 `probability` + the two `confidence_*` fields exactly as before. See
 `docs/session-log.md` for per-session detail.
 
@@ -518,21 +527,21 @@ running the backtest. See
   **Kelly sizing** (half-Kelly default) — full detail in
   [`docs/scoring-reference.md`](docs/scoring-reference.md).
 - **Dynamic per-agent reliability weights** (session 25,
-  `pqi/agent_weights.py`) — snapshot at `~/.pqi/agent_weights.json`.
+  `pqi/agent_weights.py`) — snapshot at `<PQI_DATA_DIR>/agent_weights.json`.
 - **Option B shadow layer** (session 26) — descriptive only.
 - **Anthropic prompt caching** (session 27) + **centralized retry** (session 30).
 - **Temporal disambiguation + PandaScore** (session 28, esports only,
   non-fatal).
-- **Category-resolution cache** (session 29, `~/.pqi/category_cache.json`).
+- **Category-resolution cache** (session 29, `<PQI_DATA_DIR>/category_cache.json`).
 - Two-sided CLOB price history enrichment (YES + NO, non-fatal).
 - History system: persistence, resolution sync, per-agent accuracy, postmortem.
 - SQLite cache with price-delta + structured-status invalidation.
 - **DuckDB analytics layer** (sessions 34–35, `pqi/analytics_sql.py`):
   `history` + `verdicts` views, plus conditional `clv_by_row` view over
-  `~/.pqi/clv.jsonl`.
+  `<PQI_DATA_DIR>/clv.jsonl`.
 - **Pre-event CLV backfill** (session 35, `scripts/backfill_clv.py`).
 - **Reliability diagram** (session 36, `scripts/reliability_diagram.py`):
-  versioned markdown report at `~/.pqi/reports/reliability_YYYYMMDD.md`.
+  versioned markdown report at `<PQI_DATA_DIR>/reports/reliability_YYYYMMDD.md`.
   `--flag <label>` (session 41) filters resolved rows by Phase 1 rollout
   label (`v1`, `v2:preamble`, `v2:*`); flag-suffixed output filenames.
 - **Per-band calibration retrospective** (session 37, no code) and

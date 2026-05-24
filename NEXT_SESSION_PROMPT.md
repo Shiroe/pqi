@@ -4,37 +4,37 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 45 (2026-04-21) — directional re-check
-at n=78 (v2 sample doubled from 38) + two QoL fixes. **0 of 4
-unified acceptance criteria pass now** (was 1 of 4 at n=38). Reports
-at `~/.pqi/reports/reliability_20260421_v1.md` and
-`reliability_20260421_v2-preamble.md`. Cluster fraction pinned at 71%
-through the 2× doubling — not a small-sample artifact. Bear Brier
-moved *away* from the 0.22 cluster floor (0.2822 → 0.3073), Council
-Brier gave back the earlier apparent improvement (0.1919 → 0.2182,
-roughly on par with v1's 0.2147). **n=78 is still below the formal
-n ≥ 100 verdict threshold, but the direction is now stable.** STAGE 1
-stays LIVE (`PERSONA_V2_PREAMBLE=true`) for exactly one more sample
-batch before the revert trigger fires. Preamble text untouched.
+**Last rewritten:** session 46 (2026-05-25) — **repo portability**.
+Persisted state moved from `~/.pqi/` into `<repo>/.pqi/`, dependency
+manifest swapped to `pyproject.toml` + `uv.lock`. Zero aggregator
+touch. Phase 1 monitor unchanged from session 45: stage 1 still
+LIVE (`PERSONA_V2_PREAMBLE=true`), n=78 v2 vs n=414 v1, **0 of 4
+acceptance criteria pass**, awaiting one more resolution batch
+(target `v2:preamble ≥ 100`) before the formal revert verdict
+fires. Reports at `<repo>/.pqi/reports/reliability_20260421_v1.md`
+and `..._v2-preamble.md`. Preamble text untouched.
 
-**QoL this session:**
+**Session 46 infrastructure changes:**
 
-- `history sync` now parallelises `fetch_resolution` via a bounded
-  worker pool + global pacer. Heuristic derived from
-  `GAMMA_RATE_LIMIT_DELAY` (no new knob): `60/delay` req/min budget
-  with 20% headroom; workers `clamp(ceil(1.5/min_interval), 2, 8)`.
-  Default (delay=0.5s) → 3 workers at 96 req/min cap. New
-  `history.update_resolutions_batch()` applies all patches in a
-  single load → rewrite so concurrent workers can't race on the
-  jsonl. 66 entries synced in 41.5s (pacer-bound, vs ~60s
-  sequentially).
-- Batch `analyze` `_run_batch` now attaches a root-handler logging
-  Filter that drops records from `httpx` / `httpcore` / `anthropic`
-  loggers for the duration of the Live panel, restored in
-  `try/finally`. Filter-based silencing (not `setLevel`) because child
-  loggers have their own level — only a handler-side prefix filter
-  catches `httpx._client` / `httpcore.connection` /
-  `anthropic._base_client` uniformly. Single-analyze path unchanged.
+- All persisted state (`history.jsonl`, `cache.db`, `agent_weights.json`,
+  `stats.json`, `category_cache.json`, `clv.jsonl`, `price_points.jsonl`,
+  `reports/`, `backtests/`, 4 `.bak` files) committed inside the repo
+  at `<repo>/.pqi/` — ~75 MB / 22 files. Source of truth is the new
+  `config.PQI_DATA_DIR` (env-overridable; default = `<repo>/.pqi/`).
+- `requirements.txt` removed; `pyproject.toml` + `uv.lock` are the
+  new dependency manifest. Laptop bootstrap: `git clone … && cd pqi
+  && uv sync` then `uv run python -m pqi.main …` (or
+  `PYTHONPATH=<parent> .venv/bin/python -m pqi.main …`). `pqi`
+  package sits at the repo root (not `src/` or `pqi/pqi/`), so
+  `pyproject.toml` uses `tool.uv.package = false` — uv treats it as
+  a dependency manifest only.
+
+**Cross-machine workflow gotcha:** `history.jsonl` is an append-only
+log. Running `analyze` on both desktop and laptop without
+`pull → run → commit → push` discipline will produce divergent
+appends that git can't auto-merge. Only one machine writes at a
+time; always pull before running. A real fix (per-machine sidecar
+folded in via `history sync`) is out of scope for now.
 
 **Known gotcha (carry-over from session 44):**
 `pqi.analytics_sql.get_connection()` still fails when DuckDB's schema
@@ -91,7 +91,7 @@ V2 preamble text untouched since session 41 — keep it that way.
 ### Where stage 1 stands (session 45 re-check at n=78)
 
 n = 78 v2:preamble resolved vs 414 v1 resolved. Reports at
-`~/.pqi/reports/reliability_20260421_v1.md` and
+`<repo>/.pqi/reports/reliability_20260421_v1.md` and
 `reliability_20260421_v2-preamble.md`.
 
 | Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
@@ -219,7 +219,7 @@ cleanly splittable via `flag_label` across the full run.
    Contrarian. Expect marginal cluster-diversity delta (criterion 1).
 3. **Bear alone** (Bull unchanged) — `PERSONA_V2_BEAR_ADVOCACY=true`.
    Highest-leverage single flag per retro §5.3. **Reset
-   `~/.pqi/agent_weights.json` before this stage** per Task 1.2
+   `<repo>/.pqi/agent_weights.json` before this stage** per Task 1.2
    workflow — pre-rewrite weights absorb Bear miscalibration.
 4. **Bull alone** (Bear reverted) — `PERSONA_V2_BULL_ADVOCACY=true`.
    Symmetric test; prevents the Bull case from remaining unvalidated.
@@ -347,7 +347,7 @@ they bite you.
 - When measurement IS actionable, produce the two-filter pair:
   `python -m pqi.scripts.reliability_diagram --flag v1` and
   `--flag v2:preamble`. They write to
-  `~/.pqi/reports/reliability_YYYYMMDD_v1.md` and
+  `<repo>/.pqi/reports/reliability_YYYYMMDD_v1.md` and
   `..._v2-preamble.md` — compare them directly against the four
   criteria, not against the stale 2026-04-18 file.
 - **Do not re-edit `_SHARED_PREAMBLE_V2` during stage 1 measurement.**
