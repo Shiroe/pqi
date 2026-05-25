@@ -503,6 +503,12 @@ Either:
 
 ## Session state
 
+> Sessions 45–47 did **no Phase-1 work** (QoL tooling, repo portability,
+> then the `src/` packaging fix + docs overhaul). The stage-1 monitor stays
+> parked at the session-45 re-check (n=78, **0/4** — see CLAUDE.md Current
+> State); `PERSONA_V2_PREAMBLE=true` and `_SHARED_PREAMBLE_V2` untouched. The
+> last actual Phase-1 work is below.
+
 **Last work session:** session 44 (2026-04-21) — first stage-1
 monitor pass. n = 38 v2:preamble resolved vs 414 v1 resolved.
 **1 of 4 unified acceptance criteria pass.** Cluster-pair r ≥ 0.85

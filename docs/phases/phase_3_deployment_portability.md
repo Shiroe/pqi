@@ -3,7 +3,7 @@
 **Status:** blocked on Phase 0 positive verdict
 **Estimated effort:** 3–5 days of focused work
 **Owner:** TBD
-**Last updated:** 2026-04-18
+**Last updated:** 2026-05-25 (session 47 — packaging references updated for uv + `src/` layout; phase still blocked on Phase 0)
 
 ---
 
@@ -61,17 +61,19 @@ scale-out" framing.
 
 **Implementation:**
 
-- Base: `python:3.11-slim` (matches `CLAUDE.md` tech stack)
+- Base: `python:3.11-slim` (matches `CLAUDE.md` tech stack), or the
+  official `ghcr.io/astral-sh/uv` image for a uv-native build
 - Use multi-stage build to keep the final image lean:
-  - Stage 1 (`builder`): install build deps (`build-essential` for
-    C-extensions like `rapidfuzz`), install Python deps
-  - Stage 2 (`runtime`): copy site-packages from builder, copy
-    source, slim base
-- Copy `pqi/` and `scripts/`; don't copy `.env`, `~/.pqi/`, or
-  `__pycache__`
-- Default command: `python -m pqi.main --help` (require explicit
-  entrypoint override for production use — prevents accidentally
-  running an arbitrary command on an unconfigured container)
+  - Stage 1 (`builder`): copy `pyproject.toml` + `uv.lock`, run
+    `uv sync --frozen --no-dev` (add `build-essential` for C-extensions
+    like `rapidfuzz` if no wheel is available)
+  - Stage 2 (`runtime`): copy the resulting `.venv/` + `src/` from the
+    builder, slim base
+- Copy `src/`, `scripts/`, `pyproject.toml`, `uv.lock`; don't copy
+  `.env`, `.pqi/`, `.venv/`, or `__pycache__`
+- Default command: `pqi --help` (the installed console script — require
+  an explicit entrypoint override for production so an unconfigured
+  container can't run an arbitrary command)
 
 **Acceptance criteria:**
 
@@ -89,11 +91,13 @@ scale-out" framing.
 
 - Python dependencies with C extensions (`rapidfuzz`, `duckdb`,
   possibly `py-clob-client`) need either wheels or
-  `build-essential` in the builder stage. Verify with `pip install`
-  output during build.
+  `build-essential` in the builder stage. The `uv sync` output during
+  build shows what compiled from source.
 - `py-clob-client` may have heavy transitive deps (web3, eth-utils).
-  If Phase 2 listener isn't in the deploy, consider a
-  `requirements-minimal.txt` for advisor-only builds.
+  If the Phase 2 listener isn't in the deploy, move it to an optional
+  dependency-group in `pyproject.toml`
+  (`[project.optional-dependencies]`) and `uv sync` only the advisor
+  group for advisor-only builds.
 
 ---
 
@@ -105,8 +109,9 @@ scale-out" framing.
 
 - Service: `pqi`
 - Volumes:
-  - `./pqi-state:/root/.pqi` — persistent state (history, cache,
-    stats, agent_weights, clv, mfe, alerts)
+  - `./pqi-state:/app/.pqi` — persistent state (history, cache,
+    stats, agent_weights, clv, mfe, alerts); set `PQI_DATA_DIR=/app/.pqi`
+    so the app writes here regardless of where the source sits in the image
   - `./pqi-logs:/var/log/pqi` — log files (mountable to host for
     easy tailing and logrotate)
 - `env_file: .env`
@@ -289,8 +294,8 @@ All of:
 
 ### Files referenced
 
-- `pqi/main.py` — CLI entry point
-- `requirements.txt` — dependency list
+- `src/pqi/main.py` — CLI entry point (`pqi` console script)
+- `pyproject.toml` + `uv.lock` — dependency manifest (replaced `requirements.txt`)
 - `.env.example` — secret scaffolding
 - `docs/known-issues.md` — environment gotchas (persisted state
   file locations)
@@ -321,10 +326,11 @@ All of:
   justify the deployment work.
 - Check whether `py-clob-client` is needed in the container
   (depends on whether Phase 2 listener is part of the deploy). If
-  not, produce a slimmer `requirements-advisor.txt`.
+  not, split it into an optional `[project.optional-dependencies]`
+  group and `uv sync` only the advisor deps.
 - VPS choice: user has stated preference for small/local. Hetzner
   CX11 (~€4/mo) or a Linode Nanode ($5/mo) is likely sufficient
   for advisor + listener.
 - Verify that `DuckDB` installed in the container has read access
-  to the `~/.pqi/history.jsonl` via the mounted volume — path
+  to `PQI_DATA_DIR`'s `history.jsonl` via the mounted volume — path
   handling inside the container matters.

@@ -100,7 +100,7 @@ still wraps this. See `docs/session-log.md` §Session 30.
 ## Data Flow (step by step)
 
 ```
-[main.py] User runs: python -m pqi.main analyze
+[main.py] User runs: uv run pqi analyze   # or: uv run python -m pqi.main analyze
 [polymarket.py] Fetch top N active markets from Gamma API
     → returns List[MarketData] (includes clob_token_ids from clobTokenIds)
 [main.py] Display market list → user picks one (or top by volume)
@@ -373,16 +373,25 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 46 — **repo portability**. Persisted state
-(history, cache, weights, reports, …) moved from `~/.pqi/` into
-`<repo>/.pqi/` so it travels with git, and dependency management
-swapped from `requirements.txt` to `pyproject.toml` + `uv.lock`.
-Single env-overridable `config.PQI_DATA_DIR` is the source of truth
-for every persisted path; all 7 `scripts/*.py` got inline env-var
-fallbacks so they still run without sys.path tricks. Laptop is now
-clone-and-go: `git clone … && cd pqi && uv sync`. Zero aggregator
-touch. Phase 1 stage-1 monitor stays parked at the session-45
-state (n=78, 0/4 acceptance — table below unchanged).
+**Last updated:** session 47 — **`src/` layout + docs overhaul**. The
+`pqi` package moved to `src/pqi/` and is now installed **editable** via
+`uv sync` (dropped `tool.uv.package = false`; added a hatchling
+build-system + a `pqi` console script in `pyproject.toml`). `uv run pqi
+…` and `uv run python -m pqi.main …` now run **from the repo root** — no
+PYTHONPATH, no running-from-parent. `config.py`'s two `__file__`-relative
+paths (the `.env` loader + the `PQI_DATA_DIR` default) re-anchor to a
+single `_REPO_ROOT = Path(__file__).resolve().parents[2]`, so the
+repo-root `.env` and `.pqi/` still resolve after the move. README
+rewritten as a tight front door; the detailed CLI/flag/config reference
+was extracted to [`docs/cli-reference.md`](docs/cli-reference.md); the 3
+loose root docs moved into `docs/`. Zero aggregator/pipeline touch.
+
+Session 46 (prior) moved persisted state (history, cache, weights,
+reports, …) from `~/.pqi/` into `<repo>/.pqi/` and swapped
+`requirements.txt` → `pyproject.toml` + `uv.lock`. Env-overridable
+`config.PQI_DATA_DIR` is the source of truth for every persisted path.
+Phase 1 stage-1 monitor stays parked at the session-45 state (n=78, 0/4
+acceptance — table below unchanged).
 
 | Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
 |---|---|---|---|---|
@@ -399,7 +408,7 @@ improvement; Bear Brier moved *away* from the 0.22 floor. STAGE 1
 stays LIVE (`PERSONA_V2_PREAMBLE=true`) for one more sample to cross
 the formal n ≥ 100 trigger before flipping. Preamble text untouched.
 
-Reports: `~/.pqi/reports/reliability_20260421_v1.md`,
+Reports: `<repo>/.pqi/reports/reliability_20260421_v1.md`,
 `reliability_20260421_v2-preamble.md`.
 
 **QoL this session — no pipeline/aggregator touch:**
@@ -501,10 +510,16 @@ re-check of the Phase 1 stage-1 monitor at n=78. Session 46 was
 infrastructure-only: persisted state moved from `~/.pqi/` to
 `<repo>/.pqi/` (all paths derive from a new env-overridable
 `config.PQI_DATA_DIR`), and the dependency manifest swapped from
-`requirements.txt` to `pyproject.toml` + `uv.lock`. Still zero
-aggregator changes through session 46; scoring still reads
-`probability` + the two `confidence_*` fields exactly as before. See
-`docs/session-log.md` for per-session detail.
+`requirements.txt` to `pyproject.toml` + `uv.lock`. Session 47 completed
+the packaging — the `pqi` package moved to `src/pqi/` and is installed
+editable by `uv sync` (hatchling build-system + `pqi` console script;
+`package = false` dropped), `config.py`'s `.env`/`PQI_DATA_DIR` paths
+re-anchored to `_REPO_ROOT = parents[2]`, plus a README front-door
+rewrite + new `docs/cli-reference.md` + root tidy (no Python logic
+outside `config.py`/`scripts` touched). Still zero aggregator changes
+through session 47; scoring still reads `probability` + the two
+`confidence_*` fields exactly as before. See `docs/session-log.md` for
+per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit

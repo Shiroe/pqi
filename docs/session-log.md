@@ -4,6 +4,88 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 47 — `src/` layout: editable package + docs overhaul
+
+Packaging fix completing session 46's portability work, plus a
+documentation pass. **Zero pipeline / aggregator touch** — the only
+Python edited was `config.py` (two path lines) and one script's
+`sys.path` fallback.
+
+### Problem
+
+The repo *directory* was itself the `pqi` package (modules at the repo
+root next to `__init__.py`), and `pyproject.toml` carried
+`tool.uv.package = false`. So `uv sync` installed only dependencies,
+never `pqi` itself, and `uv run python -m pqi.main` from the repo root
+failed with `ModuleNotFoundError: No module named 'pqi'`. It worked
+before only by running from the *parent* directory — the opposite of
+self-contained.
+
+### Restructure
+
+- All 25 package files `git mv`'d into `src/pqi/` (the package; import
+  name unchanged). `docs/`, `scripts/`, and the git-tracked `.pqi/`
+  data dir stay at the repo root, outside the package.
+- `pyproject.toml`: dropped `tool.uv.package = false`; added a
+  `[build-system]` (hatchling) + `[tool.hatch.build.targets.wheel]
+  packages = ["src/pqi"]` + `[project.scripts] pqi = "pqi.main:app"`.
+  `uv sync` now builds + installs `pqi` editable into `.venv/`.
+- `config.py`: the `.env` loader (was `os.path.dirname(__file__)`) and
+  the `PQI_DATA_DIR` default (was `Path(__file__).resolve().parent`)
+  both re-anchor to one constant `_REPO_ROOT =
+  Path(__file__).resolve().parents[2]` (`<repo>/src/pqi/config.py` →
+  `<repo>`), so the repo-root `.env` and `.pqi/` still resolve.
+- `scripts/a1_backtest.py`: stale `sys.path` insert (pointed at the
+  repo's parent dir) now points at `<repo>/src` as a no-op fallback
+  behind the editable install; other scripts rely on the install.
+
+### Verification
+
+`uv sync` builds + installs `pqi==0.1.0` editable. From the repo root:
+`uv run pqi --help` ✓, `uv run python -m pqi.main --help` ✓,
+`PQI_DATA_DIR → <repo>/.pqi` (exists) ✓, `.env` loaded ✓, `pqi history
+list` reads all 599 entries ✓, `scripts/reliability_diagram.py --help`
+✓. `import pqi` resolves from `/tmp` (cwd-independent) ✓. All 20
+submodules import cleanly. Three `.pqi/` snapshot files the tool
+rewrote during testing were restored so the code diff stays structural.
+
+### Docs overhaul
+
+- **README** rewritten as a tight, top-OSS-style front door: value
+  prop, quickstart (`uv sync` → `.env` → `uv run pqi analyze`),
+  commands, output examples, council table, a tuning digest, the `src/`
+  layout, and a documentation index. All run instructions now
+  `uv run pqi …`.
+- **New `docs/cli-reference.md`** holds the detail pulled out of the
+  README: every `analyze`/`history` flag, batch mode, insight recipes,
+  outcome/rec/conf value tables, equity math, backend internals (prompt
+  caching + retry), and the full tuning table.
+- Propagated the structural change + `~/.pqi/` → `.pqi/` fixes through
+  CLAUDE.md (Current State, data-flow command, aggregator-stability
+  note), `docs/architecture.md`,
+  `docs/phases/phase_3_deployment_portability.md` (Dockerfile strategy
+  → uv + `src/`; `requirements.txt` → `pyproject.toml`/`uv.lock`;
+  `PQI_DATA_DIR` volume), and `NEXT_SESSION_PROMPT.md` (corrected run
+  instructions + `reliability_diagram` invocation).
+- **Root tidy:** `CTO_Agent.md`, `phase_1_acceptance_criteria_patch.md`,
+  and `pqi_external_review_2026_04_v2.md` `git mv`'d into `docs/`. Only
+  CLAUDE.md, NEXT_SESSION_PROMPT.md, README.md remain at the root.
+
+### Not done / deferred
+
+- The 3 moved docs are cited by **basename** (`CTO_Agent.md §N`, etc.)
+  across ~40 prose references in historical session logs, retros, and
+  phase docs. These are inline-code citations, not clickable links, so
+  nothing breaks; only the actionable kickoff-checklist instruction was
+  re-pathed to `docs/CTO_Agent.md`. A full citation sweep was left out
+  as disproportionate churn (offer it if wanted).
+- The broader `~/.pqi/` → `.pqi/` staleness remains in older docs where
+  it's historical context.
+- The DuckDB `verdicts`-view MAP/STRUCT bug (carry-over from session 44)
+  is untouched.
+
+---
+
 ## Session 46 — repo portability: `.pqi/` in-tree + uv migration
 
 Two-pronged infrastructure change so the project clones-and-goes

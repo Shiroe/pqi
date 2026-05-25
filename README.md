@@ -1,848 +1,247 @@
 # PQI — Polymarket Qualitative Intelligence
 
-Identifies mispriced odds in Polymarket event-driven prediction markets using a
-7-agent LLM council ("The Council of Seven"). **Advisor only — no auto-trading.**
+> Finds mispriced odds in Polymarket event-driven prediction markets with a
+> 7-agent LLM council — **"The Council of Seven."**
 
-## How it works
+**Advisor only.** PQI ranks opportunities and explains its reasoning; a human
+decides whether to trade. No auto-execution.
 
 ```
-Polymarket Gamma API (/events endpoint)
-  → Event grouping (sibling markets under one event, e.g. Moneyline + Map 1 + Map 2)
-    → Parallel enrichment (GET /events/{id} for reliable live/ended/start time)
-      → User selects event → picks specific market
-        → PandaScore resolver (esports only, non-fatal — fuzzy-matches teams to
-          a structured match record: status, scheduled time, form, H2H)
-          → Synthesizer (5 Tavily searches → BriefingDocument with cross-source
-            contamination tagger anchored on PandaScore status)
-            → CLOB price history (1w hourly → trend, volatility, sharp moves)
-              → Council of Seven (7 parallel LLM calls, two-sided confidence,
-                briefing leads with EVENT TEMPORAL DISAMBIGUATION + STRUCTURED
-                MATCH DATA blocks)
-                → Probability-first recommendation: BUY YES / BUY NO / PASS
+Polymarket Gamma API ─▶ Synthesizer (Tavily briefing) ─▶ CLOB price history
+        ─▶ Council of Seven (7 parallel LLM calls) ─▶ confidence-weighted score
+        ─▶ recommendation:  BUY YES · BUY NO · PASS
 ```
 
-The council computes two independent scores: a YES-side and NO-side weighted average,
-each using per-agent directional confidence. A recommendation is issued when the
-council's probability on its favored side clears the threshold and confidence is HIGH.
-Max ROI of the recommended side determines the signal type (HIGH VALUE / MODERATE VALUE /
-LOW MARGIN), but is not a gate for recommendations.
+The council computes two independent scores — a YES-side and a NO-side
+confidence-weighted average — using each agent's *per-side* confidence. It
+recommends a side only when its probability clears the threshold and confidence
+is HIGH; the price's max ROI sets the signal label (HIGH VALUE / MODERATE /
+LOW MARGIN) but never gates the call.
 
 ---
 
-## Setup
+## Quick start
 
-**1. Clone and create a virtual environment**
-
-```bash
-cd /path/to/parent          # one level ABOVE the pqi/ directory
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-```
-
-**2. Install dependencies**
+Requires **Python ≥ 3.11** and [**uv**](https://docs.astral.sh/uv/). Everything
+lives inside the repo — deps in `.venv/`, state in `.pqi/`, keys in `.env`.
 
 ```bash
-pip install -r pqi/requirements.txt
-# or with uv:
-uv pip install -r pqi/requirements.txt
+git clone <repo-url> pqi && cd pqi
+uv sync                       # installs dependencies + pqi (editable) into .venv/
+cp .env.example .env          # then add your keys (see below)
+uv run pqi analyze            # interactive: top events by volume, pick one
 ```
 
-**3. Configure environment**
-
-```bash
-cp pqi/.env.example pqi/.env
-# Edit pqi/.env — minimum required keys shown below
-```
+Minimum keys in `.env`:
 
 ```dotenv
-# Required always
-TAVILY_API_KEY=tvly-...
+TAVILY_API_KEY=tvly-...           # required — news/search for the briefing
 
-# Optional — esports structured-data layer (free tier 1k req/hr)
-# Without it, esports analyses fall back to Tavily-only narratives.
-# Get a key at https://pandascore.co — pipeline degrades gracefully if absent.
-# PANDASCORE_API_KEY=
+LLM_BACKEND=anthropic             # 'anthropic' (prod) or 'ollama' (local dev)
+ANTHROPIC_API_KEY=sk-ant-...      # required when LLM_BACKEND=anthropic
 
-# Dev (local Ollama)
-LLM_BACKEND=ollama
-OLLAMA_MODEL=llama3.1:8b
-LOCAL_LLM_CONCURRENCY=1    # keep low on consumer GPUs (RTX 2070 etc.) to prevent OOM
-
-# Prod (Anthropic API) — runs all 7 agents fully in parallel
-# LLM_BACKEND=anthropic
-# ANTHROPIC_API_KEY=sk-ant-...
-# ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+# PANDASCORE_API_KEY=...          # optional — structured esports data (free tier)
 ```
 
-**4. (Dev only) Start Ollama and pull the model**
-
-```bash
-ollama serve                # if not already running as a service
-ollama pull llama3.1:8b
-```
+> **Tip:** activate the venv (`source .venv/bin/activate`) and you can drop the
+> `uv run` prefix — just `pqi analyze`, `pqi history stats`, etc.
+>
+> **Local/free dev:** set `LLM_BACKEND=ollama`, then `ollama serve` and
+> `ollama pull llama3.1:8b`. Keep `LOCAL_LLM_CONCURRENCY=1` on consumer GPUs.
 
 ---
 
-## Usage
+## Commands
 
-Run from the **parent directory** of `pqi/`:
+| Command            | What it does                                                       |
+| ------------------ | ------------------------------------------------------------------ |
+| `pqi analyze`      | Fetch events, run the council, print ranked recommendations (default) |
+| `pqi categories`   | List tags + series slugs you can pass to `--category`              |
+| `pqi history`      | Inspect past runs: `list` · `show` · `sync` · `stats` · `equity`   |
+| `pqi query "<SQL>"`| Ad-hoc DuckDB SQL over the persisted run history                   |
 
-```bash
-python3 -m pqi.main [COMMAND] [OPTIONS]
-```
-
-### Commands
-
-| Command             | Description                                                  |
-| ------------------- | ------------------------------------------------------------ |
-| `analyze` (default) | Fetch events, run the council, print recommendations         |
-| `categories`        | List available tags and series slugs for `--category`        |
-| `history`           | History sub-app: `list`, `show`, `sync`, `stats` (see below) |
-
-### Flags (analyze command)
-
-| Flag               | Short | Type    | Default    | Description                                                                                     |
-| ------------------ | ----- | ------- | ---------- | ----------------------------------------------------------------------------------------------- |
-| `--top-n`          | `-n`  | `INT`   | `10`       | Number of events to show in the selection list                                                  |
-| `--category`       | `-c`  | `TEXT`  | _(all)_    | Filter by broad tag (e.g. `esports`) or specific series slug (e.g. `counter-strike`)            |
-| `--top`            | `-t`  | flag    | off        | Skip the selection prompt — auto-pick the highest-volume event                                  |
-| `--starts-within`  | `-s`  | `INT`   | _(all)_    | Only show events starting within this many hours. Includes live events. Best for sports/esports |
-| `--resolve-within` | `-r`  | `INT`   | _(all)_    | Only show events with markets resolving within this many hours                                  |
-| `--live`           | `-l`  | flag    | off        | Only show live events (already started, not yet resolved). Composable with `--starts-within`    |
-| `--min-volume`     | `-v`  | `FLOAT` | _(config)_ | Override minimum volume floor in USD (use `-v 0` to see all)                                    |
-| `--no-cache`       |       | flag    | off        | Force a fresh council run, ignoring any cached result                                           |
-| `--concurrency`    | `-j`  | `INT`   | _(config)_ | Max parallel runs in batch mode. Default from `ANALYZE_BATCH_CONCURRENCY` (1). Ceiling 3 on Anthropic Tier 2 |
-| `--summary-only`   |       | flag    | off        | Batch mode only — skip per-event result panels, keep the final summary table                    |
-
-All flags can be freely combined. For example, `--live -c esports -v 0` shows all
-live esports events regardless of volume.
-
-### Batch mode (multi-select at the prompt)
-
-The event-selection prompt accepts a single index **or** a multi-select spec:
-
-| Input         | Selects                                              |
-| ------------- | ---------------------------------------------------- |
-| `3`           | Event #3 only (single-run UX — sub-market picker + sibling prompt preserved) |
-| `1,3,5`       | Events #1, #3, #5                                    |
-| `3-7`         | Events #3 through #7 inclusive (reversed ranges normalized) |
-| `1-3,7,9-11`  | Mixed list + range                                   |
-| `all`         | Every event in the current list                      |
-| `new`         | Only events with **no** prior analysis on any of their markets (empty "Seen" column). Matches the Seen-column semantic exactly: an event counts as seen as soon as one of its markets has been analyzed. Re-prompts if the current list has no unseen events |
-
-When the spec resolves to ≥ 2 events, PQI runs them in a batch:
-
-- Each selected event uses its **headline market** (highest-volume market of the `EventGroup`); no per-event sub-prompt
-- Runs execute with bounded parallelism (`-j`, default 1). A Rich Live status table updates at 4 Hz with per-row phase + percent + elapsed time
-- Persistence (history append + price points) runs **sequentially after** the batch completes — JSONL appends larger than `PIPE_BUF` aren't safe to interleave
-- Failures are isolated per-row (`failed` phase, red styling, error message in the summary) — other rows continue
-- `--summary-only` skips the per-event detail panels and prints only the final summary table
-
-Examples:
+Prefix any of these with `uv run` if the venv isn't activated.
 
 ```bash
-# Queue 5 matches back-to-back, sequential, with full per-event output
-python3 -m pqi.main -c esports --live
-# ... at prompt: 1,2,5,7,9
-
-# Same list but parallel ×3 (Anthropic Tier 2 ceiling)
-python3 -m pqi.main -c esports --live -j 3
-# ... at prompt: 1-5
-
-# Run every listed event, summary table only (good for stage-1 V2 observation)
-python3 -m pqi.main -c esports -s 24 -j 3 --summary-only
-# ... at prompt: all
-
-# Only un-analyzed events (skips anything with a ● in the Seen column) —
-# ideal for incremental stage-1 V2 queuing: new matches only, no re-runs
-python3 -m pqi.main -c esports -s 24 -j 3 --summary-only
-# ... at prompt: new
+uv run pqi                          # top 10 events by volume, interactive
+uv run pqi -c esports -s 4          # esports starting or live within 4h
+uv run pqi -c esports --live        # live esports only
+uv run pqi -c counter-strike -r 2 -v 0   # CS markets resolving within 2h, any volume
+uv run pqi --top                    # non-interactive: highest-volume event
+uv run pqi --top --no-cache         # force a fresh council run
+uv run pqi history list -n 10       # last 10 runs with outcomes
+uv run pqi history stats            # per-agent leaderboard + win-rate snapshot
+uv run pqi history equity --mode kelly   # bankroll equity curve + drawdown
 ```
 
-### History sub-commands
-
-`pqi history` is a sub-app — running it bare prints help.
-
-| Sub-command                    | Description                                                                                                                                                                                                                                                                                                    |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pqi history list [flags]`     | Overview table: market YES/NO, council YES/NO, **lean** (council's directional read), **lean✓** (was the read right?), **vs Mkt** (↕ when council disagreed with market), recommendation, **outcome** (✓/✗/MISS/pass/⏳), winning side, postmortem tagline                                                    |
-| `pqi history show <#\|run_id>` | Detailed view: header, recommendation panel, **per-agent verdict table** (with hit/✗ + Brier when resolved), postmortem panel, briefing recap                                                                                                                                                                  |
-| `pqi history sync [--auto]`    | Fetch resolutions for unresolved entries from the Gamma API. `--auto` mode is used by the background sync subprocess and only touches entries past their `end_date`                                                                                                                                            |
-| `pqi history stats`            | Council overview (totals, outcome counts, **council-level lean accuracy** computed across all resolved entries with the same dead band as the `list` view) + per-agent leaderboard (n, hit %, weighted hit %, **lean %**, Brier, high-conf accuracy %) with an **Average** footer row of micro-averaged totals |
-| `pqi history equity [flags]`   | Bankroll-denominated PnL, max drawdown, per-trade Sharpe over resolved BUYs under a buy-and-hold-to-resolution model. Summary panel + per-trade detail table                                                                                                                                                    |
-
-#### `history list` flags
-
-| Flag             | Short | Type   | Default  | Description                                                                                    |
-| ---------------- | ----- | ------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `--last`         | `-n`  | `INT`  | `20`     | Page size — number of most recent entries to show. Ignored when `--all` is set                 |
-| `--offset`       | `-o`  | `INT`  | `0`      | Skip this many of the most recent entries (paginate backwards through history)                 |
-| `--all`          | `-a`  | flag   | off      | Show every entry in history. Numbering still starts at `#1` (oldest) and goes up to total      |
-| `--no-auto-sync` |       | flag   | off      | Skip the background `history sync` subprocess that auto-resolves entries past their `end_date` |
-| `--outcome`      |       | `TEXT` | _(none)_ | Filter by outcome class (see values below)                                                     |
-| `--rec`          |       | `TEXT` | _(none)_ | Filter by recommendation type (see values below)                                               |
-| `--conf`         |       | `TEXT` | _(none)_ | Filter by overall confidence label (see values below)                                          |
-
-All filter flags are independent and freely combinable — e.g.
-`pqi history list --all --conf high --rec pass` shows every HIGH-confidence run
-where the council still recommended PASS (a useful slice for inspecting
-gate-blocked signals). Filters are applied **after** numbering, so the `#`
-column stays stable and `pqi history show <#>` always refers to the same entry
-across different filtered views.
-
-Some combinations are logically empty by definition (e.g.
-`--rec pass --outcome correct_buy` — a PASS can never be a `correct_buy`).
-These return an empty result rather than being blocked.
-
-##### Insight recipes — useful filter combinations
-
-Each row is a question you might want to answer about the council's behavior,
-the command that surfaces it, and how to read the result.
-
-| Question                                                                                                                                | Command                                                                                                                 | How to interpret                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Where are my gates too tight?** Show every PASS where the council was actually confident enough that something should have triggered. | `pqi history list --all --conf high --rec pass`                                                                         | Each row is a HIGH-confidence PASS — the council was sure but a gate (price floor/ceiling, ROI, contrarian threshold) blocked the bet. Cross-reference the `Lean✓` column: if most are `✓`, the gates are leaving money on the table and `MIN_EXPECTED_ROI` / `MAX_TRADEABLE_PRICE` likely need loosening. If most are `✗`, the gates are correctly catching overconfident reads. |
-| **Were my "missed opportunities" actually missed?**                                                                                     | `pqi history list --all --outcome miss`                                                                                 | Every row here is a PASS where the council favored the eventual winner with prob ≥ 65%. Read the `pass_reason` (visible via `history show <#>`) to spot the dominant blocker. If one reason ("Council prob too low", "ROI too low") repeats across many rows, that's the lever to tune.                                                                                           |
-| **When the council is HIGH and bets, how often is it right?**                                                                           | `pqi history list --all --conf high --rec buy`                                                                          | The hit-rate of `✓` vs `✗` outcomes in this slice is your _actionable accuracy_ — this is the population that real trading would have touched. Compare against the broader `history stats` per-agent leaderboard to see if HIGH-conviction buys actually outperform the agents' raw averages.                                                                                     |
-| **Is the council brave enough?**                                                                                                        | `pqi history list --all --rec pass --outcome miss` followed by `pqi history list --all --rec buy --outcome correct_buy` | Compare row counts. Many missed opportunities + few correct buys = council is too cautious. Few missed + many correct = gates are well-calibrated. Few of either = the council is rarely producing actionable reads (look at `--conf` distribution next).                                                                                                                         |
-| **Where does the council blow up loudly?**                                                                                              | `pqi history list --all --outcome wrong_buy --conf high`                                                                | These are the worst-case rows: confident BUYs that lost. Open each with `history show <#>` and read the postmortem — it lists the loudest agents on the wrong side. Repeated agent names point at a bias in a specific persona that needs prompt tuning.                                                                                                                          |
-| **Does HIGH confidence mean anything?**                                                                                                 | Run `pqi history list --all --conf high` and `pqi history list --all --conf medium`                                     | Tally `Lean✓` rates in each. If HIGH and MEDIUM have the same accuracy, the confidence label is noise — `CONFIDENCE_HIGH_THRESHOLD` may be too low or the agents are over-claiming. HIGH should clearly outperform MEDIUM.                                                                                                                                                        |
-| **Are LOW-confidence PASSes correctly cautious?**                                                                                       | `pqi history list --all --conf low --rec pass`                                                                          | This _should_ be the council's "I don't know" pile. The `Lean✓` column should be near 50% (coin-flip). If it's much higher, the council is being too humble — its own uncertainty estimate underrates a real signal. If much lower, LOW is correctly catching cases where the council is wrong.                                                                                   |
-| **Did the council's lean disagree with the market and win?**                                                                            | `pqi history list --all --rec buy_no` (and `--rec buy_yes`) and look at the `vs Mkt` column for `↕` markers            | These are contrarian wins — cases worth studying. Use `history show <#>` to inspect _which_ agents drove the contrarian read. Repeated contributors are your highest-signal voices.                                                                                                                                                                                               |
-| **What does the recent picture look like vs all-time?**                                                                                 | `pqi history list -n 20` then `pqi history stats`                                                                       | The first shows the last 20 entries with their outcomes — eyeball recent performance. The stats panel's _council lean accuracy_ line uses the same formula but across all resolved entries, so a divergence between recent `Lean✓` density and the global rate is a drift signal (the council is getting better/worse, or category mix has shifted).                              |
-| **Per-outcome breakdown for one period**                                                                                                | `pqi history list -n 50 --outcome correct_pass`                                                                         | Useful when you've added 50+ runs since last review and want to confirm the correct-pass pile is genuinely uncertain markets, not actionable signals the council bottled. Pair with `--conf high` to flag suspicious "correct passes" that were actually high-conviction reads.                                                                                                   |
-
-**General reading tips:**
-
-- The `Lean✓` column is **independent of recommendation gates** — it tells you whether the raw council read was right, regardless of whether it converted to a BUY. This is the most direct measure of council intelligence.
-- The `outcome` column is **gate-aware** — it tells you whether the _system as a whole_ (council + gates) made the right call.
-- A row where `Lean✓` is `✓` but the outcome is `MISS` is a system failure: the council saw it correctly, the gates blocked it. Several of these in a row → relax gates.
-- A row where `Lean✓` is `✗` but the outcome is `pass` is a system success: the council was wrong, the gates correctly stopped you from acting on it.
-- Always pair filter views with `history show <#>` on a few sample rows — the postmortem panel lists which agents called the winner and which called against, which is where prompt-tuning leverage lives.
-
-##### `--outcome` values
-
-| Value (and aliases)                     | Matches                                                                                              |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `correct_buy` (`buy`, `win`)            | BUY whose side gained in price from entry to settlement (PnL > 0, including partial settlements like 0.50/0.50 draws) |
-| `wrong_buy` (`wrong`, `loss`)           | BUY whose side lost in price from entry to settlement (PnL < 0)                                      |
-| `missed_opportunity` (`miss`, `missed`) | PASS where a clean winner was declared and the council favored it with prob ≥ 65% (gates blocked an actionable signal) |
-| `correct_pass` (`pass`)                 | PASS where the council was correctly unsure or wrong, plus exact-push BUYs (rare)                    |
-| `voided` (`void`)                       | Market cancelled / refunded with no redemption price available (true void, not a draw)               |
-| `unresolved` (`pending`)                | Resolution not yet fetched from the Gamma API                                                        |
-
-##### `--rec` values
-
-| Value (and aliases) | Matches                                          |
-| ------------------- | ------------------------------------------------ |
-| `pass`              | `PASS` recommendations                           |
-| `buy`               | Both `BUY YES` and `BUY NO` (any actionable BUY) |
-| `buy_yes` (`yes`)   | `BUY YES` only                                   |
-| `buy_no` (`no`)     | `BUY NO` only                                    |
-
-##### `--conf` values
-
-Filters by `CouncilResult.confidence_level`, which is the higher of the two
-per-side mean confidences.
-
-| Value (and aliases)   | Matches                                                                                   |
-| --------------------- | ----------------------------------------------------------------------------------------- |
-| `high` (`h`)          | `HIGH` — mean confidence ≥ `CONFIDENCE_HIGH_THRESHOLD` (default 0.67) on the favored side |
-| `medium` (`med`, `m`) | `MEDIUM` — middle band                                                                    |
-| `low` (`l`)           | `LOW` — below the medium floor                                                            |
-
-`list` and `stats` automatically spawn a background sync subprocess for any
-unresolved entries past their `end_date` (suppress with `--no-auto-sync`).
-
-History is **upserted keyed on `market.id`** — re-running `analyze` on the
-same market (e.g. with `--no-cache`) fully overwrites the previous entry
-rather than appending a duplicate. The `run_id` is preserved across re-runs
-so stable references survive, but `resolution` and `analysis` are cleared
-(they're derived from the now-stale result and will be re-synced on the next
-`history sync`). Sibling markets under the same parent event remain
-distinct entries because the key is market id, not event id.
-
-#### `history equity` flags
-
-`pqi history equity` walks resolved BUYs chronologically under a
-buy-and-hold-to-resolution model and reports a bankroll-denominated
-equity curve. PASSes, unresolved entries, and true voids are excluded.
-
-| Flag             | Short | Type    | Default   | Description                                                                                     |
-| ---------------- | ----- | ------- | --------- | ----------------------------------------------------------------------------------------------- |
-| `--bankroll`     | `-b`  | `FLOAT` | `100.0`   | Starting bankroll in dollars                                                                    |
-| `--stake`        | `-s`  | `FLOAT` | `5.0`     | Per-trade stake. Dollars in `--mode dollars`, shares in `--mode shares`. Unused in `--mode kelly` (see `--kelly-fallback-pct`) |
-| `--mode`         | `-m`  | `TEXT`  | `dollars` | `dollars` = fixed-$ stake per trade, shares derived from entry price. `shares` = literal fixed share count. `kelly` = walk-forward half-Kelly using the `kelly_stake_scaled` fraction frozen on each `CouncilResult` at analysis time (falls back to `--kelly-fallback-pct` of the bankroll when the EV gate was dormant and no Kelly fraction was recorded) |
-| `--kelly-fallback-pct` | `-k` | `FLOAT` | `0.05` | Fraction of the **starting** bankroll used as the flat fallback for pre-EV-gate BUYs in `--mode kelly` (e.g. `0.05` = 5% → $5 at a $100 bankroll, $50 at $1000). Scales the fallback with capital instead of pinning it at a flat dollar amount. Ignored in other modes |
-| `--last`         | `-n`  | `INT`   | `15`      | Show the last N trades in the detail table. `0` shows all                                       |
-| `--no-auto-sync` |       | flag    | off       | Skip background `history sync`                                                                  |
-
-**PnL math (per-share Polymarket mechanics):**
-
-```
-BUY YES  shares=N entry=p  →  cost = N * p,       proceeds = N * final_yes_price
-BUY NO   shares=N entry=p  →  cost = N * (1-p),   proceeds = N * (1 - final_yes_price)
-pnl = proceeds - cost
-```
-
-Worked example: a 5-share BUY YES at 50c that wins clean settles at
-$1.00. Cost = 5 × $0.50 = $2.50; proceeds = 5 × $1.00 = $5.00; PnL =
-**+$2.50**. A 5-share BUY YES at 60c that loses clean: cost = $3.00,
-proceeds = $0, PnL = **−$3.00**. Intermediate settlements (e.g. 0.50
-draws) are real PnL at the settlement price, not voids.
-
-**Reported metrics:**
-
-- **Final bankroll / Net PnL** — end-of-series balance vs starting bankroll
-- **Peak / Trough** — running balance extremes, with trade # and date
-- **Max drawdown** — the worst peak-to-trough decline anywhere on the curve, expressed as both % of peak and $
-- **Wins / Losses / Win rate** — count of trades with PnL > 0 / < 0
-- **Best / Worst trade** — single largest gain and loss, with event titles
-- **Mean / Stdev PnL per trade** — dollar summary
-- **Per-trade Sharpe** — `mean(pnl_i / cost_i) / stdev(pnl_i / cost_i)`. Unitless, no annualization (per-trade holding periods vary hours → weeks; annualizing without that data would add noise, not signal). Excess-return baseline = 0. At small n this is descriptive, not a decision threshold — the drawdown number is the sturdier one
-- **Sizing mix** (Kelly mode only) — count of Kelly-sized rows vs `$`-fallback rows (EV gate was dormant at analysis time, or Kelly fraction was ≤ 0)
-- **Operational cost** — pipeline cost ledger across **every** entry in scope (BUY + PASS, resolved + unresolved), broken into Tavily (`TAVILY_SEARCHES_PER_MARKET × TAVILY_COST_PER_SEARCH`) + LLM (`SEARCH_ARCHITECT_COST + SYNTHESIZER_COST + COUNCIL_COST_PER_RUN`). Shows total + per-analysis + **Net of cost** (equity PnL − infra cost). Upper bound — cached re-runs aren't subtracted
-
-**Kelly mode mechanics (walk-forward):**
-
-Each `CouncilResult` written to history already carries a
-`kelly_stake_scaled` field snapshot: the advisory half-Kelly fraction
-computed at analysis time from the band-smoothed WR that existed then.
-`--mode kelly` reads that snapshot verbatim — there is no look-ahead
-bias because the fraction was frozen against the bankroll state of
-that moment. Stake per trade = `current_balance × kelly_stake_scaled`,
-capped at `current_balance`. When the EV gate was dormant
-(`resolved_buys < MIN_WIN_RATE_SAMPLES`) the stored Kelly fraction is
-`0.0`, so the walker falls back to a flat
-`bankroll × --kelly-fallback-pct` stake (default 5% of the starting
-bankroll). This makes the fallback scale with capital: at `-b 100`
-the fallback is $5, at `-b 1000` it's $50. The infrastructure cost
-row is **not** bankroll-scaled (it's a real-dollar pipeline spend),
-so `Net of cost` moves from negative at low bankrolls to positive
-above the PnL/infra break-even (~$121 on current history).
-
-Examples:
-
-```bash
-# Default: $100 bankroll, $5 fixed dollar stake per trade, last 15 trades
-python3 -m pqi.main history equity
-
-# Larger bankroll, 10% stake, all trades
-python3 -m pqi.main history equity -b 1000 -s 100 -n 0
-
-# Fixed 5 shares per trade (matches "5 shares at 50c" pedagogy)
-python3 -m pqi.main history equity --mode shares --stake 5
-
-# Walk-forward half-Kelly sizing, default 5% fallback (= $5 at $100 bankroll)
-python3 -m pqi.main history equity --mode kelly
-
-# Bigger bankroll — fallback auto-scales to $50 (5% of $1000); infra cost stays
-# absolute, so Net of cost flips positive above the break-even bankroll
-python3 -m pqi.main history equity --mode kelly -b 1000
-
-# Tighter fallback at 2% for a more conservative pre-EV-gate stance
-python3 -m pqi.main history equity --mode kelly -b 500 -k 0.02
-```
-
-#### Outcome classification
-
-| Outcome              | Meaning                                                                                                    |
-| -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `correct_buy`        | BUY whose side gained in price from entry to settlement (PnL-based — covers both clean 99/1 wins and intermediate settlements like 0.50/0.50 draws where entry was favorable) |
-| `wrong_buy`          | BUY whose side lost from entry to settlement (e.g. BUY YES @ 0.60 that settled 0.50/0.50 = –10¢/share)     |
-| `missed_opportunity` | PASS, clean winner declared, council favored it with prob ≥ 65% — gates blocked an actionable signal       |
-| `correct_pass`       | PASS, council was unsure or wrong (plus the rare exact-push BUY)                                           |
-| `voided`             | Market cancelled / refunded with no redemption price (true void only — 0.50/0.50 draws are NOT voids, they're PnL-bearing settlements) |
-| `unresolved`         | Resolution not yet fetched                                                                                 |
-
-#### Per-agent accuracy
-
-The leaderboard tracks each council member individually across all resolved,
-non-legacy runs:
-
-- **Hit %** — fraction of times the agent's probability (>0.5 = YES, <0.5 = NO) matched the winner
-- **Weighted Hit %** — same, weighted by the agent's confidence on the side it picked
-- **Brier** — mean squared error between the agent's probability and the actual outcome (lower is better)
-- **HiConf %** — accuracy when the agent committed with confidence ≥ 70%
-- **HiConf ✓ / ✗** — raw counts of correct vs wrong high-conviction calls
-
-This surfaces _which agents identify the right side most confidently_, _who is
-loudest when wrong_, and lets you weight individual voices in your own judgment.
-
-### Examples
-
-```bash
-# Interactive — show top 10 events sorted by volume, pick one
-python3 -m pqi.main
-
-# Esports events starting within 4 hours (upcoming + live matches)
-python3 -m pqi.main -c esports -s 4
-
-# Live esports only — matches in progress right now
-python3 -m pqi.main -c esports --live
-
-# Counter-Strike only, resolving within 2 hours, show all regardless of volume
-python3 -m pqi.main -c counter-strike -r 2 -v 0
-
-# Non-interactive — top event by volume, any category
-python3 -m pqi.main --top
-
-# Upcoming events within 24 hours, auto-select the highest-volume one
-python3 -m pqi.main --starts-within 24 --top
-
-# Force fresh analysis (skip cache)
-python3 -m pqi.main --top --no-cache
-
-# List available categories
-python3 -m pqi.main categories
-
-# History — overview, detail, sync, stats
-python3 -m pqi.main history list -n 10
-python3 -m pqi.main history list --all                       # every entry, numbered 1..N
-python3 -m pqi.main history list --all --outcome miss        # all missed opportunities
-python3 -m pqi.main history list --all --rec pass --conf high  # HIGH-conf PASS calls (gate-blocked signals)
-python3 -m pqi.main history list --all --outcome wrong_buy   # every wrong BUY
-python3 -m pqi.main history show 3
-python3 -m pqi.main history sync
-python3 -m pqi.main history stats
-```
+At the event-selection prompt you can also enter a **multi-select** spec —
+`1,3,5`, `3-7`, `all`, or `new` (only un-analyzed events) — to batch-run several
+events with bounded parallelism. Full flag reference, batch mode, history
+sub-commands, and analysis recipes live in **[docs/cli-reference.md](docs/cli-reference.md)**.
 
 ---
 
-## Event-centric discovery
+## What you get
 
-The CLI shows **events** (not individual markets) as the primary rows. Each event
-groups sibling markets — for example, a BO3 esports match typically has:
-
-- **Moneyline** — who wins the match overall
-- **Map 1 Winner** — who wins map 1
-- **Map 2 Winner** — who wins map 2
-
-When you select a multi-market event, a sub-table appears to pick which specific
-market to analyze. Single-market events skip this step.
-
-After analyzing a market, PQI offers to analyze its siblings too (no extra API call
-needed — siblings are already known from the event group). When you accept,
-**the Tavily briefing built for the parent market is reused** across all
-siblings (same event = same news), so the synthesizer step runs only once per
-event. The Council of Seven still runs separately per sibling because each
-market has its own resolution criteria.
-
-### Parallel enrichment
-
-The Gamma API's list endpoint (`/events`) returns `null` for `live`, `ended`, `score`,
-and `gameStatus` fields. To get reliable data, PQI makes parallel `GET /events/{id}`
-detail calls for each candidate event after the initial list fetch. This adds ~1-2
-seconds but ensures accurate live/ended status and event start times. The number of
-parallel calls is capped by `EVENT_ENRICHMENT_MAX` (default 30).
-
-### Timing: event start vs resolution
-
-PQI strictly distinguishes two times:
-
-- **Event start time** (`Starts` column) — when the real-world event begins (match kickoff,
-  hearing date). This is what `--starts-within` and `--live` filter on. The Gamma API
-  has no server-side filter for this, so PQI fetches a larger batch and filters client-side.
-
-- **Resolution time** (`Resolves` column) — when the market expires and can settle. This
-  is what `--resolve-within` filters on, using the API's `end_date_min`/`end_date_max`
-  server-side params.
-
-The "True Start Time" heuristic derives the event start from child markets'
-`eventStartTime` field (a market-level API field, not event-level).
-
----
-
-## What the output looks like
-
-### Event selection table
+**Event selection** — events (not raw markets) are the rows; siblings (Moneyline,
+Map 1, Map 2…) group under one event:
 
 ```
 Active Polymarket Events
-  #  Event                                       Starts  Mkts  YES    NO   Sig  Seen  Volume (USD)
- ── ──────────────────────────────────────────── ─────── ───── ────── ──── ──── ───── ──────────────
-  1  Team Liquid vs Sentinels LIVE                  2h      3   65%   35%   ⭐    ●       $67,000
-  2  Cloud9 vs NRG                                  5h      3   52%   48%              $43,000
-  3  Will BTC hit $100k by July?                    —       1   38%   62%   ⭐         $890,000
-  4  Will ETH flip BTC?                             —       1  100%    0%   🔻    ●        $5,200
+  #  Event                          Starts  Mkts  YES   NO   Sig  Seen  Volume
+  1  Team Liquid vs Sentinels LIVE    2h      3   65%  35%   ⭐    ●    $67,000
+  2  Cloud9 vs NRG                    5h      3   52%  48%              $43,000
+  3  Will BTC hit $100k by July?      —       1   38%  62%   ⭐         $890,000
 ```
 
-- **Sig** (signal) — quick-scan indicator for actionable pricing:
-  - ⭐ Favored side in **[55%, PerceivedTrueWinRate]** — the market has a clear lean
-    AND the price is at or below our historical hit rate, so there's actual edge.
-    When the EV gate is dormant (not enough samples yet) the ceiling falls back to
-    **91%** so star behavior matches the pre-EV system.
-  - 🔻 Favored side **≥ 99%** — market is effectively resolved (priced at certainty),
-    no edge available, shows up as noise.
-  - _(blank)_ — coin-flip zone (favored < 55%) or above the edge ceiling. Not
-    immediately actionable but may be worth monitoring.
-- **Seen** — `●` if any market in this event has been previously analyzed (has a
-  non-legacy entry in `~/.pqi/history.jsonl`). Blank = fresh event, never analyzed.
+`Sig`: ⭐ favored side priced at/below our historical hit-rate (real edge) ·
+🔻 ≥ 99% (effectively resolved) · blank = coin-flip or above the edge ceiling.
+`Seen`: ● if any market in the event was analyzed before.
 
-### Council verdicts + recommendation
+**Recommendation** — two-sided scores, edge vs. historical win-rate, max ROI,
+and an advisory Kelly stake:
 
 ```
-Council of Seven — Verdicts
-  Agent                          Prob %  Conf Y%  Conf N%   Key Factor
- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  The Rules Lawyer                  71%      78%      62%   ...
-  The Bull (Favorite's Advocate)    84%      85%      72%   ...
-  The Bear (Underdog's Advocate)    38%      60%      78%   ...
-  The Base-Rate Statistician        62%      65%      55%   ...
-  The Sentiment Analyst             70%      60%      45%   ...
-  The Domain Specialist             72%      70%      60%   ...
-  The Contrarian                    30%      40%      50%   ...
-
 ╭──────────────────── Recommendation ────────────────────╮
-│ Council YES:    75.2%  |  Council NO:  24.3%          │
-│ Market Prices:  YES = 66.0%  |  NO = 34.0%            │
-│ 7d Trend YES:   +5.2pp RISING  |  24h: +1.8pp  |  Vol: 0.9pp/hr │
-│ 7d Trend NO:    -4.8pp FALLING |  24h: -1.5pp  |  Vol: 0.8pp/hr │
-│ YES Edge vs WR: +8.4%  |  NO Edge vs WR: -25.6%  (WR 74.4%) │
-│ Max ROI (YES):  +51.5%  (if that side wins)            │
-│ True Win Rate:  74.4%  (n=43, EV ceiling)              │
-│ Kelly stake:    full 12.1% · @0.5x 6.0% of bankroll    │
-│ Confidence:     HIGH                                   │
-│                                                        │
-│ >>> BUY YES @ $0.66/share — HIGH VALUE <<<             │
+│ Council YES:   75.2%  |  Council NO:  24.3%             │
+│ Market Prices: YES = 66.0%  |  NO = 34.0%               │
+│ 7d Trend YES:  +5.2pp RISING  |  24h: +1.8pp            │
+│ YES Edge vs WR:+8.4%  |  NO Edge vs WR: -25.6%  (WR 74.4%) │
+│ Max ROI (YES): +51.5%   |   Kelly: full 12.1% · @0.5x 6.0% │
+│ Confidence:    HIGH                                     │
+│ >>> BUY YES @ $0.66/share — HIGH VALUE <<<              │
 ╰────────────────────────────────────────────────────────╯
 ```
 
-The `Edge vs WR` line is `(PerceivedTrueWinRate − side_price)` per
-side — positive means the price sits below the historical hit rate,
-which is exactly the condition the EV gate enforces. When the EV gate
-is dormant (not enough resolved samples yet), the line collapses to
-`Edge vs WR: n/a (need more resolved history)`.
-
-`pqi history show <#>` prints the same edge in WR-relative form when
-the entry was scored under the new semantic, falls back to a
-`(legacy score−price)` label for entries written before session 23,
-and includes the `perceived_win_rate_at_run` and Kelly stake snapshot
-that applied to that specific run — so you can audit what advice you
-actually received at the time, not what the current rolling stats
-would say.
-
-### Recommendation types
-
-| Recommendation               | Meaning                                                                                                                                 |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **BUY YES — HIGH VALUE**     | Cheap side, max ROI ≥ 50% (price ≤ ~0.667)                                                                                              |
-| **BUY YES — MODERATE VALUE** | Mid-price side, max ROI 25%–50% (price ~0.667–0.80)                                                                                     |
-| **BUY YES — LOW MARGIN**     | Pricey side, max ROI 10%–25% (price ~0.80–0.91) — still above the ROI gate but close to the ceiling                                     |
-| **BUY NO — CONTRARIAN**      | Council disagrees with market — stricter probability, confidence, and ROI gates required                                                |
-| **PASS**                     | No actionable signal. Reason shown (e.g. "Council prob too low", "YES max ROI too low: 13.6% (need ≥15%)", "YES price too high: $0.92", "Big Drawdown Risk: YES price 80.0% ≥ PerceivedTrueWinRate 74.4% (-EV)") |
-
-The same labels apply symmetrically to BUY NO.
-
----
-
-## Category filter (`--category`)
-
-Two-tier resolution:
-
-1. **Specific series** — exact or partial slug match (e.g. `counter-strike`, `valorant`, `atp`). Server-side filter via Gamma API `series_id`.
-2. **Broad tag** — matches event tags across all series (e.g. `esports`, `sports`, `crypto`, `politics`). Server-side filter via Gamma API `tag_id`.
-
-Run `pqi categories` to see available tags and series slugs. If the category doesn't
-match anything, the command fails loudly with a suggestion to check `pqi categories`.
-
-## Starts-within filter (`--starts-within`)
-
-Filters to events whose real-world start time is within the next N hours. Includes
-live events (already started but not resolved). This is the primary filter for
-sports/esports — use `-s 4` to see matches starting or in progress within 4 hours.
-
-Since the API has no server-side `eventStartTime` filter, PQI fetches a larger batch
-(up to 500 events) and filters client-side. The volume floor is automatically relaxed
-for short windows to show low-volume live matches.
-
-## Live filter (`--live`)
-
-Shows only events currently in progress. Uses the `live` field from enriched
-`/events/{id}` detail responses. Falls back to `event_start_time < now` when the
-API field is unavailable.
-
-Composable with `--starts-within`: `--live -s 8` shows live events plus upcoming
-ones within 8 hours.
-
-## Resolve-within filter (`--resolve-within`)
-
-Filters to events with markets resolving within the next N hours. Uses the Gamma API's
-`end_date_min`/`end_date_max` server-side params for resolution time (not event start).
-
-## Volume floor (`--min-volume`)
-
-By default, events below `MIN_VOLUME_USD` ($10K total) are excluded. For short time
-windows (< 4h), live events, or `--starts-within` queries, the floor drops to
-`MIN_VOLUME_SHORT_WINDOW_USD` ($500). Use `-v 0` to see all events regardless of volume.
-
----
-
-## Tuning
-
-All thresholds are set in `.env` (see `.env.example` for full documentation):
-
-| Variable                      | Default | Effect                                                                               |
-| ----------------------------- | ------- | ------------------------------------------------------------------------------------ |
-| `MIN_COUNCIL_PROBABILITY`     | `0.60`  | Minimum council probability to issue a market-aligned BUY                            |
-| `MIN_CONTRARIAN_PROBABILITY`  | `0.60`  | Minimum council probability for a contrarian BUY (against market)                    |
-| `MIN_CONTRARIAN_CONFIDENCE`   | `0.80`  | Minimum per-side confidence for a contrarian BUY                                     |
-| `CONFIDENCE_HIGH_THRESHOLD`   | `0.67`  | Mean confidence required for HIGH label                                              |
-| `EDGE_THRESHOLD`              | `0.07`  | **Deprecated and unused** — kept only so existing `.env` files don't error on import |
-| `MIN_TRADEABLE_PRICE`         | `0.09`  | Minimum per-share price to issue a BUY (prevents "$0.01 NO" signals)                 |
-| `MAX_TRADEABLE_PRICE`         | `0.90`  | Maximum per-share price (near-resolved ceiling; ROI doesn't justify execution risk)  |
-| `MIN_EXPECTED_ROI`            | `0.10`  | Minimum max ROI `(1 - price) / price` for a market-aligned BUY (≈ price ≤ 0.91)      |
-| `MIN_CONTRARIAN_ROI`          | `0.20`  | Stricter ROI floor for contrarian BUYs (≈ price ≤ 0.833)                             |
-| `EV_GATE_ENABLED`             | `true`  | Master switch for the final EV gate (PerceivedTrueWinRate ceiling)                   |
-| `MIN_WIN_RATE_SAMPLES`        | `20`    | Resolved-BUY threshold before the EV gate activates                                  |
-| `KELLY_MULTIPLIER`            | `0.5`   | Advisory Kelly scaler (0.5 = half-Kelly; 1.0 = full)                                 |
-| `MIN_VOLUME_USD`              | `10000` | Volume floor for general queries                                                     |
-| `MIN_VOLUME_SHORT_WINDOW_USD` | `500`   | Volume floor for short time-window / live queries                                    |
-| `RULES_LAWYER_WEIGHT`         | `1`     | Rules Lawyer weight multiplier (static fallback; overridden by dynamic weights)      |
-| `BEAR_WEIGHT`                 | `1.0`   | Bear agent weight (static fallback; overridden by dynamic weights when enabled)      |
-| `AGENT_WEIGHTS_ENABLED`       | `true`  | Load dynamic per-agent reliability weights from `~/.pqi/agent_weights.json`          |
-| `MIN_AGENT_WEIGHT_SAMPLES`    | `30`    | Resolved-BUY threshold per agent before its dynamic weight applies (else 1.0)        |
-| `AGENT_WEIGHT_SHRINK`         | `2.0`   | Shrinkage strength: `weight = 1 + shrink * (lean_rate − council_avg)`                |
-| `MIN_COUNCIL_VERDICTS`        | `5`     | Minimum agents (of 7) that must return valid verdicts; aborts if below               |
-| `AGENT_MAX_RETRIES`           | `5`     | Per-agent retries on LLM/parse failure (exponential backoff, 30s cap)                |
-| `LOCAL_LLM_CONCURRENCY`       | `1`     | Max parallel Ollama calls (no effect on Anthropic)                                   |
-| `ANALYZE_BATCH_CONCURRENCY`   | `1`     | Max parallel runs when `analyze` is given a multi-select spec (list/range/all). Practical ceiling 3 on Anthropic Tier 2. Override per invocation with `-j` |
-| `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Wrap the Anthropic system prompt in a 5-min ephemeral cache block (no behavior change; ~10% input price on cache hits) |
-| `ANTHROPIC_MAX_RETRIES`       | `5`     | Max additional retries per Anthropic call on transient failures (5xx incl. 529, 429, connection / timeout errors) |
-| `ANTHROPIC_RETRY_BASE_DELAY`  | `1.0`   | Base delay (s) for exponential retry backoff (`delay = base * 2**attempt`)           |
-| `ANTHROPIC_RETRY_MAX_DELAY`   | `30.0`  | Cap on per-attempt backoff (s); worst-case cumulative wait at defaults ≈ 61s         |
-| `PANDASCORE_API_KEY`          | _(empty)_ | PandaScore bearer token. Empty disables the resolver — esports analyses fall back to Tavily-only |
-| `PANDASCORE_ENABLED`          | `true`  | Master switch for the PandaScore resolver (false bypasses even if key is set)        |
-| `PANDASCORE_FUZZY_THRESHOLD`  | `75`    | Min `min(token_set_ratio_a, token_set_ratio_b)` to accept a match candidate          |
-| `PANDASCORE_WINDOW_HOURS`     | `48`    | Search window around `event_start_time` for candidate PandaScore matches             |
-| `PANDASCORE_RECENT_FORM_COUNT` | `5`    | Last-N completed matches per team for the form summary                               |
-| `TAVILY_SEARCHES_PER_MARKET`  | `5`     | Tavily queries per analysis (3-5)                                                    |
-| `TAVILY_SNIPPET_CAP`          | `5000`  | Max chars of search snippets sent to LLM                                             |
-| `EVENT_ENRICHMENT_MAX`        | `30`    | Max parallel /events/{id} detail calls for enrichment                                |
-| `CACHE_PRICE_DELTA`           | `0.02`  | Price movement threshold to invalidate cached results                                |
-| `CATEGORY_CACHE_PATH`         | `~/.pqi/category_cache.json` | JSON cache of resolved `--category` lookups. Only positive resolutions are cached; misses retry the live resolver. Delete the file to force a refresh |
-| `PRICE_HISTORY_INTERVAL`      | `1w`    | CLOB price history window (1d, 1w, 1m)                                               |
-| `PRICE_HISTORY_FIDELITY`      | `60`    | Price history resolution in minutes (60 = hourly)                                    |
-| `TAVILY_COST_PER_SEARCH`      | `0.008` | Estimated $ cost per Tavily search request (used by `history equity` operational cost row; not a spend cap) |
-| `SEARCH_ARCHITECT_COST`       | `0.001` | Estimated $ cost per Search Architect LLM call per analysis                          |
-| `SYNTHESIZER_COST`            | `0.005` | Estimated $ cost per Synthesizer LLM call per analysis                               |
-| `COUNCIL_COST_PER_RUN`        | `0.015` | Estimated $ cost per full 7-agent council run                                        |
-
----
-
-## Caching
-
-Council results are cached in SQLite (`~/.pqi/cache.db`). A cached result is reused
-if the market's YES price has moved less than `CACHE_PRICE_DELTA` (default 2%) since
-the last run. Use `--no-cache` to force a fresh council run.
-
-Cache path is configurable via `CACHE_DB_PATH`.
-
-### Category resolution cache
-
-`--category` lookups (e.g. `esports` → tag id `64`) are persisted to
-`~/.pqi/category_cache.json`. Tag/series IDs on Polymarket are effectively
-immutable, so the cache has no TTL — only positive resolutions are written,
-misses fall through to the live three-pass resolver and retry on the next run.
-Delete the file to force a fresh lookup, or override the path with
-`CATEGORY_CACHE_PATH`.
-
----
-
-## Project structure
-
-```
-pqi/
-├── main.py              # CLI (typer + rich) — analyze, categories, history commands
-├── config.py            # env var loading and defaults
-├── models.py            # Pydantic contracts: MarketData, EventGroup, BriefingDocument,
-│                        #   AgentVerdict, CouncilResult
-├── scoring.py           # two-sided confidence-weighted scoring + recommendation logic
-├── stats.py             # PerceivedTrueWinRate + Kelly helpers (~/.pqi/stats.json)
-├── cache.py             # SQLite result cache (keyed by market_id + price delta)
-├── history.py           # JSONL history logger (~/.pqi/history.jsonl) — full-fidelity
-│                        #   records with run_id, resolution, analysis blocks
-├── resolution.py        # Gamma /markets/{id} → winning side / final price
-├── analytics.py         # Outcome classification, per-agent accuracy, postmortem
-├── agents/
-│   ├── personas.py      # all 7 system prompts (AGENT_PERSONAS dict)
-│   └── council.py       # parallel agent runner + JSON parser + event timing
-├── llm/
-│   └── client.py        # Ollama / Anthropic abstraction (single chat() entrypoint)
-├── market/
-│   ├── polymarket.py    # Gamma API client — event-centric fetch, category resolution,
-│   │                    #   parallel enrichment, client-side timing filters
-│   └── clob.py          # CLOB API client — price history fetch + trend metrics
-└── ingestion/
-    ├── synthesizer.py   # LLM Search Architect → 5 Tavily queries → BriefingDocument
-    │                    #   (+ cross-source contamination tagger anchored on PandaScore status)
-    ├── pandascore.py    # PandaScore async HTTP client (esports structured data)
-    └── match_resolver.py # Polymarket → PandaScore fuzzy match resolver (rapidfuzz)
-```
+| Recommendation        | Meaning                                                            |
+| --------------------- | ------------------------------------------------------------------ |
+| **BUY — HIGH VALUE**  | Cheap side, max ROI ≥ 50% (price ≤ ~0.667)                         |
+| **BUY — MODERATE**    | Mid-price, max ROI 25–50%                                           |
+| **BUY — LOW MARGIN**  | Pricey side, max ROI 10–25% (near the ceiling)                     |
+| **BUY — CONTRARIAN**  | Council disagrees with the market — stricter prob/conf/ROI gates   |
+| **PASS**              | No actionable signal; the reason is printed                        |
 
 ---
 
 ## The Council of Seven
 
-| Agent                              | Bias                                                                                             |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------ |
-| **The Rules Lawyer** (2x weight)   | Resolution condition analysis — focuses on whether the specific outcome condition will be met    |
-| **The Bull (Favorite's Advocate)** | Builds the strongest case for the market-favored side (price-aware, dynamic)                     |
-| **The Bear (Underdog's Advocate)** | Builds the strongest case for the underdog side (price-aware, dynamic)                           |
-| **The Base-Rate Statistician**     | Historical base rate, ignores current hype                                                       |
-| **The Sentiment Analyst**          | Crowd psychology vs. current market price                                                        |
-| **The Domain Specialist**          | Field-specific technical nuance (e.g. game meta, matchup history)                                |
-| **The Contrarian**                 | Competitively plausible disruptions (roster changes, form, morale) — not infrastructure failures |
+Seven personas deliberate **in parallel** (never sequentially) over the same
+briefing. Each returns `P(YES)` plus *two* confidence scores — `confidence_yes`
+and `confidence_no` — which can differ when evidence is asymmetric (strong data
+on the favorite, thin data on the underdog).
 
-Each agent outputs a probability (P(YES), 0-100) with **two separate confidence scores**:
-`confidence_yes` (how sure about the YES estimate) and `confidence_no` (how sure about
-the NO estimate). These can differ when data quality is asymmetric — e.g. strong data
-on the favorite but insufficient data on the underdog.
+| Agent                              | Bias                                                              |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| **The Rules Lawyer** (2× weight)   | Resolution criteria only — will the exact oracle condition be met |
+| **The Bull**                       | Strongest case for the market-favored side                        |
+| **The Bear**                       | Strongest case for the underdog side                              |
+| **The Base-Rate Statistician**     | Historical base rate, ignores hype                                |
+| **The Sentiment Analyst**          | Crowd psychology vs. current price                                |
+| **The Domain Specialist**          | Field-specific technical nuance                                   |
+| **The Contrarian**                 | Plausible disruptions that flip the board                         |
 
-Agents deliberate **in parallel**, not sequentially. Each sees the briefing document
-with an EVENT TIMING block indicating urgency (LIVE/IMMINENT, TODAY, THIS WEEK, FUTURE)
-and a two-sided MARKET PRICE HISTORY block showing independent YES and NO token trends
-(direction, weighted average, volatility, sharp moves) fetched from the Polymarket CLOB
-API. YES + NO CLOB prices don't sum to 100% due to spread/vig in the orderbook.
+The Rules Lawyer additionally receives the market's resolution criteria injected
+as the source of truth. Scoring is two-sided and confidence-weighted; see
+**[docs/scoring-reference.md](docs/scoring-reference.md)** for the full gate
+stack, EV gate, and Kelly math.
 
-The Rules Lawyer receives an additional injection of the market's resolution criteria
-at the top of its briefing, marked as the source of truth.
+---
 
-### Scoring formula
+## Configuration
 
-```
-YES-side score = sum(prob_yes * conf_yes * weight) / sum(conf_yes * weight)
-NO-side score  = sum(prob_no  * conf_no  * weight) / sum(conf_no  * weight)
-```
+Every tunable is an environment variable read from the repo-root `.env`.
+**[`.env.example`](.env.example) documents every key, its default, and what it
+does** — copy it to `.env` and edit. The most commonly adjusted:
 
-The recommendation is probability-first:
+| Variable                     | Default | Effect                                              |
+| ---------------------------- | ------- | --------------------------------------------------- |
+| `LLM_BACKEND`                | `ollama`| `anthropic` (prod) or `ollama` (local dev)          |
+| `MIN_COUNCIL_PROBABILITY`    | `0.60`  | Min council probability for a market-aligned BUY    |
+| `MIN_CONTRARIAN_PROBABILITY` | `0.60`  | Min probability for a contrarian BUY                |
+| `CONFIDENCE_HIGH_THRESHOLD`  | `0.67`  | Mean confidence required for the HIGH label         |
+| `MIN_EXPECTED_ROI`           | `0.10`  | Min max-ROI `(1-price)/price` for a market BUY      |
+| `MAX_TRADEABLE_PRICE`        | `0.90`  | Near-resolved ceiling; above it, PASS               |
+| `EV_GATE_ENABLED`            | `true`  | Final EV gate vs. PerceivedTrueWinRate ceiling      |
+| `KELLY_MULTIPLIER`           | `0.5`   | Advisory Kelly scaler (0.5 = half-Kelly)            |
+| `PANDASCORE_API_KEY`         | _(none)_| Enables structured esports data (esports only)      |
 
-1. Identify which side the council favors (>50% probability)
-2. If council agrees with market: BUY if council prob >= 60% and confidence HIGH
-3. If council disagrees with market (contrarian): BUY if council prob >= 70% and confidence >= 80%
-4. **EV gate (final)**: a would-be BUY is rejected with reason "Big Drawdown
-   Risk (-EV)" if `side_price >= PerceivedTrueWinRate` — your rolling
-   `correct_buys / total_resolved_buys` from history. The gate activates
-   once `MIN_WIN_RATE_SAMPLES` resolved BUYs have accumulated.
-5. Otherwise: PASS with explanation
-
-### PerceivedTrueWinRate + Kelly Criterion
-
-After every `history sync` (including the background auto-sync) and at the
-top of `history stats`, PQI recomputes a rolling `PerceivedTrueWinRate`
-from resolved, non-legacy BUY history and persists it to
-`~/.pqi/stats.json`. Two things use it:
-
-- **EV gate** — the final scoring gate described above. Stops you from
-  buying at a price the market already implies beats your historical hit rate.
-- **Kelly stake** — `f* = (b·p − q) / b` with `b = (1 − price) / price`,
-  `p = win_rate`, `q = 1 − p`. Shown in the recommendation panel for the
-  actual trade price (full + half-Kelly via `KELLY_MULTIPLIER`) and on the
-  `history stats` overview at a dynamic reference price (win_rate − 5pp)
-  plus a `$0.75` comparator. Pure advisory — it never blocks a trade.
-
-```
-╭────────────────── Council overview ──────────────────╮
-│ …existing totals + lean accuracy lines…              │
-│ PerceivedTrueWinRate: 74.4%  (32 correct / 11 wrong, │
-│                                n=43)  (EV gate active) │
-│ Kelly stake: @ $0.69 ref → full 16.3% · @0.5x 8.2%   │
-│                                       (@ $0.75: 0.0%) │
-╰──────────────────────────────────────────────────────╯
-```
+Persisted state (history, cache, weights, reports) lives in `.pqi/` at the repo
+root and is git-tracked, so a clone travels with its data. Override the location
+with `PQI_DATA_DIR`. The full tuning table is in
+**[docs/cli-reference.md](docs/cli-reference.md)**.
 
 ---
 
 ## Backends
 
-| Backend            | When to use           | Cost                                      |
-| ------------------ | --------------------- | ----------------------------------------- |
-| `ollama` (default) | Local dev, RTX 2070+  | Free                                      |
-| `anthropic`        | Production / accuracy | ~$0.015/council run with claude-haiku-4-5 (cold cache); lower with prompt caching warm |
+| Backend            | Use for              | Cost                                          |
+| ------------------ | -------------------- | --------------------------------------------- |
+| `ollama` (default) | Local dev, free      | $0 — runs `llama3.1:8b` on a local GPU        |
+| `anthropic`        | Production / accuracy| ~$0.015 / council run (`claude-haiku-4-5`)    |
 
-Switch by setting `LLM_BACKEND=anthropic` in `.env`. Anthropic runs all 7 agents
-fully in parallel (no concurrency throttle needed). Ollama is throttled by
-`LOCAL_LLM_CONCURRENCY` (default 1) to prevent GPU OOM on consumer cards.
-
-### Prompt caching (Anthropic only)
-
-When `ANTHROPIC_PROMPT_CACHE_ENABLED=true` (default), the system prompt of every
-Anthropic call is sent inside a 5-minute ephemeral cache block. Repeat calls
-within the TTL window whose system prompt matches byte-for-byte are billed at
-~10% of normal input price (cache reads). Across-run reuse of the council's
-stable persona prompts and the synthesizer's stable system prompt is the
-biggest win.
-
-Caching is server-side and **does not change model behavior** — same prompt in,
-same probability distribution out. To verify the cache is engaging, run with
-`LOG_LEVEL=DEBUG` and watch for the per-call line:
-
-```
-anthropic usage: input=… output=… cache_read=… cache_create=…
-```
-
-`cache_create > 0` on the first call of a session, `cache_read > 0` on later
-calls within 5 minutes = working as intended. If both stay `0`, the prefix is
-below the model's minimum cacheable size (~1024–2048 tokens depending on
-model) and the `cache_control` field is silently ignored. Disable with
-`ANTHROPIC_PROMPT_CACHE_ENABLED=false` for debugging.
-
-### Reliability / retry (Anthropic only)
-
-Every Anthropic call is wrapped in a centralized exponential-backoff retry
-loop inside `pqi/llm/client.py`. The Anthropic SDK's built-in auto-retry is
-disabled (`max_retries=0` on the client) so this layer owns the policy
-end-to-end — no double-retry, no surprise jitter.
-
-What gets retried:
-
-- **5xx server errors** including `529 OverloadedError` (Anthropic load
-  shedding — distinct from rate limiting)
-- **429 RateLimitError**
-- `APIConnectionError` and `APITimeoutError` (transport-level transient)
-
-Non-retryable 4xx errors (`BadRequestError`, `AuthenticationError`, etc.)
-escape immediately — there's no point re-sending a malformed request.
-
-Schedule: `delay = base * 2**attempt`, capped at `max_delay`. At the
-defaults (`ANTHROPIC_MAX_RETRIES=5`, `ANTHROPIC_RETRY_BASE_DELAY=1.0`,
-`ANTHROPIC_RETRY_MAX_DELAY=30.0`) the wait sequence is **1, 2, 4, 8, 16,
-30 seconds → ~61s worst-case** before the final exception propagates. The
-council's per-agent retry loop (`AGENT_MAX_RETRIES`, default 5) still
-wraps this — so a single agent has up to `5 * 6 = 30` total attempts
-before being dropped.
-
-Each retry logs at `WARNING`:
-
-```
-anthropic call failed (attempt 1/6): Overloaded — retrying in 1.0s
-```
-
-…and on exhaustion, an `ERROR` line precedes the propagated exception.
+Anthropic runs all 7 agents fully in parallel, with **prompt caching** (5-min
+ephemeral) and a **centralized exponential-backoff retry** (handles 429 / 5xx /
+529 / timeouts). Ollama is throttled by `LOCAL_LLM_CONCURRENCY` to avoid GPU OOM.
+Backend internals are documented in
+[docs/cli-reference.md](docs/cli-reference.md#backends--reliability).
 
 ---
 
-## Roadmap (where this is going)
+## Project layout
 
-`docs/roadmap.md` is the source of truth. The flat backlog has been
-restructured into three themes:
+`src/` layout — the `pqi` package is installed **editable** by `uv sync`, so
+`uv run pqi …` works from anywhere with no `PYTHONPATH` juggling.
 
-- **A. Modeling & Calibration** — sharper inference: data-asymmetry
-  handling for the two-sided confidence pair, an audit of how each
-  briefing block (Tavily news, sharp moves, post-kickoff price points)
-  actually moves the verdict, plus the existing Bear and EV-gate
-  monitoring follow-ups.
-- **B. Continuous-run TUI + Trading Automation (Phase 3)** — the next
-  major phase. Streaming TUI that surfaces actionable events, optional
-  background analysis workers with a process-shared rate-limit
-  coordinator (Anthropic + Tavily), Polymarket account auth via
-  `py-clob-client`, a Kelly-sized buy command, and a match-watcher
-  that fires a time- or PnL-based stop-loss after a position lands.
-- **C. Operational Tooling** — small QoL items: cache TTL,
-  `/public-search` integration for ghost events, multi-market batch
-  analysis, per-category accuracy slicing.
+```
+pqi/
+├── src/pqi/            # the package (import name `pqi`; installed by `uv sync`)
+│   ├── main.py         #   Typer CLI: analyze · categories · history · query
+│   ├── config.py       #   env-var config (loads the repo-root .env)
+│   ├── models.py       #   Pydantic contracts shared between modules
+│   ├── scoring.py      #   two-sided confidence-weighted scoring + gates
+│   ├── stats.py        #   PerceivedTrueWinRate + Kelly helpers
+│   ├── history.py      #   JSONL run log + resolution sync
+│   ├── analytics.py    #   outcome classification, per-agent accuracy
+│   ├── agents/         #   personas.py (7 prompts) + council.py (parallel runner)
+│   ├── llm/            #   client.py — single Ollama/Anthropic chat() entrypoint
+│   ├── market/         #   polymarket.py (Gamma) + clob.py (price history)
+│   └── ingestion/      #   synthesizer.py · pandascore.py · match_resolver.py
+├── scripts/            # backfills + reliability diagram (run via `uv run python …`)
+├── docs/               # architecture, scoring, API, roadmap, CLI reference
+├── .pqi/               # persisted state (history, cache, weights) — git-tracked
+├── pyproject.toml      # deps + hatchling build + the `pqi` console script
+├── uv.lock             # pinned, reproducible dependency set
+└── .env                # your keys (gitignored — copy from .env.example)
+```
 
-Each theme lists its reference files and any blockers documented in
-`docs/known-issues.md` (notably ghost events, Gamma list-endpoint
-`live`/`ended` always being `None`, and the need for a global
-Anthropic rate-limit coordinator before parallel workers can ship).
+---
+
+## Documentation
+
+| Doc | Read it for |
+| --- | --- |
+| **[docs/cli-reference.md](docs/cli-reference.md)** | Every flag, batch mode, history recipes, equity math, full tuning table, backend internals |
+| [docs/scoring-reference.md](docs/scoring-reference.md) | Gate stack, banded EV gate, Kelly sizing |
+| [docs/models-reference.md](docs/models-reference.md) | Pydantic contracts between modules |
+| [docs/api-reference.md](docs/api-reference.md) | Gamma · CLOB · Tavily · PandaScore APIs |
+| [docs/architecture.md](docs/architecture.md) | System diagram (Mermaid) |
+| [docs/analyze-pipeline.md](docs/analyze-pipeline.md) | Detailed pipeline flow |
+| [docs/known-issues.md](docs/known-issues.md) | API quirks + gotchas |
+| [docs/roadmap.md](docs/roadmap.md) | Where this is going |
+
+---
+
+## Roadmap
+
+`docs/roadmap.md` is the source of truth. Work is organized into three themes:
+
+- **A · Modeling & Calibration** — data-asymmetry handling for the two-sided
+  confidence pair, briefing-block attribution, Bear + EV-gate monitoring.
+- **B · Continuous-run TUI + Trading Automation** — streaming TUI, background
+  analysis workers with a shared rate-limit coordinator, `py-clob-client` auth,
+  Kelly-sized buys, and a PnL/time stop-loss watcher.
+- **C · Operational Tooling** — cache TTL, ghost-event search, per-category
+  accuracy slicing.
+
+Phase status and acceptance criteria live in
+[docs/phases/README.md](docs/phases/README.md).

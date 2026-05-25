@@ -4,30 +4,43 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 46 (2026-05-25) — **repo portability**.
-Persisted state moved from `~/.pqi/` into `<repo>/.pqi/`, dependency
-manifest swapped to `pyproject.toml` + `uv.lock`. Zero aggregator
-touch. Phase 1 monitor unchanged from session 45: stage 1 still
+**Last rewritten:** session 47 (2026-05-25) — **`src/` layout + docs
+overhaul** (packaging fix on top of session 46's repo portability). The
+`pqi` package now lives in `src/pqi/` and is installed **editable** by
+`uv sync`; run from the repo root with `uv run pqi <cmd>`. Persisted
+state lives in `<repo>/.pqi/` (env-overridable `config.PQI_DATA_DIR`);
+deps in `pyproject.toml` + `uv.lock`. Zero aggregator touch. Phase 1 monitor unchanged from session 45: stage 1 still
 LIVE (`PERSONA_V2_PREAMBLE=true`), n=78 v2 vs n=414 v1, **0 of 4
 acceptance criteria pass**, awaiting one more resolution batch
 (target `v2:preamble ≥ 100`) before the formal revert verdict
 fires. Reports at `<repo>/.pqi/reports/reliability_20260421_v1.md`
 and `..._v2-preamble.md`. Preamble text untouched.
 
-**Session 46 infrastructure changes:**
+**Session 47 — packaging fix + docs overhaul:**
 
-- All persisted state (`history.jsonl`, `cache.db`, `agent_weights.json`,
-  `stats.json`, `category_cache.json`, `clv.jsonl`, `price_points.jsonl`,
-  `reports/`, `backtests/`, 4 `.bak` files) committed inside the repo
-  at `<repo>/.pqi/` — ~75 MB / 22 files. Source of truth is the new
-  `config.PQI_DATA_DIR` (env-overridable; default = `<repo>/.pqi/`).
-- `requirements.txt` removed; `pyproject.toml` + `uv.lock` are the
-  new dependency manifest. Laptop bootstrap: `git clone … && cd pqi
-  && uv sync` then `uv run python -m pqi.main …` (or
-  `PYTHONPATH=<parent> .venv/bin/python -m pqi.main …`). `pqi`
-  package sits at the repo root (not `src/` or `pqi/pqi/`), so
-  `pyproject.toml` uses `tool.uv.package = false` — uv treats it as
-  a dependency manifest only.
+- The `pqi` package moved to `src/pqi/` and is installed **editable** by
+  `uv sync` (dropped `tool.uv.package = false`; added a hatchling
+  build-system + a `pqi` console script in `pyproject.toml`). Bootstrap:
+  `git clone … && cd pqi && uv sync`, then run **from the repo root**:
+  `uv run pqi <cmd>` (or `uv run python -m pqi.main <cmd>`, or activate
+  `.venv` and call `pqi <cmd>` directly). No PYTHONPATH, no
+  running-from-parent — the old `package = false` hack is gone.
+- `config.py`'s two `__file__`-relative paths (the `.env` loader and the
+  `PQI_DATA_DIR` default) re-anchor to `_REPO_ROOT =
+  Path(__file__).resolve().parents[2]`, so the repo-root `.env` and
+  `.pqi/` still resolve after the move. Scripts under `scripts/` import
+  `pqi` via the editable install; `a1_backtest.py`'s `sys.path` fallback
+  now points at `src/`.
+- README rewritten as a concise front door; the full CLI/flag/config
+  reference was extracted to `docs/cli-reference.md`; the 3 loose root
+  docs (`CTO_Agent.md`, `phase_1_acceptance_criteria_patch.md`,
+  `pqi_external_review_2026_04_v2.md`) moved into `docs/`.
+
+**Session 46 (prior):** persisted state (`history.jsonl`, `cache.db`,
+`agent_weights.json`, `stats.json`, `category_cache.json`, `clv.jsonl`,
+`price_points.jsonl`, `reports/`, `backtests/`, 4 `.bak` files — ~75 MB /
+22 files) moved from `~/.pqi/` into `<repo>/.pqi/`; `requirements.txt` →
+`pyproject.toml` + `uv.lock`.
 
 **Cross-machine workflow gotcha:** `history.jsonl` is an append-only
 log. Running `analyze` on both desktop and laptop without
@@ -52,7 +65,7 @@ type to `read_json_auto`.
 ```
 Read CLAUDE.md in full, paying close attention to ## Current State.
 Then read NEXT_SESSION_PROMPT.md for the detailed hand-off.
-Also read CTO_Agent.md — session-33 rewrite made it a capable
+Also read docs/CTO_Agent.md — session-33 rewrite made it a capable
 reviewer persona (contract-as-law, quantitative validation, strategic
 edge, architectural judgment, plus the original code-review stance).
 ```
@@ -345,7 +358,7 @@ they bite you.
   measurement is actionable this session. If resolved V2 runs < ~20,
   the answer is "wait, keep queuing," not "act."
 - When measurement IS actionable, produce the two-filter pair:
-  `python -m pqi.scripts.reliability_diagram --flag v1` and
+  `uv run python scripts/reliability_diagram.py --flag v1` and
   `--flag v2:preamble`. They write to
   `<repo>/.pqi/reports/reliability_YYYYMMDD_v1.md` and
   `..._v2-preamble.md` — compare them directly against the four

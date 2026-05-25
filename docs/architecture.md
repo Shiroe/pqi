@@ -40,8 +40,8 @@ graph TB
     end
 
     subgraph Persistence["Persistence Layer"]
-        CACHE["cache.py<br/><b>SQLite — council_cache</b><br/>~/.pqi/cache.db<br/>Key: market_id<br/>Invalidate: Δprice > 2%"]
-        HISTORY["history.py<br/><b>JSONL — history.jsonl</b><br/>~/.pqi/history.jsonl<br/>Upsert by market_id<br/>Resolution sync"]
+        CACHE["cache.py<br/><b>SQLite — council_cache</b><br/>.pqi/cache.db<br/>Key: market_id<br/>Invalidate: Δprice > 2%"]
+        HISTORY["history.py<br/><b>JSONL — history.jsonl</b><br/>.pqi/history.jsonl<br/>Upsert by market_id<br/>Resolution sync"]
         ANALYTICS["analytics.py<br/><b>Outcome classification</b><br/>Per-agent accuracy<br/>Signal postmortem"]
     end
 
