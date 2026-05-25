@@ -19,10 +19,18 @@ dependencies = [
     "rapidfuzz>=3.0",
 ]
 
-[tool.uv]
-# Non-installable project: this repo's source layout puts the `pqi` package
-# at the repo root (not under src/pqi or pqi/pqi), so it isn't a buildable
-# wheel. uv treats this as a dependency manifest only — `uv sync` creates
-# .venv/ with the deps and the code is imported via sys.path (run from the
-# parent directory, or with `uv run python -m pqi.main ...`).
-package = false
+# Console entry point: `uv run pqi <command>` (or just `pqi <command>` with the
+# .venv activated) is equivalent to `python -m pqi.main <command>`.
+[project.scripts]
+pqi = "pqi.main:app"
+
+# src layout: the `pqi` package lives under src/pqi/. A real build backend means
+# `uv sync` installs pqi editable into .venv, so `import pqi` resolves from any
+# working directory — no PYTHONPATH and no running-from-parent required. Docs,
+# scripts/, and the tracked .pqi/ data dir stay outside the package at the root.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pqi"]

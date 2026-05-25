@@ -46,10 +46,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PARENT = REPO_ROOT.parent
-if str(PARENT) not in sys.path:
-    sys.path.insert(0, str(PARENT))
+# Make the `pqi` package importable when this script is run directly. Points at
+# the src/ layout; with the editable install (`uv sync`) pqi is already on the
+# path, so this insert is just a no-op fallback.
+SRC = Path(__file__).resolve().parent.parent / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from rich.console import Console  # noqa: E402
 from rich.table import Table  # noqa: E402

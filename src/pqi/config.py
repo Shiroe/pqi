@@ -22,8 +22,13 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env from the directory containing this file (the pqi package root)
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+# Repo root = three levels up from this file (<repo>/src/pqi/config.py). Single
+# anchor for every in-repo path so the project stays self-contained and
+# portable; .env and the default .pqi/ data dir both hang off it.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Load .env from the repo root (sibling of pyproject.toml / .venv / .pqi).
+load_dotenv(dotenv_path=_REPO_ROOT / ".env")
 
 # ---------------------------------------------------------------------------
 # LLM backend
@@ -314,11 +319,11 @@ overfit."""
 # Data directory (history, cache, reports, weights, …)
 # ---------------------------------------------------------------------------
 
-# Default to a `.pqi/` directory next to this file so persisted state lives
+# Default to a `.pqi/` directory at the repo root so persisted state lives
 # inside the repo and can be synced across machines via git. Override with
 # PQI_DATA_DIR to keep the legacy ~/.pqi location or point elsewhere.
 PQI_DATA_DIR: Path = Path(
-    os.getenv("PQI_DATA_DIR", str(Path(__file__).resolve().parent / ".pqi"))
+    os.getenv("PQI_DATA_DIR", str(_REPO_ROOT / ".pqi"))
 ).expanduser()
 
 # ---------------------------------------------------------------------------
