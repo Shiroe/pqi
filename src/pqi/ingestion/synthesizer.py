@@ -23,6 +23,7 @@ from tavily import AsyncTavilyClient
 
 from pqi import config
 from pqi.llm.client import chat as llm_chat
+from pqi.ingestion.providers import provider_display_name
 from pqi.models import BriefingDocument, MarketData, StructuredMatchRecord
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ Respond with ONLY valid JSON — no markdown fences, no explanation."""
 
 _SEARCH_ARCHITECT_USER_TMPL = """\
 Market question: {question}
-Category: {category}
+{matchup_line}Category: {category}
 Resolution criteria: {resolution_criteria}
 Current YES price: {yes_price:.0%}
 Volume: ${volume_usd:,.0f}
@@ -145,7 +146,7 @@ EVENT START: {event_start_display}
 EVENT STATUS: {time_status}
 {structured_block}\
 Market question: {question}
-
+{matchup_line}
 Raw search results:
 {snippets}
 
@@ -321,7 +322,8 @@ def _detect_completion_contamination(
     # missing or stale on Polymarket's side).
     if structured_match is not None and structured_says_unfinished:
         anchor = (
-            f"PandaScore reports this match as {structured_match.status} "
+            f"{provider_display_name(structured_match.provider)} reports this "
+            f"match as {structured_match.status} "
             f"(scheduled {structured_match.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')})"
         )
     elif market.event_start_time is not None:
@@ -370,7 +372,7 @@ def _format_structured_block(
         or "  - (none)"
     )
     return (
-        f"\nSTRUCTURED MATCH RECORD (PandaScore — authoritative):\n"
+        f"\nSTRUCTURED MATCH RECORD ({provider_display_name(sm.provider)} — authoritative):\n"
         f"  Match status: {sm.status}\n"
         f"  Canonical teams: {sm.team_a_name} vs {sm.team_b_name}"
         f"{f' ({sm.match_format})' if sm.match_format else ''}\n"
@@ -409,6 +411,43 @@ def _extract_entities(question: str) -> tuple[str, str] | None:
                 return (a, b)
 
     return None
+
+
+def _resolve_matchup(
+    market: MarketData,
+    structured_match: StructuredMatchRecord | None = None,
+) -> tuple[str, str] | None:
+    """Best-effort (team_a, team_b) for the market's SPECIFIC fixture.
+
+    Prefers the structured record's canonical names; else parses the market
+    question (esports embeds "A vs B"); else the parent event title. Soccer
+    per-market questions read "Will X win on <date>?" — a single competitor —
+    so without this the opponent never reaches the search/synthesis prompts and
+    the corpus drifts to a different fixture involving the same team (e.g. a run
+    on "Will France win?" pulling France-vs-Iraq coverage). Anchoring on the
+    pairing keeps the briefing on the correct match."""
+    if structured_match is not None:
+        return structured_match.team_a_name, structured_match.team_b_name
+    parsed = _extract_entities(market.question)
+    if parsed is not None:
+        return parsed
+    if market.event_title:
+        return _extract_entities(market.event_title)
+    return None
+
+
+def _matchup_line(matchup: tuple[str, str] | None) -> str:
+    """Render the directive matchup-anchor line for the search / synthesis
+    prompts. Empty string when the pairing is unknown (non-competitive
+    markets) so the template collapses cleanly."""
+    if matchup is None:
+        return ""
+    a, b = matchup
+    return (
+        f"SPECIFIC MATCHUP (anchor every search and all analysis to THIS exact "
+        f"pairing — never research one competitor without the opponent): "
+        f"{a} vs {b}\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -452,32 +491,39 @@ def _compute_time_status(market: MarketData) -> tuple[str, str]:
         )
 
 
-def _fallback_queries(market: MarketData) -> list[TavilyQuery]:
+def _fallback_queries(
+    market: MarketData,
+    matchup: tuple[str, str] | None = None,
+) -> list[TavilyQuery]:
     """
     Hardcoded query templates — used when the Search Architect LLM fails.
 
-    This preserves the pre-refactor query logic as a reliable fallback.
+    This preserves the pre-refactor query logic as a reliable fallback. When a
+    `matchup` is known, the matchup string ("A vs B") is used as the search
+    subject so the fallback stays anchored on the specific fixture even for
+    single-competitor questions ("Will France win?").
     """
+    subject = f"{matchup[0]} vs {matchup[1]}" if matchup else market.question
     all_queries = [
         TavilyQuery(
-            query=f"{market.question} latest news",
+            query=f"{subject} latest news",
             search_depth="advanced",
             topic="news",
             max_results=7,
         ),
         TavilyQuery(
-            query=f"{market.question} prediction analysis",
+            query=f"{subject} prediction analysis",
             search_depth="advanced",
             max_results=7,
         ),
         TavilyQuery(
-            query=f"{market.question} odds betting",
+            query=f"{subject} odds betting",
             search_depth="basic",
             max_results=5,
         ),
     ]
 
-    entities = _extract_entities(market.question)
+    entities = matchup or _extract_entities(market.question)
     if entities:
         e1, e2 = entities
         all_queries.extend([
@@ -509,16 +555,23 @@ def _fallback_queries(market: MarketData) -> list[TavilyQuery]:
     return all_queries[:config.TAVILY_SEARCHES_PER_MARKET]
 
 
-async def _plan_searches(market: MarketData) -> list[TavilyQuery]:
+async def _plan_searches(
+    market: MarketData,
+    structured_match: StructuredMatchRecord | None = None,
+) -> list[TavilyQuery]:
     """
     Use the Search Architect LLM to design optimal Tavily queries for a market.
 
     Falls back to hardcoded templates if the LLM call or JSON parsing fails.
+    `structured_match` (when resolved) supplies the canonical pairing so the
+    queries are anchored on the exact fixture rather than one competitor.
     """
     event_start_display, time_status = _compute_time_status(market)
+    matchup = _resolve_matchup(market, structured_match)
 
     user_msg = _SEARCH_ARCHITECT_USER_TMPL.format(
         question=market.question,
+        matchup_line=_matchup_line(matchup),
         category=market.category,
         resolution_criteria=market.resolution_criteria,
         yes_price=market.yes_price,
@@ -545,7 +598,7 @@ async def _plan_searches(market: MarketData) -> list[TavilyQuery]:
 
         if not queries:
             logger.warning("Search Architect returned empty query list; using fallback")
-            return _fallback_queries(market)
+            return _fallback_queries(market, matchup)
 
         for tq in queries:
             logger.info("Search Architect query: '%s' [depth=%s, topic=%s, time=%s, domains=%s]",
@@ -556,10 +609,10 @@ async def _plan_searches(market: MarketData) -> list[TavilyQuery]:
 
     except (json.JSONDecodeError, ValidationError) as exc:
         logger.warning("Search Architect JSON/validation failed (%s); using fallback", exc)
-        return _fallback_queries(market)
+        return _fallback_queries(market, matchup)
     except Exception as exc:
         logger.warning("Search Architect LLM call failed (%s); using fallback", exc)
-        return _fallback_queries(market)
+        return _fallback_queries(market, matchup)
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +689,7 @@ async def build_briefing(
         )
 
     # Step 1 — LLM-driven query planning
-    queries = await _plan_searches(market)
+    queries = await _plan_searches(market, structured_match)
 
     # Step 2 — parallel search execution
     tavily = AsyncTavilyClient(api_key=config.TAVILY_API_KEY)
@@ -670,6 +723,7 @@ async def build_briefing(
     event_start_display, time_status = _compute_time_status(market)
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     structured_block = _format_structured_block(structured_match)
+    matchup_line = _matchup_line(_resolve_matchup(market, structured_match))
 
     user_msg = _SYNTHESIZER_USER_TMPL.format(
         today=today_str,
@@ -677,6 +731,7 @@ async def build_briefing(
         time_status=time_status,
         structured_block=structured_block,
         question=market.question,
+        matchup_line=matchup_line,
         snippets=raw_snippets,
     )
 

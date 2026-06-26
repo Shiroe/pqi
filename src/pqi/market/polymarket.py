@@ -69,6 +69,8 @@ class _ParsedEventGroup:
 def _parse_market(
     raw: dict,
     category_override: str | None = None,
+    event_start_fallback: datetime | None = None,
+    event_title: str | None = None,
 ) -> MarketData | None:
     """
     Parse a single raw market dict from the Gamma API into a MarketData model.
@@ -92,7 +94,7 @@ def _parse_market(
         market_id = str(raw["id"])
         question = raw.get("question") or ""
         if not question:
-            logger.warning("Market %s has no question field — skipping", market_id)
+            logger.debug("Market %s has no question field — skipping", market_id)
             return None
 
         resolution_criteria = raw.get("description") or ""
@@ -100,14 +102,14 @@ def _parse_market(
         # Parse end_date from ISO string
         end_date_raw = raw.get("endDate")
         if not end_date_raw:
-            logger.warning("Market %s has no endDate — skipping", market_id)
+            logger.debug("Market %s has no endDate — skipping", market_id)
             return None
         end_date = datetime.fromisoformat(end_date_raw.replace("Z", "+00:00"))
 
         # Parse yes_price from outcomePrices JSON string: e.g. '["0.73", "0.27"]'
         outcome_prices_raw = raw.get("outcomePrices")
         if not outcome_prices_raw:
-            logger.warning("Market %s has no outcomePrices — skipping", market_id)
+            logger.debug("Market %s has no outcomePrices — skipping", market_id)
             return None
         outcome_prices = json.loads(outcome_prices_raw)
         yes_price = float(outcome_prices[0])
@@ -137,7 +139,10 @@ def _parse_market(
             logger.debug("Market %s has acceptingOrders=False — skipping", market_id)
             return None
 
-        # Parse optional eventStartTime (when the real-world event begins)
+        # Parse optional eventStartTime (when the real-world event begins).
+        # Esports match markets populate this; traditional-sports match markets
+        # (soccer, etc.) leave it empty and expose kickoff only on the parent
+        # event's top-level `startTime` field — passed in as event_start_fallback.
         event_start_time = None
         est_raw = raw.get("eventStartTime")
         if est_raw:
@@ -145,6 +150,8 @@ def _parse_market(
                 event_start_time = datetime.fromisoformat(est_raw.replace("Z", "+00:00"))
             except (ValueError, TypeError):
                 pass
+        if event_start_time is None:
+            event_start_time = event_start_fallback
 
         # Extract CLOB token IDs for price history fetching
         clob_token_ids: list[str] = []
@@ -161,6 +168,16 @@ def _parse_market(
         smt_raw = raw.get("sportsMarketType")
         sports_market_type = smt_raw.lower() if isinstance(smt_raw, str) and smt_raw else None
 
+        # Parent event title — explicit override (event-centric paths) else the
+        # nested events[0].title (standalone /markets path). Feeds the
+        # structured-match resolver's party-extraction fallback.
+        resolved_event_title = event_title
+        if resolved_event_title is None:
+            nested = raw.get("events") or []
+            if nested and isinstance(nested[0], dict):
+                t = nested[0].get("title")
+                resolved_event_title = t if isinstance(t, str) and t else None
+
         return MarketData(
             id=market_id,
             question=question,
@@ -172,11 +189,12 @@ def _parse_market(
             category=category,
             clob_token_ids=clob_token_ids,
             sports_market_type=sports_market_type,
+            event_title=resolved_event_title,
         )
 
     except (KeyError, IndexError, ValueError, TypeError) as exc:
         market_id = raw.get("id", "<unknown>")
-        logger.warning("Failed to parse market %s: %s", market_id, exc)
+        logger.debug("Failed to parse market %s: %s", market_id, exc)
         return None
 
 
@@ -194,6 +212,24 @@ def _category_from_event(event: dict) -> str:
         if label:
             return label.lower()
     return "general"
+
+
+def _event_level_start(event: dict) -> datetime | None:
+    """
+    Parse an event's top-level `startTime` (the real-world kickoff).
+
+    Traditional-sports match events (soccer, basketball, etc.) expose kickoff
+    HERE, while leaving `eventStartTime` empty on every child market. Esports
+    match events populate both fields identically, so preferring this value is
+    a safe superset. Returns None for futures/outright events (no startTime).
+    """
+    st = event.get("startTime")
+    if not st:
+        return None
+    try:
+        return datetime.fromisoformat(st.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 
 def _parse_events_to_markets(raw_events: list[dict]) -> list[_ParsedMarket]:
@@ -215,6 +251,8 @@ def _parse_events_to_markets(raw_events: list[dict]) -> list[_ParsedMarket]:
         event_category = _category_from_event(event)
         event_live = event.get("live")
         event_ended = event.get("ended")
+        event_start = _event_level_start(event)
+        event_title = event.get("title") or None
 
         for raw_market in event.get("markets") or []:
             market_id = str(raw_market.get("id", ""))
@@ -222,7 +260,12 @@ def _parse_events_to_markets(raw_events: list[dict]) -> list[_ParsedMarket]:
                 continue
             seen_ids.add(market_id)
 
-            parsed = _parse_market(raw_market, category_override=event_category)
+            parsed = _parse_market(
+                raw_market,
+                category_override=event_category,
+                event_start_fallback=event_start,
+                event_title=event_title,
+            )
             if parsed is not None:
                 results.append(_ParsedMarket(
                     market=parsed,
@@ -497,6 +540,7 @@ def _parse_events_to_groups(raw_events: list[dict]) -> list[_ParsedEventGroup]:
         event_category = _category_from_event(event)
         event_live = event.get("live")
         event_ended = event.get("ended")
+        event_start = _event_level_start(event)
 
         markets: list[MarketData] = []
         for raw_market in event.get("markets") or []:
@@ -505,7 +549,12 @@ def _parse_events_to_groups(raw_events: list[dict]) -> list[_ParsedEventGroup]:
                 continue
             seen_market_ids.add(market_id)
 
-            parsed = _parse_market(raw_market, category_override=event_category)
+            parsed = _parse_market(
+                raw_market,
+                category_override=event_category,
+                event_start_fallback=event_start,
+                event_title=event_title or None,
+            )
             if parsed is not None:
                 markets.append(parsed)
 
@@ -515,12 +564,14 @@ def _parse_events_to_groups(raw_events: list[dict]) -> list[_ParsedEventGroup]:
         # Sort by volume descending — primary_market = highest volume
         markets.sort(key=lambda m: m.volume_usd, reverse=True)
 
-        # "True Start Time": first non-None event_start_time from child markets
-        group_start_time: datetime | None = None
-        for m in markets:
-            if m.event_start_time is not None:
-                group_start_time = m.event_start_time
-                break
+        # "True Start Time": prefer the event's top-level startTime (kickoff for
+        # traditional-sports matches), else first non-None market event_start_time.
+        group_start_time: datetime | None = event_start
+        if group_start_time is None:
+            for m in markets:
+                if m.event_start_time is not None:
+                    group_start_time = m.event_start_time
+                    break
 
         total_volume = sum(m.volume_usd for m in markets)
 
@@ -627,7 +678,11 @@ async def _enrich_event_groups(
                 pg.group.ended = data["ended"]
                 pg.raw_event_ended = data["ended"]
 
-            # Update event_start_time from detail response's embedded markets
+            # Update event_start_time: prefer the event's top-level startTime
+            # (kickoff for traditional-sports matches), else fall back to a
+            # child market's eventStartTime (esports).
+            if pg.group.event_start_time is None:
+                pg.group.event_start_time = _event_level_start(data)
             if pg.group.event_start_time is None:
                 for raw_m in data.get("markets") or []:
                     est_raw = raw_m.get("eventStartTime")

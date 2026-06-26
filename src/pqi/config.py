@@ -130,6 +130,42 @@ PANDASCORE_RECENT_FORM_COUNT: int = int(os.getenv("PANDASCORE_RECENT_FORM_COUNT"
 the TeamForm snapshot in the structured record."""
 
 # ---------------------------------------------------------------------------
+# football-data.org (structured soccer data)
+# ---------------------------------------------------------------------------
+# Second structured-match provider, behind the same StructuredMatchProvider
+# adapter interface as PandaScore. Covers soccer markets (major leagues +
+# World Cup) — see docs/soccer_structured_data_plan.md. Same non-fatal
+# contract: any failure degrades to the Tavily-only briefing.
+
+# Code constant — the public REST endpoint (API v4).
+FOOTBALL_DATA_BASE_URL: str = "https://api.football-data.org/v4"
+
+FOOTBALL_DATA_API_KEY: str = os.getenv("FOOTBALL_DATA_API_KEY", "")
+"""football-data.org API token (header `X-Auth-Token`). Free-tier accounts
+cover the World Cup + big-5 leagues + CL/Euros (~10 req/min). Empty string
+disables the soccer resolver without raising — pipeline runs Tavily-only."""
+
+FOOTBALL_DATA_ENABLED: bool = os.getenv("FOOTBALL_DATA_ENABLED", "true").lower() in {
+    "1", "true", "yes",
+}
+"""Master switch for the soccer resolver. Defaults true so the key alone is
+enough to turn it on. Set false to keep the key but disable the resolver."""
+
+FOOTBALL_DATA_FUZZY_THRESHOLD: int = int(os.getenv("FOOTBALL_DATA_FUZZY_THRESHOLD", "80"))
+"""Minimum rapidfuzz token_set_ratio confidence (0-100) for the
+market-question → football-data-match resolution to be accepted. Same
+conservative default as PandaScore — false positives are costlier than
+false negatives."""
+
+FOOTBALL_DATA_WINDOW_HOURS: float = float(os.getenv("FOOTBALL_DATA_WINDOW_HOURS", "3.0"))
+"""Symmetric window (in hours) around the market's event_start_time in
+which football-data matches are considered candidates."""
+
+FOOTBALL_DATA_RECENT_FORM_COUNT: int = int(os.getenv("FOOTBALL_DATA_RECENT_FORM_COUNT", "10"))
+"""How many recent completed matches per team to inspect when computing
+the TeamForm snapshot for a soccer match."""
+
+# ---------------------------------------------------------------------------
 # Polymarket Gamma API
 # ---------------------------------------------------------------------------
 

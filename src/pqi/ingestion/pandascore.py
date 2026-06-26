@@ -91,9 +91,9 @@ async def _get(
 
 
 async def list_videogames(client: httpx.AsyncClient) -> list[dict] | None:
-    """List the games PandaScore covers. Used at module import time by
-    `match_resolver.py` to validate the GAME_MAPPING table — if a slug we
-    rely on disappears upstream we want a loud warning, not a silent miss.
+    """List the games PandaScore covers. Used to validate the GAME_MAPPING
+    table in `providers/pandascore_provider.py` — if a slug we rely on
+    disappears upstream we want a loud warning, not a silent miss.
 
     Returns the raw list of `{slug, name, ...}` dicts, or None on failure.
     """

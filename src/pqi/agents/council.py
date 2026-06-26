@@ -17,8 +17,9 @@ from datetime import datetime, timezone
 
 from pqi.agents.personas import AGENT_NAMES, AGENT_PERSONAS, flags_for_agent
 from pqi import config
+from pqi.ingestion.providers import provider_display_name
 from pqi.llm.client import chat
-from pqi.models import AgentVerdict, BriefingDocument, MarketData
+from pqi.models import AgentVerdict, BriefingDocument, MarketData, TeamForm
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,17 @@ def _extract_outcome_labels(question: str, resolution_criteria: str) -> str:
     )
 
 
+def _format_form(f: TeamForm) -> str:
+    """Render a recent-form snapshot. W-D-L when draws occur (soccer), W-L
+    otherwise — keeping the esports (draws=0) render byte-identical to before."""
+    if f.draws:
+        return (
+            f"{f.wins}W-{f.draws}D-{f.losses}L "
+            f"(last {f.matches_considered} matches)"
+        )
+    return f"{f.wins}W-{f.losses}L (last {f.wins + f.losses} matches)"
+
+
 def _format_briefing(briefing: BriefingDocument) -> str:
     """
     Serialise a BriefingDocument to a labelled, human-readable string.
@@ -234,8 +246,9 @@ def _format_briefing(briefing: BriefingDocument) -> str:
     structured_block = ""
     if briefing.structured_match is not None:
         sm = briefing.structured_match
+        provider_label = provider_display_name(sm.provider)
         lines: list[str] = [
-            "\nSTRUCTURED MATCH DATA (PandaScore — authoritative identifiers):",
+            f"\nSTRUCTURED MATCH DATA ({provider_label} — authoritative identifiers):",
             f"- Canonical matchup: {sm.team_a_name} vs {sm.team_b_name}"
             + (f" ({sm.match_format})" if sm.match_format else ""),
             f"- Status: {sm.status.upper()}",
@@ -255,18 +268,12 @@ def _format_briefing(briefing: BriefingDocument) -> str:
             )
 
         if sm.team_a_recent_form is not None:
-            f = sm.team_a_recent_form
-            total = f.wins + f.losses
             lines.append(
-                f"- {sm.team_a_name} recent form: {f.wins}W-{f.losses}L "
-                f"(last {total} matches)"
+                f"- {sm.team_a_name} recent form: {_format_form(sm.team_a_recent_form)}"
             )
         if sm.team_b_recent_form is not None:
-            f = sm.team_b_recent_form
-            total = f.wins + f.losses
             lines.append(
-                f"- {sm.team_b_name} recent form: {f.wins}W-{f.losses}L "
-                f"(last {total} matches)"
+                f"- {sm.team_b_name} recent form: {_format_form(sm.team_b_recent_form)}"
             )
         lines.append(
             f"- Resolver fuzzy confidence: {sm.fuzzy_score}/100"

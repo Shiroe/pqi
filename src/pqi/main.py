@@ -17,6 +17,7 @@ from typing import Callable, Optional
 import typer
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
@@ -27,8 +28,100 @@ from pqi.models import BriefingDocument, CouncilResult, EventGroup, MarketData, 
 app = typer.Typer(help="PQI — Polymarket Qualitative Intelligence advisor.")
 console = Console()
 
-logging.basicConfig(level=config.LOG_LEVEL)
+
+# ---------------------------------------------------------------------------
+# Logging → console presentation
+# ---------------------------------------------------------------------------
+# Default runs are clean: INFO / httpx chatter is hidden and the analysis flow
+# is narrated by the pretty phase reporter below. WARNINGs and above always
+# show (orange / red) because they're notices worth seeing. `--verbose` drops
+# the level back to INFO so the raw logs reappear underneath for debugging.
+
+
+class _ConsoleLogHandler(logging.Handler):
+    """Render log records through the rich console with level-based colour.
+
+    INFO/DEBUG are dim and compact (only surfaced when --verbose lowers the
+    level); WARNING is orange and ERROR/CRITICAL red, each with a glyph, so
+    important notices stay legible amid the designed output. Messages are
+    escaped — some carry literal ``[brackets]`` (e.g. ``[bear]``) that rich
+    would otherwise treat as markup."""
+
+    _LEVEL_STYLE: dict[int, tuple[str, str]] = {
+        logging.WARNING: ("dark_orange", "⚠"),
+        logging.ERROR: ("red", "✖"),
+        logging.CRITICAL: ("bold red", "✖"),
+    }
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = escape(record.getMessage())
+        except Exception:  # never let logging crash the run
+            return
+        if record.levelno >= logging.WARNING:
+            style, glyph = self._LEVEL_STYLE.get(record.levelno, ("red", "✖"))
+            console.print(f"[bold {style}]{glyph}[/]  [{style}]{msg}[/]")
+        else:
+            console.print(f"[grey42]{record.levelname:<5} {record.name}  {msg}[/grey42]")
+
+
+def _configure_logging(verbose: bool = False) -> None:
+    """Install the console log handler and set the level. Default = WARNING
+    (clean); verbose = config.LOG_LEVEL (INFO unless overridden)."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.addHandler(_ConsoleLogHandler())
+    root.setLevel(config.LOG_LEVEL if verbose else logging.WARNING)
+
+
+# Quiet by default at import time; the `analyze --verbose` flag re-configures.
+_configure_logging(verbose=False)
 logger = logging.getLogger(__name__)
+
+
+class _PhaseReporter:
+    """Narrated, numbered status flow for a single (non-batch) analysis.
+
+    Renders ``[n/N] 🔎 Title…`` phase headers with indented ``↳`` sub-steps,
+    in the warm narrative style chosen for the default UX. No-ops in batch mode
+    (``enabled=False``) where the Live summary table owns the display, so the
+    same call sites work for both paths."""
+
+    def __init__(self, total: int, *, enabled: bool) -> None:
+        self.total = total
+        self.enabled = enabled
+        self.n = 0
+
+    def phase(self, emoji: str, title: str) -> None:
+        if not self.enabled:
+            return
+        self.n += 1
+        console.print(f"\n[grey42][{self.n}/{self.total}][/grey42] {emoji}  [bold]{title}[/bold]")
+
+    def step(self, text: str) -> None:
+        """A dim, in-progress sub-step (escaped — may come from providers)."""
+        if self.enabled:
+            console.print(f"      [grey42]↳[/grey42] [dim]{escape(text)}[/dim]")
+
+    def detail(self, markup: str) -> None:
+        """A highlighted result sub-line. `markup` is trusted rich markup."""
+        if self.enabled:
+            console.print(f"      [grey42]↳[/grey42] {markup}")
+
+    def cached(self) -> None:
+        if self.enabled:
+            console.print("\n[bold yellow]⚡[/bold yellow]  [yellow]Loaded from cache "
+                          "— reusing the previous council verdict.[/yellow]")
+
+
+def _trend_arrow(change_pp: float) -> str:
+    """Coloured ▲/▼/— for a weekly price change in percentage points."""
+    if change_pp > 0.5:
+        return "[green]▲[/green]"
+    if change_pp < -0.5:
+        return "[red]▼[/red]"
+    return "[grey42]—[/grey42]"
 
 
 # ---------------------------------------------------------------------------
@@ -877,59 +970,60 @@ async def _run_analysis(
         if on_phase is not None:
             on_phase(label, pct)
 
+    reporter = _PhaseReporter(total=5, enabled=verbose)
+
     _emit("resolving match", 2)
+    reporter.phase("🔎", "Identifying the fixture…")
 
     # Resolve the structured match record FIRST so it can both inform the
     # cache invalidation key (status changes invalidate even when price
-    # barely moves) and feed the synthesizer / council. Resolver returns
-    # None for non-esports markets, missing keys, low fuzzy confidence,
-    # or any provider-side failure — the pipeline is unchanged in those
-    # cases (Tavily-only briefing, no STRUCTURED MATCH DATA block).
+    # barely moves) and feed the synthesizer / council. The resolver picks a
+    # provider by category (PandaScore for esports, football-data for soccer);
+    # it returns None for uncovered categories, missing keys, low fuzzy
+    # confidence, or any provider-side failure — the pipeline is unchanged in
+    # those cases (Tavily-only briefing, no STRUCTURED MATCH DATA block).
     structured_match = None
     if shared_briefing is None:
         try:
-            structured_match = await resolve_match(market)
+            structured_match = await resolve_match(
+                market, on_step=reporter.step if verbose else None
+            )
         except Exception as exc:
             logger.warning("Match resolver failed for %s: %s", market.id, exc)
-        if structured_match is not None and verbose:
-            console.print(
-                f"[cyan]PandaScore: {structured_match.team_a_name} vs "
-                f"{structured_match.team_b_name} ({structured_match.status}, "
-                f"fuzzy={structured_match.fuzzy_score})[/cyan]"
+        if structured_match is not None:
+            from pqi.ingestion.providers import provider_display_name
+            sport_emoji = "⚽" if structured_match.provider == "football-data" else "🎮"
+            reporter.detail(
+                f"{sport_emoji} [bold]{escape(structured_match.team_a_name)} vs "
+                f"{escape(structured_match.team_b_name)}[/bold]  [dim]· "
+                f"{provider_display_name(structured_match.provider)} · "
+                f"{structured_match.status}[/dim]"
             )
+        else:
+            reporter.step("no structured-data match — using news research only")
     structured_status = structured_match.status if structured_match else None
 
     if not no_cache:
         cached = await get_cached(market.id, market.yes_price, structured_status)
         if cached is not None:
-            if verbose:
-                console.print(
-                    "[green]Cache hit — using previous council result.[/green]"
-                )
+            reporter.cached()
             _emit("cached", 100)
             return cached, None, None
 
     _emit("synthesizing briefing", 5)
+    reporter.phase("📰", "Reading the news room…")
 
     if shared_briefing is not None:
-        if verbose:
-            console.print(
-                f"\n[cyan]Reusing shared event briefing for:[/cyan] "
-                f"{market.question[:80]}"
-            )
         briefing = shared_briefing.model_copy(update={"market": market})
+        reporter.step("reusing the shared event briefing")
     else:
-        if verbose:
-            console.print(
-                f"\n[cyan]Fetching briefing for:[/cyan] {market.question[:80]}"
-            )
         briefing = await build_briefing(market, structured_match=structured_match)
-    if verbose:
-        console.print(
-            f"[cyan]Briefing ready — {len(briefing.key_facts)} key facts.[/cyan]"
-        )
+    reporter.detail(
+        f"[dim]briefing ready · {len(briefing.key_facts)} key facts[/dim]"
+    )
 
     _emit("fetching price history", 50)
+    reporter.phase("📈", "Charting the order book…")
 
     # Enrich briefing with CLOB price history (non-fatal). The raw point
     # lists are threaded out to the caller for the full-fidelity sidecar
@@ -943,40 +1037,25 @@ async def _run_analysis(
         if fetch_result:
             price_history, yes_raw_points, no_raw_points = fetch_result
             briefing = briefing.model_copy(update={"price_history": price_history})
-            if verbose:
-                console.print(
-                    f"[cyan]Price history: YES {price_history.yes.data_points}pts "
-                    f"{price_history.yes.direction} ({price_history.yes.change_1w_pp:+.1f}pp/wk)  |  "
-                    f"NO {price_history.no.data_points}pts "
-                    f"{price_history.no.direction} ({price_history.no.change_1w_pp:+.1f}pp/wk)[/cyan]"
-                )
-        elif verbose:
-            console.print(
-                "[dim]Price history unavailable — proceeding without trend data.[/dim]"
+            reporter.detail(
+                f"YES {_trend_arrow(price_history.yes.change_1w_pp)} "
+                f"{price_history.yes.change_1w_pp:+.1f}pp/wk  [grey42]·[/grey42]  "
+                f"NO {_trend_arrow(price_history.no.change_1w_pp)} "
+                f"{price_history.no.change_1w_pp:+.1f}pp/wk"
             )
+        else:
+            reporter.step("price history unavailable — proceeding without trend data")
     except Exception as exc:
         logger.warning("Price history enrichment failed: %s", exc)
-        if verbose:
-            console.print(
-                "[dim]Price history fetch failed — proceeding without trend data.[/dim]"
-            )
+        reporter.step("price history fetch failed — proceeding without trend data")
 
     _emit("council deliberating", 55)
-
-    concurrency_info = (
-        f"concurrency={config.LOCAL_LLM_CONCURRENCY}"
-        if config.LLM_BACKEND == "ollama"
-        else "parallel"
-    )
-    if verbose:
-        console.print(
-            f"[cyan]Summoning the Council of Seven… ({concurrency_info})[/cyan]"
-        )
+    reporter.phase("🧠", "The Council of Seven deliberates…")
     verdicts = await run_council(briefing)
-    if verbose:
-        console.print(f"[cyan]Council complete: {len(verdicts)}/7 verdicts.[/cyan]\n")
+    reporter.detail(f"[dim]{len(verdicts)}/7 agents returned a verdict[/dim]")
 
     _emit("scoring", 95)
+    reporter.phase("⚖️", "Weighing the verdict…")
 
     result = build_council_result(market, verdicts)
     result.briefing = briefing
@@ -1049,6 +1128,12 @@ def analyze(
         help="Max parallel runs in batch mode. Overrides ANALYZE_BATCH_CONCURRENCY.",
         min=1,
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-V",
+        help="Show the raw INFO/HTTP logs underneath the status flow (debugging).",
+    ),
 ) -> None:
     """
     Fetch active Polymarket events, run the Council of Seven, and print recommendations.
@@ -1060,6 +1145,7 @@ def analyze(
     """
     from pqi.market.polymarket import fetch_events, CategoryNotFoundError
 
+    _configure_logging(verbose=verbose)
     console.print("[bold cyan]PQI — Polymarket Qualitative Intelligence[/bold cyan]\n")
 
     try:

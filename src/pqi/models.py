@@ -33,6 +33,12 @@ class MarketData(BaseModel):
     """Gamma-API `sportsMarketType` field (e.g. "moneyline", "spread", "total").
     None on non-sports markets or older entries. Used to identify the overall-
     outcome market in a multi-market sports event without relying on title heuristics."""
+    event_title: str | None = None
+    """Parent event title (e.g. "Norway vs. France"). Additive/optional. The
+    structured-match resolver uses it as a fallback source of the two competing
+    parties when the per-market question doesn't embed the matchup — soccer
+    questions read "Will X win on <date>?", so the "A vs B" pairing only
+    survives on the event title. None for standalone markets or older entries."""
 
 
 class PricePoint(BaseModel):
@@ -113,9 +119,14 @@ class TeamForm(BaseModel):
     team_name: str
     """Provider's canonical team name (the one we will compare against)."""
     matches_considered: int = Field(..., ge=0)
-    """How many recent completed matches contributed to the W/L counts."""
+    """How many recent completed matches contributed to the W/D/L counts."""
     wins: int = Field(..., ge=0)
     losses: int = Field(..., ge=0)
+    draws: int = Field(default=0, ge=0)
+    """Recent draws. Additive field (default 0) for sports where matches can
+    end level (soccer ≈25% of the time). Esports BO formats always have a
+    winner, so existing PandaScore records keep draws=0 and render unchanged.
+    Invariant when populated: matches_considered == wins + draws + losses."""
     last_match_at: datetime | None = None
     """When the most recent counted match was played, UTC. None if no
     completed matches were available."""

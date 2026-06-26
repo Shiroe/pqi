@@ -26,9 +26,22 @@ pqi analyze [OPTIONS]      # `analyze` is the default command, so `pqi …` work
 | `--no-cache`       |       | flag    | off        | Force a fresh council run, ignoring any cached result                                            |
 | `--concurrency`    | `-j`  | `INT`   | _(config)_ | Max parallel runs in batch mode. Default from `ANALYZE_BATCH_CONCURRENCY` (1). Ceiling 3 on Anthropic Tier 2 |
 | `--summary-only`   |       | flag    | off        | Batch mode only — skip per-event result panels, keep the final summary table                    |
+| `--verbose`        | `-V`  | flag    | off        | Show the raw `INFO`/HTTP logs underneath the narrated status flow (debugging)                    |
 
 All flags combine freely. e.g. `pqi analyze --live -c esports -v 0` shows all
 live esports events regardless of volume.
+
+### Console output
+
+A single analysis narrates its progress as a numbered status flow — e.g.
+`🔎 Identifying the fixture` (with provider sub-steps), `📰 Reading the news
+room`, `📈 Charting the order book`, `🧠 The Council of Seven deliberates`,
+`⚖️ Weighing the verdict` — then prints the recommendation table. By default the
+raw `INFO`/`httpx` logs are hidden; **warnings stay visible in orange** (and
+errors in red) because they're notices worth seeing. Pass `--verbose` / `-V` to
+bring the raw logs back underneath for debugging (honours `LOG_LEVEL`, default
+`INFO`). Batch (multi-select) runs use the live summary table instead of the
+narrated flow.
 
 ### Examples
 
@@ -105,6 +118,24 @@ If a category matches nothing, the command fails loudly and suggests running
 `pqi categories`. Resolved lookups are cached to `.pqi/category_cache.json`
 (no TTL — Polymarket tag/series IDs are effectively immutable; delete the file
 to force a refresh, or override with `CATEGORY_CACHE_PATH`).
+
+### Picking the right tag for scheduled matches
+
+Some intuitively-named tags point at **futures/outright** markets, not the
+individual scheduled matches you want with `--starts-within` / `--live`:
+
+| You might type | Resolves to | What it actually contains | Use instead |
+| -------------- | ----------- | ------------------------- | ----------- |
+| `world-cup`    | tag `519`   | "World Cup Winner", "Group X Winner", "Nation to Reach R16", H2H props — **no per-match events** | `fifa-world-cup`, `soccer`, or `sports` |
+| `world-series` | tag `100021`| MLB championship futures  | `mlb`, `baseball`, or `sports` |
+
+Polymarket tags individual matches (e.g. `Norway vs. France`) under
+`soccer` / `fifa-world-cup` / `games` / `sports`, **not** under the
+tournament-name tag. When `-c <cat> -s <hours>` returns nothing for a sport
+that clearly has games today, the category is almost always a futures-only
+tag — switch to one of the alternatives above (run `pqi categories` to see
+which are live). Esports is unaffected: `-c esports -s 4` works directly
+because its match events are tagged `esports`.
 
 ---
 
