@@ -4,6 +4,105 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 48 — soccer structured-data support + analyze console UX
+
+Two feature tracks plus two bug fixes surfaced by the first live soccer
+run. **Ingestion / presentation only — zero aggregator touch** (scoring
+still reads `probability` + the two `confidence_*` fields unchanged).
+
+### 1. Soccer match start-time fix (`polymarket.py`)
+
+Soccer / world-cup match events never appeared under `-s`/`--starts-within`
+because the pipeline derived event start time *only* from the market-level
+`eventStartTime` field. Esports markets populate it; soccer match markets
+leave it `None` and expose kickoff on the **event-level `startTime`**.
+Added `_event_level_start(event)`; `_parse_market` gained an
+`event_start_fallback` param, and group/detail-enrichment start derivation
+now prefer the event-level value. Verified live: `-c soccer/-c
+fifa-world-cup/-c sports -s 8` went from 0 → 5–10 matches; esports
+unchanged. Bug B (`-c world-cup` resolves to futures-only tag 519, not the
+matches) is **documented, not coded** — `docs/cli-reference.md` now tells
+users to query `-c soccer` / `-c fifa-world-cup`.
+
+### 2. Structured-match adapter layer + football-data.org provider
+
+`match_resolver.py` was hard-wired to PandaScore's request/response shape.
+Refactored into a clean adapter (decision log:
+`docs/soccer_structured_data_plan.md`):
+
+- `ingestion/providers/base.py` — `StructuredMatchProvider` ABC + the shared
+  `resolve()` template method (fuzzy-gate → parallel form/H2H → build record)
+  + normalized `CandidateMatch` / `CompletedMatch` intermediates (typed, not
+  raw dicts — honours the "no raw dicts between modules" rule). Form builder
+  now counts draws.
+- `ingestion/providers/pandascore_provider.py` — esports adapter; the
+  game-slug table + all PandaScore dict-parsing moved here verbatim.
+- `ingestion/providers/footballdata_provider.py` + `ingestion/footballdata.py`
+  — soccer adapter + low-level v4 client (`X-Auth-Token`, non-fatal). Maps the
+  v4 Match schema (status enum, `utcDate`, home/away, `score.fullTime`,
+  `score.winner` incl. `DRAW`). H2H keyed off the match id.
+- `match_resolver.py` — now a thin provider-agnostic orchestrator (guards →
+  party extraction → first covering provider → delegate). `resolve_match`
+  signature unchanged but for an added cosmetic `on_step` callback.
+- Provider-agnostic rendering: `provider_display_name()` (DRY, from the
+  registry) replaces the two hardcoded "PandaScore" labels in `council.py` /
+  `synthesizer.py`; council form render is W-D-L when draws occur,
+  **byte-identical W-L for esports** (draws=0).
+- Additive model fields: `TeamForm.draws`, `MarketData.event_title`
+  (populated in `polymarket.py`). Config: `FOOTBALL_DATA_*` in
+  `config.py` + `.env.example`.
+- Esports records are byte-identical post-refactor — regression-guarded by
+  `scripts/smoke_structured_providers.py` (no-network fixtures: Part A
+  esports, Part B soccer incl. draws, Part C live probe behind the key).
+- Transfermarkt evaluated (user-raised) and **parked**: no official API
+  (scraper / paid wrapper only), and its value is player-level data the
+  record doesn't model — a future enrichment adapter, not the primary.
+
+### 3. Two contamination fixes (first live run: Norway vs. France)
+
+- **football-data window returned nothing.** `/matches?dateFrom&dateTo`
+  treats the dates as inclusive instants at 00:00 UTC, so `dateFrom ==
+  dateTo` (the common case when the ±window stays inside one day) matches an
+  empty range. Fix: `dateTo = window_end_date + 1 day`; the caller still
+  re-narrows to the exact ±hour window. Diagnostic:
+  `scripts/diag_footballdata.py`.
+- **Opponent-blind search.** Soccer per-market questions are single-competitor
+  ("Will France win on <date>?"), so Tavily searched France in isolation and
+  the corpus drifted to a France-vs-Iraq fixture. Added
+  `synthesizer._resolve_matchup()` (structured record → question → event
+  title) feeding a `SPECIFIC MATCHUP: A vs B` line into both the Search
+  Architect and the synthesizer prompts; fallback queries use the "A vs B"
+  subject. Non-competitive markets collapse the line to empty. Verified live:
+  the briefing now summarizes Norway vs. France correctly.
+
+### 4. Analyze console UX
+
+- Custom `_ConsoleLogHandler` (rich) replaces `logging.basicConfig`; default
+  root level WARNING so `INFO`/`httpx` chatter is hidden. WARNING renders
+  orange + glyph, ERROR/CRITICAL red; messages escaped (literal `[bear]` etc.
+  no longer parsed as markup). `analyze --verbose`/`-V` → `config.LOG_LEVEL`
+  (INFO) brings the raw logs back.
+- `_PhaseReporter` narrates single-analyze runs as `[n/5] 🔎 …` numbered
+  phases with indented `↳` sub-steps (provider sub-steps via the resolver's
+  `on_step`), sport-aware ⚽/🎮, `⚡` cache line. No-ops in batch mode (the
+  Live table owns the display).
+- Routine per-market parse-skips in `polymarket.py` (`no outcomePrices`, `no
+  endDate`, …) downgraded `warning` → `debug` — they flooded the new UI in
+  orange during fetch (caught by the first live run).
+- `docs/cli-reference.md` documents `--verbose` + the console-output behaviour.
+
+### Files
+
+New: `ingestion/providers/{__init__,base,pandascore_provider,footballdata_provider}.py`,
+`ingestion/footballdata.py`, `docs/soccer_structured_data_plan.md`,
+`scripts/{smoke_structured_providers,diag_footballdata}.py`.
+Edited: `polymarket.py`, `models.py`, `config.py`, `.env.example`,
+`match_resolver.py`, `synthesizer.py`, `agents/council.py`,
+`ingestion/pandascore.py` (docstring), `main.py`, `docs/cli-reference.md`,
+`CLAUDE.md`.
+
+---
+
 ## Session 47 — `src/` layout: editable package + docs overhaul
 
 Packaging fix completing session 46's portability work, plus a

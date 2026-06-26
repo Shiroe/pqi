@@ -57,6 +57,7 @@ Polymarket Gamma API → Synthesizer Agent (Briefing Doc) → Council of Seven
 | Price history | Polymarket CLOB API    | Free, public, no auth for read-only     |
 | News/search   | Tavily API             | Free tier 1k searches/mo                |
 | Esports data  | PandaScore API         | Free tier 1k req/hr; structured match status / scoreline / form (optional, esports only) |
+| Soccer data   | football-data.org v4   | Free tier (WC + big-5 + CL/Euros, ~10 req/min); structured match status / score / form / H2H (optional, soccer only) |
 | Fuzzy match   | `rapidfuzz`            | Team-name resolution (Polymarket → PandaScore) |
 | Validation    | Pydantic v2            | All inter-module data                   |
 | DB (Phase 2)  | SQLite via `aiosqlite` | Local price history cache               |
@@ -341,6 +342,7 @@ change in a code edit, it stays as a literal.
 | Roadmap & future work (themed catalog A/B/C) | [`docs/roadmap.md`](docs/roadmap.md) | Planning next priorities or checking what's been done |
 | Phase index & status | [`docs/phases/README.md`](docs/phases/README.md) | Pick up a phase task / check dependencies |
 | Option B rollout plan | [`docs/option_b_migration_plan.md`](docs/option_b_migration_plan.md) | Any work touching `probability_no` / per-side probability |
+| Soccer structured-data plan (adapter + provider) | [`docs/soccer_structured_data_plan.md`](docs/soccer_structured_data_plan.md) | Extending structured match data beyond esports (football-data.org adapter) |
 | Scaling assessment (v2.0 RFC triage) | [`docs/scaling_assessment.md`](docs/scaling_assessment.md) | Architecture / infra decisions |
 | Architecture diagram (Mermaid) | [`docs/architecture.md`](docs/architecture.md) | High-level system overview |
 | Analyze pipeline diagram (Mermaid) | [`docs/analyze-pipeline.md`](docs/analyze-pipeline.md) | Detailed pipeline flow |
@@ -373,25 +375,47 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 47 — **`src/` layout + docs overhaul**. The
-`pqi` package moved to `src/pqi/` and is now installed **editable** via
-`uv sync` (dropped `tool.uv.package = false`; added a hatchling
-build-system + a `pqi` console script in `pyproject.toml`). `uv run pqi
-…` and `uv run python -m pqi.main …` now run **from the repo root** — no
-PYTHONPATH, no running-from-parent. `config.py`'s two `__file__`-relative
-paths (the `.env` loader + the `PQI_DATA_DIR` default) re-anchor to a
-single `_REPO_ROOT = Path(__file__).resolve().parents[2]`, so the
-repo-root `.env` and `.pqi/` still resolve after the move. README
-rewritten as a tight front door; the detailed CLI/flag/config reference
-was extracted to [`docs/cli-reference.md`](docs/cli-reference.md); the 3
-loose root docs moved into `docs/`. Zero aggregator/pipeline touch.
+**Last updated:** session 48 — **soccer structured-data support +
+analyze console UX**. Two feature tracks, **still zero aggregator touch**
+(scoring reads `probability` + the two `confidence_*` fields exactly as
+before).
 
-Session 46 (prior) moved persisted state (history, cache, weights,
-reports, …) from `~/.pqi/` into `<repo>/.pqi/` and swapped
-`requirements.txt` → `pyproject.toml` + `uv.lock`. Env-overridable
-`config.PQI_DATA_DIR` is the source of truth for every persisted path.
-Phase 1 stage-1 monitor stays parked at the session-45 state (n=78, 0/4
-acceptance — table below unchanged).
+1. **Soccer matches now resolve end-to-end.** (a) Event-level `startTime`
+   parsing in `polymarket.py` makes soccer / world-cup match events surface
+   under `-s`/`--starts-within` (their kickoff lives on the event-level
+   `startTime`, not the market-level `eventStartTime` esports uses).
+   (b) Structured-match data via a new **adapter layer**
+   (`src/pqi/ingestion/providers/`): a `StructuredMatchProvider` ABC + a
+   shared resolution skeleton, with `PandaScoreProvider` (esports, refactored
+   out of the old `match_resolver`) and `FootballDataProvider` (soccer —
+   football-data.org free tier: World Cup + big-5 + CL/Euros).
+   `match_resolver` is now a thin provider-agnostic orchestrator. Esports
+   records are byte-identical (regression-guarded by
+   `scripts/smoke_structured_providers.py`). Additive model fields:
+   `TeamForm.draws`, `MarketData.event_title`. Config: `FOOTBALL_DATA_*`
+   (needs `FOOTBALL_DATA_API_KEY` in `.env`). Transfermarkt evaluated +
+   parked (no official API) as a future player-context enrichment adapter.
+   Design + decisions:
+   [`docs/soccer_structured_data_plan.md`](docs/soccer_structured_data_plan.md).
+2. **Analyze console UX.** Single-analyze runs narrate a numbered phase flow
+   (`🔎 fixture → 📰 news → 📈 order book → 🧠 council → ⚖️ verdict`) with
+   provider sub-steps; raw `INFO`/`httpx` logs are hidden by default (custom
+   rich log handler at WARNING) and return under `--verbose`/`-V`. Warnings
+   render orange, errors red. Routine per-market parse-skips downgraded to
+   `debug`. Batch (multi-select) runs keep their live summary table.
+
+Two contamination bugs found + fixed on the first live soccer run:
+football-data `dateFrom`/`dateTo` are inclusive-at-00:00 (a same-day query
+returned nothing → fixed by pushing `dateTo` past the window-end date); and
+opponent-blind Tavily search (soccer questions are single-competitor
+"Will X win on <date>?") now anchored on the pairing via a `_resolve_matchup`
+helper (structured record → question → event title) feeding both the Search
+Architect and synthesizer prompts. Bug B from the start-time work
+(`-c world-cup` → futures-only tag 519) is documented, not coded — use
+`-c soccer` / `-c fifa-world-cup` ([`docs/cli-reference.md`](docs/cli-reference.md)).
+
+Phase 1 stage-1 monitor untouched — still parked at the session-45 state
+(n=78, 0/4 acceptance — table below unchanged).
 
 | Criterion | v1 (n=414) | v2 n=38 | v2 n=78 | Pass? |
 |---|---|---|---|---|
@@ -410,23 +434,6 @@ the formal n ≥ 100 trigger before flipping. Preamble text untouched.
 
 Reports: `<repo>/.pqi/reports/reliability_20260421_v1.md`,
 `reliability_20260421_v2-preamble.md`.
-
-**QoL this session — no pipeline/aggregator touch:**
-
-- **Parallel `history sync`** — bounded worker pool + global pacer
-  derived from `GAMMA_RATE_LIMIT_DELAY` (no new knob). Heuristic:
-  `60/delay` req/min budget × 0.8 buffer → `min_interval = delay/0.8`;
-  workers = `clamp(ceil(1.5 / min_interval), 2, 8)`. Default (delay
-  0.5s) → 3 workers at 96 req/min cap. New
-  `history.update_resolutions_batch` applies all patches in one
-  load → rewrite cycle (concurrency-safe). 66 unresolved synced in
-  41.5s (pacer-bound, was ~60s sequentially).
-- **Batch `analyze` Live panel silences HTTP noise** — `_run_batch`
-  now attaches a root-handler `logging.Filter` that drops records
-  from loggers whose name starts with `httpx` / `httpcore` /
-  `anthropic`, restored in `try/finally`. Filters run at emit time so
-  child loggers (`httpx._client`, `httpcore.connection`, etc.) are
-  caught too. Single-analyze paths unchanged.
 
 **Known gotcha (carry-over from session 44):**
 `pqi.analytics_sql.get_connection()` still fails when DuckDB's schema
@@ -516,10 +523,15 @@ editable by `uv sync` (hatchling build-system + `pqi` console script;
 `package = false` dropped), `config.py`'s `.env`/`PQI_DATA_DIR` paths
 re-anchored to `_REPO_ROOT = parents[2]`, plus a README front-door
 rewrite + new `docs/cli-reference.md` + root tidy (no Python logic
-outside `config.py`/`scripts` touched). Still zero aggregator changes
-through session 47; scoring still reads `probability` + the two
-`confidence_*` fields exactly as before. See `docs/session-log.md` for
-per-session detail.
+outside `config.py`/`scripts` touched). Session 48 added soccer
+structured-data support (refactoring `match_resolver` into a
+provider-adapter layer + a football-data.org provider), the soccer
+match start-time fix, two contamination fixes (search/synthesis
+opponent-anchoring + a football-data date-range bug), and an analyze
+console-UX pass (narrated phases + quieter logs) — all **ingestion /
+presentation only**. Still zero aggregator changes through session 48;
+scoring still reads `probability` + the two `confidence_*` fields exactly
+as before. See `docs/session-log.md` for per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit
@@ -545,8 +557,13 @@ running the backtest. See
   `pqi/agent_weights.py`) — snapshot at `<PQI_DATA_DIR>/agent_weights.json`.
 - **Option B shadow layer** (session 26) — descriptive only.
 - **Anthropic prompt caching** (session 27) + **centralized retry** (session 30).
-- **Temporal disambiguation + PandaScore** (session 28, esports only,
-  non-fatal).
+- **Structured-match resolver** via a provider-adapter layer (session 48,
+  `src/pqi/ingestion/providers/`): `PandaScoreProvider` (esports, session 28)
+  + `FootballDataProvider` (soccer, session 48), behind one
+  `StructuredMatchProvider` interface. Temporal disambiguation +
+  matchup-anchored search/synthesis. Non-fatal; needs the provider's API key.
+- **Narrated analyze console UX** (session 48): single-run phase flow,
+  default-quiet logs (custom rich handler), `--verbose`/`-V` for raw logs.
 - **Category-resolution cache** (session 29, `<PQI_DATA_DIR>/category_cache.json`).
 - Two-sided CLOB price history enrichment (YES + NO, non-fatal).
 - History system: persistence, resolution sync, per-agent accuracy, postmortem.

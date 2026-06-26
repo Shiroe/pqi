@@ -503,8 +503,9 @@ Either:
 
 ## Session state
 
-> Sessions 45–47 did **no Phase-1 work** (QoL tooling, repo portability,
-> then the `src/` packaging fix + docs overhaul). The stage-1 monitor stays
+> Sessions 45–48 did **no Phase-1 work** (QoL tooling, repo portability, the
+> `src/` packaging fix + docs overhaul, then session 48's soccer
+> structured-data adapter + analyze console UX). The stage-1 monitor stays
 > parked at the session-45 re-check (n=78, **0/4** — see CLAUDE.md Current
 > State); `PERSONA_V2_PREAMBLE=true` and `_SHARED_PREAMBLE_V2` untouched. The
 > last actual Phase-1 work is below.

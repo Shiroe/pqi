@@ -4,37 +4,49 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 47 (2026-05-25) — **`src/` layout + docs
-overhaul** (packaging fix on top of session 46's repo portability). The
-`pqi` package now lives in `src/pqi/` and is installed **editable** by
-`uv sync`; run from the repo root with `uv run pqi <cmd>`. Persisted
-state lives in `<repo>/.pqi/` (env-overridable `config.PQI_DATA_DIR`);
-deps in `pyproject.toml` + `uv.lock`. Zero aggregator touch. Phase 1 monitor unchanged from session 45: stage 1 still
-LIVE (`PERSONA_V2_PREAMBLE=true`), n=78 v2 vs n=414 v1, **0 of 4
-acceptance criteria pass**, awaiting one more resolution batch
-(target `v2:preamble ≥ 100`) before the formal revert verdict
-fires. Reports at `<repo>/.pqi/reports/reliability_20260421_v1.md`
-and `..._v2-preamble.md`. Preamble text untouched.
+**Last rewritten:** session 48 (2026-06-26) — **soccer structured-data
+support + analyze console UX**. Two feature tracks the user directed;
+**zero aggregator touch** (scoring unchanged). The Phase 1 monitor below
+is untouched and remains the highest-leverage *modeling* priority. Run
+from the repo root with `uv run pqi <cmd>` (session-47 `src/` layout).
 
-**Session 47 — packaging fix + docs overhaul:**
+**Session 48 — what shipped (full detail: `docs/session-log.md`
+§Session 48; design + decisions: `docs/soccer_structured_data_plan.md`):**
 
-- The `pqi` package moved to `src/pqi/` and is installed **editable** by
-  `uv sync` (dropped `tool.uv.package = false`; added a hatchling
-  build-system + a `pqi` console script in `pyproject.toml`). Bootstrap:
-  `git clone … && cd pqi && uv sync`, then run **from the repo root**:
-  `uv run pqi <cmd>` (or `uv run python -m pqi.main <cmd>`, or activate
-  `.venv` and call `pqi <cmd>` directly). No PYTHONPATH, no
-  running-from-parent — the old `package = false` hack is gone.
-- `config.py`'s two `__file__`-relative paths (the `.env` loader and the
-  `PQI_DATA_DIR` default) re-anchor to `_REPO_ROOT =
-  Path(__file__).resolve().parents[2]`, so the repo-root `.env` and
-  `.pqi/` still resolve after the move. Scripts under `scripts/` import
-  `pqi` via the editable install; `a1_backtest.py`'s `sys.path` fallback
-  now points at `src/`.
-- README rewritten as a concise front door; the full CLI/flag/config
-  reference was extracted to `docs/cli-reference.md`; the 3 loose root
-  docs (`CTO_Agent.md`, `phase_1_acceptance_criteria_patch.md`,
-  `pqi_external_review_2026_04_v2.md`) moved into `docs/`.
+- **Soccer matches resolve end-to-end.** Event-level `startTime` parsing
+  (`polymarket.py`) surfaces soccer/world-cup match events under `-s`; a new
+  **structured-match adapter layer** (`src/pqi/ingestion/providers/`:
+  `StructuredMatchProvider` ABC + `PandaScoreProvider` + `FootballDataProvider`)
+  attaches authoritative match status / score / form / H2H for soccer the
+  way PandaScore does for esports. `match_resolver` is now a thin
+  orchestrator. Esports byte-identical (regression-guarded by
+  `scripts/smoke_structured_providers.py`).
+- **Needs a key to be live:** `FOOTBALL_DATA_API_KEY` in `.env` (free
+  email signup, football-data.org — WC + big-5 + CL/Euros, ~10 req/min).
+  Already added this session.
+- **Console UX:** single `analyze` runs narrate a numbered phase flow;
+  raw `INFO`/`httpx` logs hidden by default (custom rich handler), back
+  under `--verbose`/`-V`; warnings orange. Batch mode unchanged.
+- **Two live-run bug fixes:** football-data `dateTo` inclusive-at-00:00
+  (same-day query returned nothing) and opponent-blind Tavily search now
+  anchored on the pairing (`synthesizer._resolve_matchup`).
+
+**Deferred / follow-ups from session 48 (not blockers):**
+
+- **Council prompt soccer variants** — DOCUMENTED ONLY, no action taken
+  (the reasoning machine is frozen per the user). The Specialist/Contrarian
+  carry esports-specific vocabulary; a sport-neutral broadening is a
+  future *gated* change (A/B vs the v1 frame). See
+  `docs/soccer_structured_data_plan.md` §6/§10.
+- **Transfermarkt player-context** — parked as a *future* enrichment
+  adapter behind the same interface (adds model fields + new council
+  inputs → separate gated phase).
+- **Batch-mode narrated UX** — the Live summary table is untouched; could
+  optionally adopt the phase wording later.
+
+**Session 47 (prior):** `src/` layout — `pqi` installed editable by
+`uv sync`; run from repo root. `config.py` paths anchored to
+`_REPO_ROOT = parents[2]`. README front-door + `docs/cli-reference.md`.
 
 **Session 46 (prior):** persisted state (`history.jsonl`, `cache.db`,
 `agent_weights.json`, `stats.json`, `category_cache.json`, `clv.jsonl`,
@@ -86,7 +98,8 @@ edge, architectural judgment, plus the original code-review stance).
 - `docs/analytics_queries.md` — starter queries for `pqi query` (Q4 uses winning_side semantics)
 - `docs/api-reference.md` — API endpoints, params, response formats (incl. PandaScore)
 - `docs/known-issues.md` — API quirks, edge cases, env setup, persisted state files
-- `docs/session-log.md` — per-session changelog (current through session 43)
+- `docs/session-log.md` — per-session changelog (current through session 48)
+- `docs/soccer_structured_data_plan.md` — soccer adapter design + decision log (session 48)
 - `docs/roadmap.md` — themed catalog (A/B/C); phase section indexes phases
 - `docs/option_b_migration_plan.md` — full Option B rollout plan (steps 1–4 shipped; step 5 blocked on P1 signal quality)
 - `docs/models-reference.md` — detailed Pydantic class signatures (extracted from CLAUDE.md)
