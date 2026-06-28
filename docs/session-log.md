@@ -4,6 +4,69 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 49 — live-soccer `--starts-within` fix + squad market-value enrichment (Phase 1)
+
+Two **ingestion-only** tracks. **Zero aggregator touch** (scoring still reads
+`probability` + the two `confidence_*` fields unchanged); **zero council /
+prompt change**.
+
+### 1. Live soccer matches missing under `-s`/`--live` (`polymarket.py`)
+
+In-progress soccer matches never surfaced under `--starts-within` while live
+esports did. Root cause (confirmed by live Gamma probes): the server-side
+`end_date_min=now` filter drops them. Polymarket stamps soccer markets'
+`endDate` **at kickoff** (`endDate == startTime`, measured), so a match's
+`endDate` is already in the past the moment it kicks off; esports stamps
+`endDate = kickoff + 6h`, so live esports survive the same filter by luck of
+the upstream convention. Fix: for `--live`/`--starts-within` queries only,
+relax `end_date_min` by `config.LIVE_EVENT_GRACE_HOURS` (new knob) in both
+`_fetch_and_filter` and `_fetch_and_filter_groups`; enrichment still drops
+`ended=True`. Default **3.0h** — sized to a match's real max length (90′ +
+stoppage + ET + penalties + resolution lag); 6h was tried first but dragged in
+matches finished ~5.7h earlier (Norway vs France) that weren't yet flagged
+ended. Verified live: Uruguay vs Spain + Cabo Verde vs Saudi Arabia
+(`live=True`) now surface; finished matches excluded; esports unchanged.
+
+### 2. Squad market-value enrichment — Transfermarkt (Phase 1)
+
+New **parallel enrichment dimension** mirroring the `providers/` adapter, for
+soccer national-team fixtures. Research first: football-data.org carries **no**
+value data at any level (empirically confirmed); the signal lives at
+Transfermarkt, where the **aggregate squad value is on the `/clubs/search` hit**
+(no per-player summing). Route C / national-teams-only / briefing-line-only /
+public-instance-for-now; decisions locked in
+[`docs/squad_value_enrichment_plan.md`](squad_value_enrichment_plan.md).
+
+- **Module** `src/pqi/ingestion/valuation/`: `base.py` (`TeamValuationSource`
+  ABC + soccer gate + pure helpers `format_eur` / `build_squad_valuation` /
+  `render_briefing_line`), `transfermarkt_live.py` (public-instance source +
+  senior-team disambiguation excluding U21/U19/women/reserve + persistent TTL
+  JSON cache, all non-fatal), `__init__.py` (registry + `resolve_squad_valuation`
+  orchestrator, priority-ordered fallback, sequential per rate limit).
+- **Contract** (`models.py` + `models-reference.md`): `TeamValuation`,
+  `SquadValuation`, `BriefingDocument.squad_valuation`.
+- **Synthesizer**: resolves valuation **concurrently** with the synthesis LLM
+  call (no added wall-clock), reuses `_resolve_matchup` names, injects ONE
+  `key_context` line at the front, sets the structured field. **No council.py
+  touch.**
+- **`main.py`**: a `💰` phase-reporter detail line.
+- **Observability (D4)**: the record rides on `result.briefing` → persisted per
+  run via `append_result` (no `history.py` change).
+- **Config**: `TRANSFERMARKT_ENABLED`, `TRANSFERMARKT_API_BASE` (env knob,
+  default public test instance — documented fragile/rate-limited), `_FUZZY_THRESHOLD`,
+  `_RATE_LIMIT_DELAY`, `_CACHE_TTL_DAYS`, `_VALUE_CACHE_PATH`.
+- **Tavily question answered (D5)**: no new Tavily work — the structured
+  provider gives a clean deterministic number; `transfermarkt.com` is already an
+  Architect-selectable domain (`synthesizer.py:68`).
+- **Verified live**: England €1.36bn vs Panama €35M (39.4×) injected as
+  `key_context[0]`; esports/economics gate → `None`; cache hits instant;
+  `scripts/smoke_squad_value.py` + structured-provider regression smoke green.
+
+Phase 1 stage-1 monitor (signal-quality preamble) **untouched** — still parked
+at the session-45 n=78 state.
+
+---
+
 ## Session 48 — soccer structured-data support + analyze console UX
 
 Two feature tracks plus two bug fixes surfaced by the first live soccer

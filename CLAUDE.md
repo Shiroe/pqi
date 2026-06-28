@@ -375,44 +375,42 @@ Never leave a session without doing this. It is as important as the code.
 
 ## Current State
 
-**Last updated:** session 48 — **soccer structured-data support +
-analyze console UX**. Two feature tracks, **still zero aggregator touch**
-(scoring reads `probability` + the two `confidence_*` fields exactly as
-before).
+**Last updated:** session 49 — **live-soccer `--starts-within` fix +
+squad market-value enrichment (Phase 1)**. Two **ingestion-only** tracks,
+**still zero aggregator touch** and **zero council/prompt change** (scoring
+reads `probability` + the two `confidence_*` fields exactly as before).
 
-1. **Soccer matches now resolve end-to-end.** (a) Event-level `startTime`
-   parsing in `polymarket.py` makes soccer / world-cup match events surface
-   under `-s`/`--starts-within` (their kickoff lives on the event-level
-   `startTime`, not the market-level `eventStartTime` esports uses).
-   (b) Structured-match data via a new **adapter layer**
-   (`src/pqi/ingestion/providers/`): a `StructuredMatchProvider` ABC + a
-   shared resolution skeleton, with `PandaScoreProvider` (esports, refactored
-   out of the old `match_resolver`) and `FootballDataProvider` (soccer —
-   football-data.org free tier: World Cup + big-5 + CL/Euros).
-   `match_resolver` is now a thin provider-agnostic orchestrator. Esports
-   records are byte-identical (regression-guarded by
-   `scripts/smoke_structured_providers.py`). Additive model fields:
-   `TeamForm.draws`, `MarketData.event_title`. Config: `FOOTBALL_DATA_*`
-   (needs `FOOTBALL_DATA_API_KEY` in `.env`). Transfermarkt evaluated +
-   parked (no official API) as a future player-context enrichment adapter.
-   Design + decisions:
-   [`docs/soccer_structured_data_plan.md`](docs/soccer_structured_data_plan.md).
-2. **Analyze console UX.** Single-analyze runs narrate a numbered phase flow
-   (`🔎 fixture → 📰 news → 📈 order book → 🧠 council → ⚖️ verdict`) with
-   provider sub-steps; raw `INFO`/`httpx` logs are hidden by default (custom
-   rich log handler at WARNING) and return under `--verbose`/`-V`. Warnings
-   render orange, errors red. Routine per-market parse-skips downgraded to
-   `debug`. Batch (multi-select) runs keep their live summary table.
+1. **Live soccer now surfaces under `-s`/`--live`.** Polymarket stamps soccer
+   markets' `endDate` *at kickoff* (esports stamps `kickoff+6h`), so the
+   server-side `end_date_min=now` filter silently dropped in-progress soccer
+   while live esports survived by luck of the upstream convention. Fix: for
+   `--live`/`--starts-within` only, relax `end_date_min` by
+   `config.LIVE_EVENT_GRACE_HOURS` (default **3.0h**, sized to a match's real
+   max length) in both fetch paths; enrichment still drops `ended=True`.
+   Verified live; esports unchanged.
+2. **Squad market-value enrichment (Transfermarkt), Phase 1.** New parallel
+   enrichment dimension `src/pqi/ingestion/valuation/` (mirrors the
+   `providers/` adapter): `TeamValuationSource` ABC + soccer gate + pure
+   helpers (`base.py`), a live public-instance source with senior-team
+   disambiguation + persistent TTL cache (`transfermarkt_live.py`), and a
+   registry + `resolve_squad_valuation` orchestrator (`__init__.py`). For
+   soccer national-team fixtures it injects **one** `key_context` line (e.g.
+   *"Squad market value … England €1.36bn vs Panama €35M — favorite England
+   39.4×"*) the council weighs as a noisy proxy. New models `TeamValuation` /
+   `SquadValuation` + `BriefingDocument.squad_valuation` (persisted per run via
+   the briefing). Resolved concurrently with the synthesis LLM call; non-fatal;
+   soccer-only gate. Config: `TRANSFERMARKT_*` (`API_BASE` is an env knob
+   defaulting to the public **test** instance — fragile/rate-limited,
+   documented; self-host for production). football-data.org carries **no** value
+   data (confirmed). Design + locked decisions + phasing:
+   [`docs/squad_value_enrichment_plan.md`](docs/squad_value_enrichment_plan.md).
+   Next milestone = Phase 2 (dataset-primary + live fallback, Route C end-state).
 
-Two contamination bugs found + fixed on the first live soccer run:
-football-data `dateFrom`/`dateTo` are inclusive-at-00:00 (a same-day query
-returned nothing → fixed by pushing `dateTo` past the window-end date); and
-opponent-blind Tavily search (soccer questions are single-competitor
-"Will X win on <date>?") now anchored on the pairing via a `_resolve_matchup`
-helper (structured record → question → event title) feeding both the Search
-Architect and synthesizer prompts. Bug B from the start-time work
-(`-c world-cup` → futures-only tag 519) is documented, not coded — use
-`-c soccer` / `-c fifa-world-cup` ([`docs/cli-reference.md`](docs/cli-reference.md)).
+Prior session (48): soccer structured-match adapter layer
+(`src/pqi/ingestion/providers/`: `StructuredMatchProvider` ABC +
+`PandaScoreProvider` + `FootballDataProvider`), soccer match start-time
+parsing, matchup-anchored search/synthesis, and the narrated analyze console
+UX (`--verbose`/`-V`). See `docs/session-log.md` §Session 48.
 
 Phase 1 stage-1 monitor untouched — still parked at the session-45 state
 (n=78, 0/4 acceptance — table below unchanged).
@@ -529,9 +527,13 @@ provider-adapter layer + a football-data.org provider), the soccer
 match start-time fix, two contamination fixes (search/synthesis
 opponent-anchoring + a football-data date-range bug), and an analyze
 console-UX pass (narrated phases + quieter logs) — all **ingestion /
-presentation only**. Still zero aggregator changes through session 48;
-scoring still reads `probability` + the two `confidence_*` fields exactly
-as before. See `docs/session-log.md` for per-session detail.
+presentation only**. Session 49 added the live-soccer `--starts-within`
+grace fix (`LIVE_EVENT_GRACE_HOURS`) and squad market-value enrichment
+(Transfermarkt, `src/pqi/ingestion/valuation/`) — one descriptive
+`key_context` line for soccer national-team fixtures, **no council/prompt
+change**. Still zero aggregator changes through session 49; scoring still
+reads `probability` + the two `confidence_*` fields exactly as before. See
+`docs/session-log.md` for per-session detail.
 
 **Option B shadow layer** (session 26, steps 1–4): `AgentVerdict.probability_yes`
 / `probability_no` / `probability_source` persisted; all 7 personas emit
@@ -564,6 +566,13 @@ running the backtest. See
   matchup-anchored search/synthesis. Non-fatal; needs the provider's API key.
 - **Narrated analyze console UX** (session 48): single-run phase flow,
   default-quiet logs (custom rich handler), `--verbose`/`-V` for raw logs.
+- **Squad market-value enrichment** (session 49, `src/pqi/ingestion/valuation/`):
+  Transfermarkt squad-value imbalance as one `key_context` line for soccer
+  national-team fixtures. Descriptive only (never scoring); non-fatal; live
+  public-instance source + persistent TTL cache. `TRANSFERMARKT_*` config;
+  Phase 1 of [`docs/squad_value_enrichment_plan.md`](docs/squad_value_enrichment_plan.md).
+- **Live-event grace** (session 49, `LIVE_EVENT_GRACE_HOURS`): `--live`/`-s`
+  queries surface in-progress soccer (whose `endDate` is stamped at kickoff).
 - **Category-resolution cache** (session 29, `<PQI_DATA_DIR>/category_cache.json`).
 - Two-sided CLOB price history enrichment (YES + NO, non-fatal).
 - History system: persistence, resolution sync, per-agent accuracy, postmortem.

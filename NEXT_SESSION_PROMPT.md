@@ -4,43 +4,51 @@
 > "what to do next." `CLAUDE.md` keeps a short pointer; the full instructions
 > live here. Update this file at the end of every session.
 
-**Last rewritten:** session 48 (2026-06-26) — **soccer structured-data
-support + analyze console UX**. Two feature tracks the user directed;
-**zero aggregator touch** (scoring unchanged). The Phase 1 monitor below
-is untouched and remains the highest-leverage *modeling* priority. Run
-from the repo root with `uv run pqi <cmd>` (session-47 `src/` layout).
+**Last rewritten:** session 49 (2026-06-27) — **live-soccer
+`--starts-within` fix + squad market-value enrichment (Phase 1)**. Two
+**ingestion-only** tracks the user directed; **zero aggregator touch** and
+**zero council/prompt change** (scoring unchanged). The Phase 1 *signal-quality*
+monitor below is untouched and remains the highest-leverage *modeling*
+priority. Run from the repo root with `uv run pqi <cmd>` (session-47 `src/`
+layout).
 
-**Session 48 — what shipped (full detail: `docs/session-log.md`
-§Session 48; design + decisions: `docs/soccer_structured_data_plan.md`):**
+**Session 49 — what shipped (full detail: `docs/session-log.md`
+§Session 49; design + locked decisions: `docs/squad_value_enrichment_plan.md`):**
 
-- **Soccer matches resolve end-to-end.** Event-level `startTime` parsing
-  (`polymarket.py`) surfaces soccer/world-cup match events under `-s`; a new
-  **structured-match adapter layer** (`src/pqi/ingestion/providers/`:
-  `StructuredMatchProvider` ABC + `PandaScoreProvider` + `FootballDataProvider`)
-  attaches authoritative match status / score / form / H2H for soccer the
-  way PandaScore does for esports. `match_resolver` is now a thin
-  orchestrator. Esports byte-identical (regression-guarded by
-  `scripts/smoke_structured_providers.py`).
-- **Needs a key to be live:** `FOOTBALL_DATA_API_KEY` in `.env` (free
-  email signup, football-data.org — WC + big-5 + CL/Euros, ~10 req/min).
-  Already added this session.
-- **Console UX:** single `analyze` runs narrate a numbered phase flow;
-  raw `INFO`/`httpx` logs hidden by default (custom rich handler), back
-  under `--verbose`/`-V`; warnings orange. Batch mode unchanged.
-- **Two live-run bug fixes:** football-data `dateTo` inclusive-at-00:00
-  (same-day query returned nothing) and opponent-blind Tavily search now
-  anchored on the pairing (`synthesizer._resolve_matchup`).
+- **Live soccer now surfaces under `-s`/`--live`.** Polymarket stamps soccer
+  `endDate` at kickoff (esports stamps `kickoff+6h`), so the server-side
+  `end_date_min=now` filter dropped in-progress soccer. Fix: relax
+  `end_date_min` by `config.LIVE_EVENT_GRACE_HOURS` (default **3.0h**) for
+  `--live`/`--starts-within` only, in both fetch paths; enrichment still drops
+  `ended=True`. Verified live; esports unchanged.
+- **Squad market-value enrichment (Transfermarkt), Phase 1.** New
+  `src/pqi/ingestion/valuation/` module (ABC + soccer gate + live
+  public-instance source + TTL cache + `resolve_squad_valuation` orchestrator).
+  One descriptive `key_context` line for soccer national-team fixtures (e.g.
+  *"… England €1.36bn vs Panama €35M — favorite England 39.4×"*) the council
+  weighs as a noisy proxy. New models `TeamValuation`/`SquadValuation` +
+  `BriefingDocument.squad_valuation` (persisted per run). Non-fatal; resolved
+  concurrently with synthesis; **no council/prompt/scoring touch**.
+- **Live source uses the public TEST instance** (`TRANSFERMARKT_API_BASE`,
+  default `https://transfermarkt-api.fly.dev`) — fragile/rate-limited, fine for
+  validation. **Phase 2 = dataset-primary + live fallback** (Route C end-state);
+  optionally self-host the scraper and repoint the knob.
+- **Smoke:** `scripts/smoke_squad_value.py` (offline asserts + live probe).
 
-**Deferred / follow-ups from session 48 (not blockers):**
+**Deferred / follow-ups (not blockers):**
 
-- **Council prompt soccer variants** — DOCUMENTED ONLY, no action taken
-  (the reasoning machine is frozen per the user). The Specialist/Contrarian
-  carry esports-specific vocabulary; a sport-neutral broadening is a
-  future *gated* change (A/B vs the v1 frame). See
-  `docs/soccer_structured_data_plan.md` §6/§10.
-- **Transfermarkt player-context** — parked as a *future* enrichment
-  adapter behind the same interface (adds model fields + new council
-  inputs → separate gated phase).
+- **Squad value Phase 2 (Route C end-state)** — add a dataset-snapshot source
+  (`dcaribou/transfermarkt-datasets`, DuckDB, weekly, national-team coverage)
+  as the **primary**, live as fallback; `scripts/refresh_squad_values.py`. The
+  registry in `valuation/__init__.py` is the only wiring point. Removes the
+  public-test-instance fragility. **Phase 3 (council reads the value
+  explicitly) stays gated** behind Phase-2 observability showing the imbalance
+  correlates with outcomes. See `docs/squad_value_enrichment_plan.md` §7.
+- **Council prompt soccer variants** — DOCUMENTED ONLY, no action (reasoning
+  machine frozen per the user). Sport-neutral broadening is a future *gated*
+  change. `docs/soccer_structured_data_plan.md` §6/§10.
+- **`LIVE_EVENT_GRACE_HOURS` tuning** — 3.0h default verified once; if live
+  matches ever get dropped near full-time + long resolution lag, widen it.
 - **Batch-mode narrated UX** — the Live summary table is untouched; could
   optionally adopt the phase wording later.
 
