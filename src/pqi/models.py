@@ -230,6 +230,46 @@ class EventGroup(BaseModel):
         return self
 
 
+class TeamValuation(BaseModel):
+    """Aggregate squad market value for ONE party, from a valuation source
+    (Transfermarkt today). Team-level and slow-moving — a different concern
+    from `StructuredMatchRecord` (match-level), so it lives on its own.
+
+    `market_value_eur` is None when the team could not be resolved at the
+    source (not found, only youth/women variants matched, or below the fuzzy
+    threshold) — the matchup record then suppresses the imbalance line."""
+
+    name: str
+    """The name we resolved at the source (its canonical club/national-team name)."""
+    market_value_eur: int | None = None
+    """Total squad market value in EUR, or None if unresolved."""
+    squad_size: int | None = None
+    """Squad size reported by the source, or None."""
+    source: str
+    """Source id, e.g. "transfermarkt-live" / "transfermarkt-dataset"."""
+    as_of: datetime | None = None
+    """When the value was fetched/snapshotted, UTC (reproducibility)."""
+
+
+class SquadValuation(BaseModel):
+    """Matchup-level squad-value comparison for the current market's fixture.
+
+    Produced by `pqi/ingestion/valuation` for soccer national-team markets and
+    attached to the briefing. Descriptive context only — a NOISY strength proxy
+    surfaced to the council as one key_context line; it does NOT feed scoring."""
+
+    team_a: TeamValuation
+    team_b: TeamValuation
+    favorite_name: str | None = None
+    """Higher-value side's name. None when either side is unresolved or the
+    values tie exactly."""
+    value_ratio: float | None = None
+    """max(value) / min(value), ≥ 1.0. None when either side is unresolved or
+    the smaller value is 0."""
+    source: str
+    """Source id that produced this comparison (the first that resolved a team)."""
+
+
 class BriefingDocument(BaseModel):
     """
     Synthesized research package produced by synthesizer.py.
@@ -270,6 +310,12 @@ class BriefingDocument(BaseModel):
     and the H2H / recent-form context. None when the resolver was
     disabled, no provider covered the category, or no candidate cleared
     the fuzzy-match confidence threshold."""
+    squad_valuation: SquadValuation | None = None
+    """Optional squad-market-value comparison for soccer national-team
+    fixtures (Transfermarkt). Descriptive only — surfaced to the council as
+    one `key_context` line (a noisy strength proxy); never feeds scoring.
+    None for non-soccer markets, when the source is disabled/unreachable, or
+    when neither team resolved."""
 
 
 class AgentVerdict(BaseModel):

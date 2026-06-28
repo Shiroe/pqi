@@ -49,6 +49,30 @@ class BriefingDocument(BaseModel):
     data_freshness: datetime
     price_history: PriceHistory | None  # CLOB trend data (None if fetch failed)
     structured_match: StructuredMatchRecord | None  # PandaScore (esports only; None on fetch fail or non-esports)
+    squad_valuation: SquadValuation | None  # Transfermarkt squad-value imbalance (soccer national teams; None otherwise)
+```
+
+## Squad market value (Transfermarkt; soccer national teams)
+
+Descriptive enrichment only — surfaced to the council as one `key_context`
+line (a noisy strength proxy); **never feeds scoring**. Non-fatal: `None` for
+non-soccer markets, disabled/unreachable source, or when neither side resolves.
+See [`docs/squad_value_enrichment_plan.md`](squad_value_enrichment_plan.md).
+
+```python
+class TeamValuation(BaseModel):
+    name: str                       # resolved club/national-team name at the source
+    market_value_eur: int | None    # aggregate squad value; None if unresolved
+    squad_size: int | None
+    source: str                     # "transfermarkt-live" | "transfermarkt-dataset"
+    as_of: datetime | None          # fetch/snapshot time (reproducibility)
+
+class SquadValuation(BaseModel):
+    team_a: TeamValuation
+    team_b: TeamValuation
+    favorite_name: str | None       # higher-value side; None if a side missing / exact tie
+    value_ratio: float | None       # max/min (≥1.0); None if a side missing / min is 0
+    source: str
 ```
 
 ## PandaScore structured data (esports only)

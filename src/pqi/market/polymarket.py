@@ -424,7 +424,15 @@ async def _fetch_and_filter(
 
     # end_date_min/max = RESOLUTION time bounds (when markets expire).
     # starts_within_hours is purely client-side (API has no eventStartTime filter).
+    #
+    # For --live / --starts-within we subtract a grace buffer so in-progress
+    # matches survive: Polymarket stamps soccer markets' endDate at kickoff
+    # (esports stamps kickoff+6h), so a live soccer match's endDate is already
+    # past and a strict end_date_min=now would silently drop it. Enrichment
+    # still drops anything reporting ended=True. See config.LIVE_EVENT_GRACE_HOURS.
     end_date_min = now  # exclude already-resolved markets
+    if has_client_filters:
+        end_date_min = now - timedelta(hours=config.LIVE_EVENT_GRACE_HOURS)
     end_date_max = (
         now + timedelta(hours=resolve_within_hours)
         if resolve_within_hours is not None
@@ -737,7 +745,16 @@ async def _fetch_and_filter_groups(
 
     # end_date_min/max control RESOLUTION time bounds, NOT event start time.
     # starts_within_hours is purely client-side (API has no eventStartTime filter).
+    #
+    # For --live / --starts-within, relax end_date_min by a grace buffer so
+    # in-progress matches survive the server filter: Polymarket stamps soccer
+    # markets' endDate at kickoff (esports stamps kickoff+6h), so a live soccer
+    # match's endDate is already past and a strict end_date_min=now drops it
+    # before enrichment. Enrichment still removes anything ended=True.
+    # See config.LIVE_EVENT_GRACE_HOURS.
     end_date_min = now
+    if has_client_filters:
+        end_date_min = now - timedelta(hours=config.LIVE_EVENT_GRACE_HOURS)
     end_date_max = (
         now + timedelta(hours=resolve_within_hours)
         if resolve_within_hours is not None

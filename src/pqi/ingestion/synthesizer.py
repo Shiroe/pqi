@@ -24,7 +24,13 @@ from tavily import AsyncTavilyClient
 from pqi import config
 from pqi.llm.client import chat as llm_chat
 from pqi.ingestion.providers import provider_display_name
-from pqi.models import BriefingDocument, MarketData, StructuredMatchRecord
+from pqi.ingestion.valuation import render_briefing_line, resolve_squad_valuation
+from pqi.models import (
+    BriefingDocument,
+    MarketData,
+    SquadValuation,
+    StructuredMatchRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +456,18 @@ def _matchup_line(matchup: tuple[str, str] | None) -> str:
     )
 
 
+async def _safe_resolve_valuation(
+    market: MarketData, matchup: tuple[str, str] | None
+) -> SquadValuation | None:
+    """Non-fatal wrapper around the squad-value resolver. Any failure → None;
+    squad valuation is descriptive enrichment and must never break a briefing."""
+    try:
+        return await resolve_squad_valuation(market, matchup)
+    except Exception as exc:
+        logger.warning("squad valuation failed for market %s: %s", market.id, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Search Architect — LLM-driven query planning
 # ---------------------------------------------------------------------------
@@ -723,7 +741,13 @@ async def build_briefing(
     event_start_display, time_status = _compute_time_status(market)
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     structured_block = _format_structured_block(structured_match)
-    matchup_line = _matchup_line(_resolve_matchup(market, structured_match))
+    matchup = _resolve_matchup(market, structured_match)
+    matchup_line = _matchup_line(matchup)
+
+    # Kick off squad-value enrichment concurrently with the synthesis LLM call
+    # so it adds no wall-clock latency (it's gated to soccer + rate-limited, so
+    # it may do brief network I/O). Non-fatal; awaited below.
+    valuation_task = asyncio.create_task(_safe_resolve_valuation(market, matchup))
 
     user_msg = _SYNTHESIZER_USER_TMPL.format(
         today=today_str,
@@ -757,6 +781,16 @@ async def build_briefing(
         key_context = ["No additional context available."]
     # prior_match_facts: empty-list is the correct default — many markets
     # have no prior encounters between named parties. Do not synthesize one.
+
+    # Squad-value enrichment (soccer national teams). Inject ONE descriptive
+    # line at the front of key_context so the council weighs it as a noisy
+    # strength proxy — no scoring/prompt change. The structured record is also
+    # attached to the briefing for persistence/observability.
+    squad_valuation = await valuation_task
+    squad_line = render_briefing_line(squad_valuation)
+    if squad_line:
+        key_context = [c for c in key_context if c != "No additional context available."]
+        key_context = [squad_line] + key_context
 
     disambiguation_warnings = _detect_completion_contamination(
         market, news_summary, side_yes_case, side_no_case,
@@ -801,6 +835,7 @@ async def build_briefing(
         prior_match_facts=prior_match_facts,
         disambiguation_warnings=disambiguation_warnings,
         structured_match=structured_match,
+        squad_valuation=squad_valuation,
         data_freshness=datetime.now(timezone.utc),
     )
 

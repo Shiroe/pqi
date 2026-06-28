@@ -166,6 +166,44 @@ FOOTBALL_DATA_RECENT_FORM_COUNT: int = int(os.getenv("FOOTBALL_DATA_RECENT_FORM_
 the TeamForm snapshot for a soccer match."""
 
 # ---------------------------------------------------------------------------
+# Squad market-value enrichment (Transfermarkt) — soccer national teams.
+# Descriptive briefing-line only; never feeds scoring. The cache PATH lives
+# with the other PQI_DATA_DIR-derived paths below (PQI_DATA_DIR is defined
+# later in this file). See docs/squad_value_enrichment_plan.md.
+# ---------------------------------------------------------------------------
+
+TRANSFERMARKT_ENABLED: bool = os.getenv("TRANSFERMARKT_ENABLED", "true").lower() in {
+    "1", "true", "yes",
+}
+"""Master switch for squad-value enrichment. Non-fatal when off or unreachable
+— the briefing simply carries no squad_valuation."""
+
+# Env-OVERRIDABLE on purpose (not a hard literal): the value source is a
+# community Transfermarkt scraper, and swapping the public test instance for a
+# self-hosted one must be a config change, not a code change. The default points
+# at the public test instance — fragile and rate-limited, fine for validation;
+# self-host (felipeall/transfermarkt-api) for anything beyond that.
+TRANSFERMARKT_API_BASE: str = os.getenv(
+    "TRANSFERMARKT_API_BASE", "https://transfermarkt-api.fly.dev"
+)
+
+TRANSFERMARKT_FUZZY_THRESHOLD: int = int(
+    os.getenv("TRANSFERMARKT_FUZZY_THRESHOLD", "80")
+)
+"""Minimum rapidfuzz score (0-100) for a club-search hit to be accepted as the
+queried national team. Mirrors the football-data threshold."""
+
+TRANSFERMARKT_RATE_LIMIT_DELAY: float = float(
+    os.getenv("TRANSFERMARKT_RATE_LIMIT_DELAY", "1.6")
+)
+"""Delay (seconds) between live Transfermarkt calls. The public instance limits
+to ~2 requests / 3 seconds; 1.6s stays under that."""
+
+TRANSFERMARKT_CACHE_TTL_DAYS: int = int(os.getenv("TRANSFERMARKT_CACHE_TTL_DAYS", "7"))
+"""How long a cached team valuation stays fresh. National-team squad value is
+near-static, so a long TTL is safe and spares the rate-limited instance."""
+
+# ---------------------------------------------------------------------------
 # Polymarket Gamma API
 # ---------------------------------------------------------------------------
 
@@ -199,6 +237,18 @@ SHORT_WINDOW_HOURS: int = int(os.getenv("SHORT_WINDOW_HOURS", "4"))
 MIN_VOLUME_SHORT_WINDOW_USD: float = float(
     os.getenv("MIN_VOLUME_SHORT_WINDOW_USD", "500")
 )
+# Grace buffer (hours) subtracted from the server-side end_date_min filter for
+# --live / --starts-within queries. Polymarket stamps soccer markets' endDate
+# at KICKOFF (not kickoff + match duration, as esports does), so a live match's
+# endDate is already in the past the moment it kicks off and the default
+# end_date_min=now filter would silently drop it. This grace keeps in-progress
+# matches in the candidate set; enrichment then drops any that report ended=True.
+# Sized to a soccer match's real max length: 90' + stoppage + extra time +
+# penalties + short resolution lag ≈ 3h. (Deliberately NOT esports' kickoff+6h
+# endDate padding — a 6h window drags in matches that finished hours ago but
+# aren't yet flagged ended=True.) Applies to all sports; no-op for esports,
+# whose endDate is already in the future during a live match.
+LIVE_EVENT_GRACE_HOURS: float = float(os.getenv("LIVE_EVENT_GRACE_HOURS", "3.0"))
 
 # ---------------------------------------------------------------------------
 # Analyze batch mode
@@ -372,6 +422,13 @@ CATEGORY_CACHE_PATH: str = os.getenv(
     "CATEGORY_CACHE_PATH",
     str(PQI_DATA_DIR / "category_cache.json"),
 )
+TRANSFERMARKT_VALUE_CACHE_PATH: str = os.getenv(
+    "TRANSFERMARKT_VALUE_CACHE_PATH",
+    str(PQI_DATA_DIR / "transfermarkt_value_cache.json"),
+)
+"""Persistent JSON cache of resolved squad valuations (same pattern as the
+category cache). Delete the file to force a refresh. See
+docs/squad_value_enrichment_plan.md."""
 
 # ---------------------------------------------------------------------------
 # Logging

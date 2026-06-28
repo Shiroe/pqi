@@ -960,6 +960,7 @@ async def _run_analysis(
     """
     from pqi.ingestion.synthesizer import build_briefing
     from pqi.ingestion.match_resolver import resolve_match
+    from pqi.ingestion.valuation import format_eur
     from pqi.agents.council import run_council
     from pqi.scoring import build_council_result
     from pqi.cache import get_cached, store_result
@@ -1021,6 +1022,17 @@ async def _run_analysis(
     reporter.detail(
         f"[dim]briefing ready · {len(briefing.key_facts)} key facts[/dim]"
     )
+    sv = briefing.squad_valuation
+    if sv is not None and sv.value_ratio is not None:
+        fav = (
+            f"  [dim]· favorite {escape(sv.favorite_name)} {sv.value_ratio:.1f}×[/dim]"
+            if sv.favorite_name
+            else "  [dim]· evenly matched[/dim]"
+        )
+        reporter.detail(
+            f"💰 [bold]{escape(sv.team_a.name)}[/bold] {format_eur(sv.team_a.market_value_eur)} "
+            f"vs [bold]{escape(sv.team_b.name)}[/bold] {format_eur(sv.team_b.market_value_eur)}{fav}"
+        )
 
     _emit("fetching price history", 50)
     reporter.phase("📈", "Charting the order book…")
