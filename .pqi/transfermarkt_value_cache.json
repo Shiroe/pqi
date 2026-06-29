@@ -1,0 +1,104 @@
+{
+  "algeria": {
+    "as_of": "2026-06-27T16:44:40.408466+00:00",
+    "market_value_eur": 256899999,
+    "name": "Algeria",
+    "squad_size": 26
+  },
+  "argentina": {
+    "as_of": "2026-06-27T16:40:08.843741+00:00",
+    "market_value_eur": 807500000,
+    "name": "Argentina",
+    "squad_size": 26
+  },
+  "austria": {
+    "as_of": "2026-06-27T16:44:42.496649+00:00",
+    "market_value_eur": 245200000,
+    "name": "Austria",
+    "squad_size": 26
+  },
+  "canada": {
+    "as_of": "2026-06-28T13:32:54.418189+00:00",
+    "market_value_eur": 198650000,
+    "name": "Canada",
+    "squad_size": 26
+  },
+  "colombia": {
+    "as_of": "2026-06-27T15:23:27.206552+00:00",
+    "market_value_eur": 302350000,
+    "name": "Colombia",
+    "squad_size": 26
+  },
+  "croatia": {
+    "as_of": "2026-06-27T15:19:18.496643+00:00",
+    "market_value_eur": 387300000,
+    "name": "Croatia",
+    "squad_size": 26
+  },
+  "england": {
+    "as_of": "2026-06-27T12:51:46.718830+00:00",
+    "market_value_eur": 1360000000,
+    "name": "England",
+    "squad_size": 26
+  },
+  "france": {
+    "as_of": "2026-06-27T12:34:54.697576+00:00",
+    "market_value_eur": 1520000000,
+    "name": "France",
+    "squad_size": 26
+  },
+  "ghana": {
+    "as_of": "2026-06-27T15:19:20.921351+00:00",
+    "market_value_eur": 234350000,
+    "name": "Ghana",
+    "squad_size": 26
+  },
+  "jordan": {
+    "as_of": "2026-06-27T16:40:06.570373+00:00",
+    "market_value_eur": 20300000,
+    "name": "Jordan",
+    "squad_size": 26
+  },
+  "norway": {
+    "as_of": "2026-06-27T12:34:56.884690+00:00",
+    "market_value_eur": 589900000,
+    "name": "Norway",
+    "squad_size": 26
+  },
+  "panama": {
+    "as_of": "2026-06-27T12:51:44.059021+00:00",
+    "market_value_eur": 34550000,
+    "name": "Panama",
+    "squad_size": 26
+  },
+  "portugal": {
+    "as_of": "2026-06-27T15:23:29.416374+00:00",
+    "market_value_eur": 1010000000,
+    "name": "Portugal",
+    "squad_size": 26
+  },
+  "south africa": {
+    "as_of": "2026-06-28T13:32:52.213143+00:00",
+    "market_value_eur": 49250000,
+    "name": "South Africa",
+    "squad_size": 26
+  },
+  "spain": {
+    "as_of": "2026-06-27T12:33:43.845924+00:00",
+    "market_value_eur": 1220000000,
+    "name": "Spain",
+    "squad_size": 26
+  },
+  "uruguay": {
+    "as_of": "2026-06-27T12:33:41.480463+00:00",
+    "market_value_eur": 359300000,
+    "name": "Uruguay",
+    "squad_size": 26
+  },
+  "uzbekistan": {
+    "as_of": "2026-06-27T15:31:08.602628+00:00",
+    "market_value_eur": 85130000,
+    "name": "Uzbekistan",
+    "squad_size": 26
+  }
+}

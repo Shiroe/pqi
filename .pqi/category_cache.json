@@ -1,7 +1,42 @@
 {
+  "cs2": {
+    "match_type": "tag",
+    "resolved_at": "2026-06-27T00:33:53.199755+00:00",
+    "value": "100677"
+  },
   "esports": {
     "match_type": "tag",
     "resolved_at": "2026-04-16T14:31:18.976008+00:00",
     "value": "64"
+  },
+  "fifa-world-cup": {
+    "match_type": "tag",
+    "resolved_at": "2026-06-26T13:29:54.406233+00:00",
+    "value": "102232"
+  },
+  "league-of-legends": {
+    "match_type": "series",
+    "resolved_at": "2026-06-27T00:33:53.598716+00:00",
+    "value": "10311"
+  },
+  "soccer": {
+    "match_type": "tag",
+    "resolved_at": "2026-06-26T13:29:52.014747+00:00",
+    "value": "100350"
+  },
+  "sports": {
+    "match_type": "tag",
+    "resolved_at": "2026-06-18T19:27:16.612963+00:00",
+    "value": "1"
+  },
+  "world-cup": {
+    "match_type": "tag",
+    "resolved_at": "2026-06-18T19:28:31.911315+00:00",
+    "value": "519"
+  },
+  "world-series": {
+    "match_type": "tag",
+    "resolved_at": "2026-06-18T19:28:40.997830+00:00",
+    "value": "100021"
   }
 }
