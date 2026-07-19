@@ -1,45 +1,45 @@
 {
-  "computed_at": "2026-06-28T18:24:02.568502+00:00",
+  "computed_at": "2026-06-30T14:08:01.814039+00:00",
   "min_samples": 30,
   "shrink": 2.0,
-  "council_avg_lean_rate": 0.6311960616856932,
+  "council_avg_lean_rate": 0.630695794336501,
   "weights": {
-    "The Rules Lawyer": 1.0769256504167644,
-    "The Bull": 0.9678599774689498,
-    "The Base-Rate Statistician": 1.0709412099619469,
-    "The Sentiment Analyst": 1.0828672683996332,
-    "The Domain Specialist": 1.0685431284271747,
-    "The Contrarian": 1.0587757598402925,
-    "The Bear": 0.6740870054852379
+    "The Rules Lawyer": 1.082412948848813,
+    "The Bull": 0.96610431967397,
+    "The Base-Rate Statistician": 1.0695818626544316,
+    "The Sentiment Analyst": 1.084695367848737,
+    "The Domain Specialist": 1.0672797399983267,
+    "The Contrarian": 1.0601004184317937,
+    "The Bear": 0.6698253425439291
   },
   "sources": {
     "The Rules Lawyer": {
-      "lean_rate": 0.6696588868940754,
-      "lean_n": 557
+      "lean_rate": 0.6719022687609075,
+      "lean_n": 573
     },
     "The Bull": {
-      "lean_rate": 0.6151260504201681,
-      "lean_n": 595
+      "lean_rate": 0.613747954173486,
+      "lean_n": 611
     },
     "The Base-Rate Statistician": {
-      "lean_rate": 0.6666666666666666,
-      "lean_n": 549
+      "lean_rate": 0.6654867256637168,
+      "lean_n": 565
     },
     "The Sentiment Analyst": {
-      "lean_rate": 0.6726296958855098,
-      "lean_n": 559
+      "lean_rate": 0.6730434782608695,
+      "lean_n": 575
     },
     "The Domain Specialist": {
-      "lean_rate": 0.6654676258992805,
-      "lean_n": 556
+      "lean_rate": 0.6643356643356644,
+      "lean_n": 572
     },
     "The Contrarian": {
-      "lean_rate": 0.6605839416058394,
-      "lean_n": 548
+      "lean_rate": 0.6607460035523979,
+      "lean_n": 563
     },
     "The Bear": {
-      "lean_rate": 0.46823956442831216,
-      "lean_n": 551
+      "lean_rate": 0.4656084656084656,
+      "lean_n": 567
     }
   }
 }

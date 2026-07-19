@@ -1,10 +1,10 @@
 {
-  "computed_at": "2026-06-28T18:24:02.494574Z",
-  "true_win_rate": 0.7523809523809524,
-  "sample_size": 105,
-  "correct_buys": 79,
-  "wrong_buys": 26,
-  "kelly_fraction_at_p75": 0.00952380952380949,
+  "computed_at": "2026-06-30T14:08:01.733228Z",
+  "true_win_rate": 0.7454545454545455,
+  "sample_size": 110,
+  "correct_buys": 82,
+  "wrong_buys": 28,
+  "kelly_fraction_at_p75": 0.0,
   "below_min_samples": false,
   "band_stats": [
     {
@@ -13,7 +13,7 @@
       "n": 0,
       "wins": 0,
       "raw_wr": null,
-      "smoothed_wr": 0.7523809523809524
+      "smoothed_wr": 0.7454545454545455
     },
     {
       "lo": 0.5,
@@ -21,7 +21,7 @@
       "n": 9,
       "wins": 3,
       "raw_wr": 0.3333333333333333,
-      "smoothed_wr": 0.48299319727891155
+      "smoothed_wr": 0.4805194805194805
     },
     {
       "lo": 0.6,
@@ -29,23 +29,23 @@
       "n": 30,
       "wins": 22,
       "raw_wr": 0.7333333333333333,
-      "smoothed_wr": 0.7360544217687075
+      "smoothed_wr": 0.7350649350649351
     },
     {
       "lo": 0.7,
       "hi": 0.8,
-      "n": 19,
-      "wins": 14,
-      "raw_wr": 0.7368421052631579,
-      "smoothed_wr": 0.7400793650793651
+      "n": 21,
+      "wins": 15,
+      "raw_wr": 0.7142857142857143,
+      "smoothed_wr": 0.7202797202797202
     },
     {
       "lo": 0.8,
       "hi": 0.95,
-      "n": 43,
-      "wins": 39,
-      "raw_wr": 0.9069767441860465,
-      "smoothed_wr": 0.8908730158730158
+      "n": 46,
+      "wins": 41,
+      "raw_wr": 0.8913043478260869,
+      "smoothed_wr": 0.8770053475935828
     }
   ],
   "shrinkage_k": 5.0
