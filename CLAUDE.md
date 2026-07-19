@@ -348,6 +348,7 @@ change in a code edit, it stays as a literal.
 | Analyze pipeline diagram (Mermaid) | [`docs/analyze-pipeline.md`](docs/analyze-pipeline.md) | Detailed pipeline flow |
 | Analytics starter queries | [`docs/analytics_queries.md`](docs/analytics_queries.md) | Using `pqi query "<SQL>"` |
 | Phase 0 retrospective | [`docs/retrospectives/phase_0_edge_2026_04.md`](docs/retrospectives/phase_0_edge_2026_04.md) | Reference for P0 verdict (council Brier, CLV, per-band) |
+| Repo knowledge graph (graphify) | [`docs/knowledge-graph.md`](docs/knowledge-graph.md) | Exploring code/doc structure via `graphify query` or `graphify-out/graph.html` |
 
 ---
 

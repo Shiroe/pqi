@@ -4,6 +4,24 @@ Per-session change log with detailed diffs. Referenced from CLAUDE.md.
 
 ---
 
+## Session 50 — repo knowledge graph (graphify) — tooling only
+
+Zero code touch — no `src/`, `scripts/`, or config change. Added a
+queryable knowledge graph of the whole repo under `graphify-out/`, built
+with the `graphifyy` package (`uv tool install graphifyy`): 921 nodes /
+1,708 edges / 65 labeled communities from 94 files (55 code via AST +
+39 docs/reports via semantic extraction, ~476k input tokens).
+
+Committed artifacts: `graph.html` (interactive view), `graph.json`,
+`GRAPH_REPORT.md` (god nodes, surprising connections, cohesion),
+`manifest.json` + `cache/` (so `graphify update` and rebuilds on other
+machines are incremental), `cost.json`. Machine-specific sidecars stay
+git-ignored. Usage + notable findings (`MarketData` as the 20-community
+universal contract; sealed provider-adapter layer) + caveats (262
+dangling doc→code edges): [`knowledge-graph.md`](knowledge-graph.md).
+
+---
+
 ## Session 49 — live-soccer `--starts-within` fix + squad market-value enrichment (Phase 1)
 
 Two **ingestion-only** tracks. **Zero aggregator touch** (scoring still reads

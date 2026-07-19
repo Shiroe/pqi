@@ -57,3 +57,9 @@ Thumbs.db
 !.pqi/**
 
 skills/
+
+# graphify knowledge graph — commit artifacts + cache, not machine-specific
+# sidecars (.graphify_python/.graphify_root are covered by the .* rule above
+# and regenerate per machine) or the transient query stamp
+!graphify-out/.graphify_labels.json
+graphify-out/cache/last_query_stamp

@@ -12,6 +12,13 @@ monitor below is untouched and remains the highest-leverage *modeling*
 priority. Run from the repo root with `uv run pqi <cmd>` (session-47 `src/`
 layout).
 
+**Session 50 (2026-07-19, tooling-only):** repo knowledge graph added
+under `graphify-out/` (921 nodes / 65 communities; `graphify query`,
+`graph.html`). No code, config, or pipeline touch — priorities below are
+unchanged from session 49. Docs: `docs/knowledge-graph.md`;
+`docs/session-log.md` §Session 50. On a new machine:
+`uv tool install graphifyy` and the committed graph + cache work as-is.
+
 **Session 49 — what shipped (full detail: `docs/session-log.md`
 §Session 49; design + locked decisions: `docs/squad_value_enrichment_plan.md`):**
 
