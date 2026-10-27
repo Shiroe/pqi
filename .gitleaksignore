@@ -1,0 +1,3 @@
+# False positive: graphify's stat-index stores SHA-256 file content hashes,
+# which the generic-api-key rule mistakes for a key.
+83fe288b0575cc8be20d54f6e62e4fe32b8f1638:graphify-out/cache/stat-index.json:generic-api-key:1

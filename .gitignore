@@ -52,6 +52,7 @@ Thumbs.db
 .*
 !.claude
 !.gitignore
+!.gitleaksignore
 !.env.example
 !.pqi
 !.pqi/**

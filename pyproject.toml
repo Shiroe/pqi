@@ -3,6 +3,8 @@ name = "pqi"
 version = "0.1.0"
 description = "Polymarket Qualitative Intelligence — 7-agent LLM council for event-driven prediction markets"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "typer>=0.12",
     "rich>=13.7",
